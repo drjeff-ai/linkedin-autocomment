@@ -1,0 +1,3716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LinkedIn Autopilot</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0a0a0a;
+  --surface: #111111;
+  --surface-2: #1a1a1a;
+  --surface-3: #222222;
+  --border: #2a2a2a;
+  --border-light: #333333;
+  --text: #e8e8e8;
+  --text-dim: #888888;
+  --text-muted: #555555;
+  --accent: #ffffff;
+  --green: #22c55e;
+  --green-dim: #16a34a;
+  --red: #ef4444;
+  --red-dim: #dc2626;
+  --yellow: #eab308;
+  --mono: 'IBM Plex Mono', monospace;
+  --sans: 'Outfit', sans-serif;
+}
+
+html { font-size: 14px; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  line-height: 1.6;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ─── Layout ──────────────────────────────────────────── */
+
+.app {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 2rem 2rem 6rem;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.5rem 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2rem;
+}
+
+.logo {
+  font-family: var(--mono);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.logo span { color: var(--text-muted); font-weight: 300; }
+
+/* ─── Profile Bar ─────────────────────────────────────── */
+
+.profile-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.profile-select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.profile-select:hover, .profile-select:focus {
+  border-color: var(--text-muted);
+}
+
+.btn-icon {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  font-size: 1.1rem;
+}
+
+.btn-icon:hover { border-color: var(--text-muted); color: var(--text); }
+
+/* ─── Pipeline Steps ──────────────────────────────────── */
+
+.pipeline {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 2.5rem;
+  background: var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.pipeline-step {
+  flex: 1;
+  padding: 1rem 1.25rem;
+  background: var(--surface);
+  cursor: pointer;
+  transition: all 0.25s;
+  position: relative;
+  text-align: center;
+}
+
+.pipeline-step:first-child { border-radius: 8px 0 0 8px; }
+.pipeline-step:last-child { border-radius: 0 8px 8px 0; }
+
+.pipeline-step:hover { background: var(--surface-2); }
+
+.pipeline-step.active {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.pipeline-step .step-num {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  opacity: 0.5;
+  display: block;
+  margin-bottom: 0.25rem;
+}
+
+.pipeline-step.active .step-num { opacity: 0.6; }
+
+.pipeline-step .step-label {
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+
+.pipeline-step .step-count {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  opacity: 0.5;
+  margin-top: 0.2rem;
+}
+
+/* ─── Panels ──────────────────────────────────────────── */
+
+.panel { display: none; animation: fadeIn 0.3s ease; }
+.panel.active { display: block; }
+/* The scheduled-posting section's cards.
+   NOT `.panel`: that class belongs to the comment pipeline's step
+   switcher, which does querySelectorAll('.panel') and toggles
+   `active` on EVERY match in the document. Any card of ours wearing
+   it is display:none by default and would be forcibly deactivated
+   again the moment a pipeline step is shown. */
+.schp-card { display: block; animation: fadeIn 0.3s ease; }
+
+/* Per-row image status. A row whose image was asked for and did not
+   arrive must never render as an empty cell - blank reads as
+   "text-only, on purpose", which is how a whole calendar published
+   imageless without anyone noticing. */
+.schp-thumb {
+  width: 56px; height: 56px; flex: 0 0 56px; border-radius: 6px;
+  overflow: hidden; display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+  font-size: 0.62rem; text-align: center; line-height: 1.2;
+  color: var(--text-dim);
+}
+.schp-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.schp-thumb-problem { border-color: #ff9a72; background: rgba(255,154,114,0.12);
+                      color: #ff9a72; }
+.schp-thumb-none { border-style: dashed; }
+/* "has an image, not uploaded yet" must not look like "no image". Scanning
+   for which posts carry a picture is the whole point. */
+.schp-thumb-ready { border-style: dashed; border-color: #4dd6b0; color: #4dd6b0;
+                    background: rgba(77,214,176,0.10); }
+.schp-imgline { margin-top: 0.35rem; font-size: 0.75rem; }
+.schp-imgline-problem { color: #ff9a72; font-weight: 600; }
+.schp-imgline-none { color: var(--text-dim); }
+.schp-imgline-ok { color: var(--text-dim); }
+
+/* There are TWO background feeders and they do very different things:
+   the comment sweeper drives a real browser, the post drain only calls
+   Buffer's API. Confusing them means thinking the browser is idle when
+   it is not, so they never share a colour, an icon or a switch. */
+.feeder { border-left: 3px solid var(--feeder-accent); padding-left: 0.9rem; }
+.feeder-comment { --feeder-accent: #c4a6ff; }
+.feeder-drain   { --feeder-accent: #4dd6b0; }
+.feeder-badge {
+  display: inline-block; margin-left: 0.5rem; padding: 0.1rem 0.5rem;
+  border-radius: 10px; font-size: 0.68rem; font-weight: 600;
+  letter-spacing: 0.02em; vertical-align: middle;
+  color: var(--feeder-accent);
+  background: color-mix(in srgb, var(--feeder-accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--feeder-accent) 40%, transparent);
+}
+.feeder-switch {
+  display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;
+  padding: 0.3rem 0.6rem; border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--feeder-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--feeder-accent) 10%, transparent);
+}
+.feeder-switch strong { color: var(--feeder-accent); font-size: 0.85rem; }
+.feeder-status {
+  font-size: 0.82rem; color: var(--text-dim);
+  padding: 0.5rem 0.7rem; border-radius: 6px;
+  background: rgba(255,255,255,0.04);
+}
+.feeder-status b { color: var(--feeder-accent); }
+.feeder-other {
+  margin-top: 0.55rem; font-size: 0.75rem; color: var(--text-dim);
+  opacity: 0.85;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.panel-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.panel-subtitle {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  margin-top: 0.25rem;
+}
+
+/* ─── Buttons ─────────────────────────────────────────── */
+
+.btn {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  padding: 0.65rem 1.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.btn:hover { background: var(--surface-2); border-color: var(--text-muted); }
+.btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.btn-primary:hover { background: #ddd; border-color: #ddd; }
+
+.btn-danger {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.btn-danger:hover { background: var(--red); color: white; border-color: var(--red); }
+
+.btn-sm {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.75rem;
+}
+
+.btn-group { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+/* ─── Cards ───────────────────────────────────────────── */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.25rem;
+  margin-bottom: 0.75rem;
+  transition: all 0.2s;
+  position: relative;
+}
+
+.card:hover { border-color: var(--border-light); }
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 0.75rem;
+}
+
+.card-author {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.card-meta {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  display: flex;
+  gap: 1rem;
+  margin-top: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.card-meta .tag {
+  background: var(--surface-3);
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+}
+
+.card-text {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  line-height: 1.65;
+  max-height: 6rem;
+  overflow: hidden;
+  position: relative;
+}
+
+.card-text.expanded { max-height: none; }
+
+.card-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  justify-content: flex-end;
+}
+
+.score-badge {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  background: var(--surface-3);
+  color: var(--text-dim);
+}
+
+.score-badge.high { color: var(--green); border: 1px solid var(--green-dim); background: transparent; }
+.score-badge.medium { color: var(--yellow); border: 1px solid #854d0e; background: transparent; }
+
+/* ─── Comment Cards ───────────────────────────────────── */
+
+.comment-card { padding: 1.5rem; }
+
+.comment-card .for-post {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.comment-card .for-post a {
+  color: var(--text-dim);
+  text-decoration: none;
+}
+
+.comment-card .for-post a:hover { color: var(--text); }
+
+.comment-edit {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  line-height: 1.65;
+  padding: 1rem;
+  border-radius: 6px;
+  resize: vertical;
+  min-height: 80px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.comment-edit:focus { border-color: var(--text-muted); }
+
+.comment-style {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin-top: 0.5rem;
+}
+
+/* ─── Log Console ─────────────────────────────────────── */
+
+.console {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.8;
+  color: var(--text-dim);
+  max-height: 300px;
+  overflow-y: auto;
+  margin-top: 1rem;
+}
+
+.console .line { padding: 0.1rem 0; }
+.console .line.error { color: var(--red); }
+.console .line.success { color: var(--green); }
+
+/* ─── Empty State ─────────────────────────────────────── */
+
+.empty {
+  text-align: center;
+  padding: 4rem 2rem;
+  color: var(--text-muted);
+}
+
+.empty-icon {
+  font-size: 2.5rem;
+  margin-bottom: 1rem;
+  opacity: 0.3;
+}
+
+.empty h3 {
+  font-weight: 500;
+  color: var(--text-dim);
+  margin-bottom: 0.5rem;
+}
+
+.empty p { font-size: 0.9rem; }
+
+/* ─── Modal ───────────────────────────────────────────── */
+
+.modal-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.7);
+  z-index: 100;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+}
+
+.modal-backdrop.active { display: flex; }
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 2rem;
+  width: 90%;
+  max-width: 440px;
+  animation: modalIn 0.2s ease;
+}
+
+@keyframes modalIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.modal h2 {
+  font-size: 1.2rem;
+  font-weight: 600;
+  margin-bottom: 1.5rem;
+}
+
+.form-group { margin-bottom: 1.25rem; }
+
+.form-group label {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 0.5rem;
+}
+
+.form-group input {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  padding: 0.65rem 0.85rem;
+  border-radius: 6px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.form-group input:focus { border-color: var(--text-muted); }
+
+.form-group textarea {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  padding: 0.65rem 0.85rem;
+  border-radius: 6px;
+  outline: none;
+  resize: vertical;
+  transition: border-color 0.2s;
+}
+
+.form-group textarea:focus { border-color: var(--text-muted); }
+
+.cfg-badge {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 0.2rem 0.55rem;
+  border-radius: 5px;
+  vertical-align: middle;
+}
+
+.form-row { display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 1.5rem; }
+
+/* ─── Toolbar ─────────────────────────────────────────── */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.toolbar-info {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.select-all-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.select-all-wrap input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+/* ─── Spinner ─────────────────────────────────────────── */
+
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+.btn-primary .spinner { border-color: rgba(0,0,0,0.2); border-top-color: var(--bg); }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ─── Settings row ────────────────────────────────────── */
+
+.settings-row {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.settings-row .form-group { margin-bottom: 0; flex: 1; min-width: 120px; }
+
+.settings-row input[type="number"] {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  outline: none;
+}
+
+.settings-row select {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  outline: none;
+  cursor: pointer;
+}
+
+/* ─── Scrollbar ───────────────────────────────────────── */
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ─── Post checkbox ───────────────────────────────────── */
+
+.card-check {
+  position: absolute;
+  top: 1.25rem;
+  right: 1.25rem;
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* ─── Responsive ──────────────────────────────────────── */
+
+@media (max-width: 700px) {
+  .app { padding: 1rem; }
+  .pipeline { flex-direction: column; }
+  .pipeline-step { border-radius: 0 !important; }
+  .pipeline-step:first-child { border-radius: 8px 8px 0 0 !important; }
+  .pipeline-step:last-child { border-radius: 0 0 8px 8px !important; }
+}
+
+/* ─── Mode Tabs ───────────────────────────────────────── */
+
+.mode-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 2rem;
+  background: var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mode-tab {
+  flex: 1;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border: none;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.mode-tab:first-child { border-radius: 8px 0 0 8px; }
+.mode-tab:last-child { border-radius: 0 8px 8px 0; }
+.mode-tab:hover { background: var(--surface-2); color: var(--text); }
+
+.mode-tab.active {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.mode-panel { display: none; animation: fadeIn 0.3s ease; }
+.mode-panel.active { display: block; }
+
+/* ─── Connector Stats ─────────────────────────────────── */
+
+.connector-stats {
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 2rem;
+}
+
+.stat-card {
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.25rem;
+  text-align: center;
+}
+
+.stat-value {
+  font-family: var(--mono);
+  font-size: 1.8rem;
+  font-weight: 600;
+  color: var(--accent);
+  line-height: 1;
+  margin-bottom: 0.5rem;
+}
+
+.stat-label {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.connector-url-input {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  padding: 0.65rem 0.85rem;
+  border-radius: 6px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.connector-url-input:focus { border-color: var(--text-muted); }
+
+/* ─── Connection History ──────────────────────────────── */
+
+.history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.65rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 0.4rem;
+  font-size: 0.85rem;
+}
+
+.history-item .hi-name { font-weight: 500; }
+
+.history-item .hi-title {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  margin-left: 0.75rem;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-item .hi-time {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  margin-left: 1rem;
+}
+/* ─── Active Jobs Bar ─────────────────────────────── */
+
+.jobs-bar {
+  display: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 1rem;
+  margin-bottom: 1.5rem;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
+
+.jobs-bar.active { display: block; }
+
+.jobs-bar .jb-title {
+  color: var(--green);
+  font-weight: 600;
+  margin-bottom: 0.3rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.jobs-bar .jb-title .spinner-sm {
+  width: 10px; height: 10px;
+  border: 2px solid var(--border-light);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.jobs-bar .jb-list { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
+.jb-chip {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+
+.jb-chip .jbc-profile { color: var(--accent); }
+.jb-chip .jbc-cat { color: var(--text-muted); }
+
+.jb-stop {
+  background: var(--red-dim);
+  border: none;
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  padding: 0.1rem 0.45rem;
+  border-radius: 3px;
+  cursor: pointer;
+  margin-left: 0.35rem;
+}
+.jb-stop:hover { background: var(--red); }
+
+/* ─── Post Creator ────────────────────────────────── */
+
+.queue-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem;
+  margin-bottom: 0.75rem;
+  position: relative;
+  transition: border-color 0.2s;
+}
+
+.queue-card:hover { border-color: var(--border-light); }
+
+.queue-card.is-next { border-color: var(--green-dim); }
+
+.queue-card .qc-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.queue-card .qc-badge {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.qc-badge.article { background: #1e3a5f; color: #60a5fa; }
+.qc-badge.thought { background: #3b2f1e; color: #eab308; }
+.qc-badge.next-up { background: var(--green-dim); color: #fff; margin-left: 0.5rem; font-weight: 600; }
+
+.queue-card .qc-text {
+  font-size: 0.92rem;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  margin-bottom: 0.75rem;
+}
+
+.queue-card .qc-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.queue-card .qc-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.queue-card .qc-url {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  margin-bottom: 0.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.poster-section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.poster-section h3 {
+  font-size: 1rem;
+  font-weight: 500;
+  margin-bottom: 1rem;
+}
+
+.poster-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+@media (max-width: 768px) {
+  .poster-split { grid-template-columns: 1fr; }
+}
+
+.queue-empty {
+  text-align: center;
+  padding: 3rem;
+  color: var(--text-muted);
+}
+
+.queue-empty .qe-icon { font-size: 2rem; margin-bottom: 0.5rem; }
+
+.history-section { margin-top: 2rem; }
+.history-section h3 { font-size: 1rem; font-weight: 500; margin-bottom: 1rem; }
+
+.history-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 0.5rem;
+  opacity: 0.6;
+}
+
+.history-card .hc-text {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  max-height: 60px;
+  overflow: hidden;
+}
+
+.history-card .hc-meta {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-top: 0.5rem;
+}
+
+</style>
+</head>
+<body>
+
+<div class="app" id="app">
+
+  <!-- Header -->
+  <header>
+    <div class="logo">LinkedIn <span>Autopilot</span></div>
+    <div class="profile-bar">
+      <select class="profile-select" id="profileSelect" onchange="switchProfile()">
+        <option value="">Loading...</option>
+      </select>
+      <button class="btn-icon" onclick="openAddProfile()" title="Add profile">+</button>
+      <button class="btn-icon" onclick="openConfigModal()" title="Edit profile config">⚙</button>
+      <button class="btn-icon" onclick="setDefaultProfile()" title="Set as default profile">★</button>
+    </div>
+  </header>
+
+  <!-- Mode Tabs -->
+  <nav class="mode-tabs">
+    <button class="mode-tab active" data-mode="comments" onclick="switchMode('comments')">Comment Pipeline</button>
+    <button class="mode-tab" data-mode="connector" onclick="switchMode('connector')">Auto-Connector</button>
+    <button class="mode-tab" data-mode="poster" onclick="switchMode('poster')">Post Creator</button>
+    <button class="mode-tab" data-mode="scheduler" onclick="switchMode('scheduler')">Engagement Scheduler</button>
+    <button class="mode-tab" data-mode="scheduled" onclick="switchMode('scheduled')">Scheduled Posting</button>
+  </nav>
+
+  <!-- Active Jobs Bar -->
+  <div class="jobs-bar" id="jobsBar">
+    <div class="jb-title"><div class="spinner-sm"></div> Running Jobs</div>
+    <div class="jb-list" id="jobsList"></div>
+  </div>
+
+  <!-- ═══ COMMENTS MODE ═══════════════════════════════ -->
+  <div class="mode-panel active" id="mode-comments">
+
+  <!-- Pipeline -->
+  <div class="pipeline" id="pipeline">
+    <div class="pipeline-step active" data-step="scrape" onclick="goStep('scrape')">
+      <span class="step-num">01</span>
+      <div class="step-label">Scrape</div>
+      <div class="step-count" id="scrapeCount"></div>
+    </div>
+    <div class="pipeline-step" data-step="posts" onclick="goStep('posts')">
+      <span class="step-num">02</span>
+      <div class="step-label">Review Posts</div>
+      <div class="step-count" id="postsCount"></div>
+    </div>
+    <div class="pipeline-step" data-step="generate" onclick="goStep('generate')">
+      <span class="step-num">03</span>
+      <div class="step-label">Generate</div>
+      <div class="step-count" id="generateCount"></div>
+    </div>
+    <div class="pipeline-step" data-step="review" onclick="goStep('review')">
+      <span class="step-num">04</span>
+      <div class="step-label">Review Comments</div>
+      <div class="step-count" id="reviewCount"></div>
+    </div>
+    <div class="pipeline-step" data-step="post" onclick="goStep('post')">
+      <span class="step-num">05</span>
+      <div class="step-label">Post</div>
+      <div class="step-count" id="postCount"></div>
+    </div>
+  </div>
+
+  <!-- ─── Lifecycle status bins ──────────────────────── -->
+  <style>
+    .lifecycle-bar { display:flex; gap:0.5rem; margin:0 0 1rem; flex-wrap:wrap; }
+    .lc-chip { display:flex; align-items:center; gap:0.45rem; cursor:pointer;
+      background:var(--surface); border:1px solid var(--border); color:var(--text-dim);
+      border-radius:999px; padding:0.35rem 0.8rem; font-size:0.78rem; font-family:var(--mono);
+      transition:background .15s,color .15s,border-color .15s; }
+    .lc-chip:hover { background:var(--surface-2); color:var(--text); }
+    .lc-chip b { font-size:0.9rem; color:var(--text); }
+    .lc-chip .lc-dot { width:8px; height:8px; border-radius:50%; }
+    .lc-new .lc-dot { background:#6ea8fe; }
+    .lc-generated .lc-dot { background:#f0b95d; }
+    .lc-commented .lc-dot { background:#5dd39e; }
+    .lc-trash .lc-dot { background:#c96d6d; }
+    .trash-reason { display:inline-block; font-size:0.68rem; font-family:var(--mono);
+      padding:0.1rem 0.45rem; border-radius:4px; background:var(--surface-2);
+      color:var(--text-dim); border:1px solid var(--border); }
+  </style>
+  <div class="lifecycle-bar" id="lifecycleBar" style="display:none">
+    <div class="lc-chip lc-new" title="Scraped, not acted on yet" onclick="showNewPosts()">
+      <span class="lc-dot"></span>New <b id="lcNew">0</b>
+    </div>
+    <div class="lc-chip lc-generated" title="Has a draft comment awaiting posting" onclick="showLifecycle('GENERATED')">
+      <span class="lc-dot"></span>Generated <b id="lcGenerated">0</b>
+    </div>
+    <div class="lc-chip lc-commented" title="Comment posted to LinkedIn" onclick="showLifecycle('COMMENTED')">
+      <span class="lc-dot"></span>Commented <b id="lcCommented">0</b>
+    </div>
+    <div class="lc-chip lc-trash" title="Rejected, filtered ads/jobs, or low quality" onclick="showLifecycle('TRASH')">
+      <span class="lc-dot"></span>Trash <b id="lcTrash">0</b>
+    </div>
+  </div>
+
+  <!-- ─── Panel: Scrape ──────────────────────────────── -->
+  <div class="panel active" id="panel-scrape">
+    <div class="panel-header">
+      <div>
+        <div class="panel-title">Scrape Posts</div>
+        <div class="panel-subtitle">Find AI discussion posts on your LinkedIn feed</div>
+      </div>
+    </div>
+
+    <div class="settings-row">
+      <div class="form-group">
+        <label>Max Posts to Scan</label>
+        <input type="number" id="maxPosts" value="50" min="10" max="500">
+      </div>
+      <div class="form-group">
+        <label>Min Quality Posts</label>
+        <input type="number" id="minQuality" value="10" min="1" max="100">
+      </div>
+    </div>
+
+    <div class="btn-group">
+      <button class="btn btn-primary" id="scrapeBtn" onclick="startScrape()">
+        Start Scraping
+      </button>
+      <button class="btn btn-sm" id="checkSelectorsBtn" onclick="checkSelectors()">
+        Check Selectors
+      </button>
+      <span id="selectorBadge" style="display:none"></span>
+    </div>
+    <div id="selectorResult" style="display:none;margin-top:0.75rem;font-family:var(--mono);font-size:0.78rem;color:var(--text-dim)"></div>
+
+    <div class="console" id="scrapeLog" style="display:none"></div>
+  </div>
+
+  <!-- ─── Panel: Review Posts ────────────────────────── -->
+  <div class="panel" id="panel-posts">
+    <div class="panel-header">
+      <div>
+        <div class="panel-title">Review Posts</div>
+        <div class="panel-subtitle" id="postsSubtitle">Select posts to generate comments for</div>
+      </div>
+      <div class="btn-group">
+        <button class="btn btn-danger btn-sm" onclick="removeUncheckedPosts()">Remove Unchecked</button>
+        <button class="btn btn-primary btn-sm" onclick="savePosts()">Save & Continue →</button>
+      </div>
+    </div>
+
+    <div class="toolbar" id="postsToolbar" style="display:none">
+      <label class="select-all-wrap">
+        <input type="checkbox" id="selectAllPosts" checked onchange="toggleAllPosts()">
+        <span>Select All</span>
+      </label>
+      <span class="toolbar-info" id="postsToolbarInfo"></span>
+    </div>
+
+    <div id="postsList"></div>
+  </div>
+
+  <!-- ─── Panel: Generate ────────────────────────────── -->
+  <div class="panel" id="panel-generate">
+    <div class="panel-header">
+      <div>
+        <div class="panel-title">Generate Comments</div>
+        <div class="panel-subtitle">AI-generate authentic comments for the curated posts</div>
+      </div>
+    </div>
+
+    <div class="settings-row">
+      <div class="form-group">
+        <label>Model</label>
+        <select id="commentModel">
+          <option value="gpt-4o-mini">gpt-4o-mini (fast/cheap)</option>
+          <option value="gpt-4o">gpt-4o</option>
+          <option value="gpt-4">gpt-4</option>
+          <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Max Comments</label>
+        <input type="number" id="commentLimit" value="12" min="1" max="500">
+        <label style="display:flex;align-items:center;gap:0.4rem;margin-top:0.45rem;font-size:0.8rem;color:var(--text-dim);font-weight:normal">
+          <input type="checkbox" id="commentNoLimit" onchange="toggleCommentLimit()">
+          Generate for all engaging posts (no limit)
+        </label>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" id="generateBtn" onclick="startGenerate()">
+      Generate Comments
+    </button>
+
+    <div class="console" id="generateLog" style="display:none"></div>
+  </div>
+
+  <!-- ─── Panel: Review Comments ─────────────────────── -->
+  <div class="panel" id="panel-review">
+    <div class="panel-header">
+      <div>
+        <div class="panel-title">Review Comments</div>
+        <div class="panel-subtitle" id="reviewSubtitle">Edit or remove comments before posting</div>
+      </div>
+      <div class="btn-group">
+        <button class="btn btn-primary btn-sm" onclick="saveComments()">Save & Continue →</button>
+      </div>
+    </div>
+    <div id="commentsList"></div>
+  </div>
+
+  <!-- ─── Panel: Post ────────────────────────────────── -->
+  <div class="panel" id="panel-post">
+    <div class="panel-header">
+      <div>
+        <div class="panel-title">Post Comments</div>
+        <div class="panel-subtitle">Automatically post comments to LinkedIn</div>
+      </div>
+    </div>
+
+    <div class="settings-row">
+      <div class="form-group">
+        <label>Comments to Post</label>
+        <input type="number" id="postCountInput" value="3" min="1" max="20">
+      </div>
+    </div>
+
+    <div id="postPreview" style="margin-bottom:1rem"></div>
+
+    <button class="btn btn-primary" id="postBtn" onclick="startPosting()">
+      Start Posting
+    </button>
+
+    <div class="console" id="postLog" style="display:none"></div>
+  </div>
+
+  <!-- ─── Panel: Lifecycle (Trash / Commented) ───────── -->
+  <div class="panel" id="panel-lifecycle">
+    <div class="panel-header">
+      <div>
+        <div class="panel-title" id="lifecycleTitle">Trash</div>
+        <div class="panel-subtitle" id="lifecycleSubtitle">Posts that were filtered or rejected, and why</div>
+      </div>
+      <div class="btn-group">
+        <button class="btn btn-sm" onclick="goStep('scrape')">← Back to pipeline</button>
+      </div>
+    </div>
+    <div id="lifecycleList"></div>
+  </div>
+
+  </div><!-- end mode-comments -->
+
+  <!-- ═══ CONNECTOR MODE ══════════════════════════════ -->
+  <div class="mode-panel" id="mode-connector">
+
+    <div class="panel-header">
+      <div>
+        <div class="panel-title">Auto-Connector</div>
+        <div class="panel-subtitle">Send connection requests from LinkedIn search results</div>
+      </div>
+    </div>
+
+    <!-- Stats bar -->
+    <div class="connector-stats" id="connectorStats">
+      <div class="stat-card">
+        <div class="stat-value" id="statWeekly">—</div>
+        <div class="stat-label">This Week</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="statRemaining">—</div>
+        <div class="stat-label">Remaining</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value" id="statTotal">—</div>
+        <div class="stat-label">All Time</div>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div class="form-group" style="margin-bottom:1.25rem">
+      <label>LinkedIn Search URL</label>
+      <input type="text" id="connectorUrl" class="connector-url-input"
+             placeholder="https://www.linkedin.com/search/results/people/?keywords=...">
+    </div>
+
+    <div class="settings-row">
+      <div class="form-group">
+        <label>Max Requests</label>
+        <input type="number" id="connectorMax" value="25" min="1" max="100">
+      </div>
+      <div class="form-group">
+        <label>Max Pages</label>
+        <input type="number" id="connectorPages" value="10" min="1" max="50">
+      </div>
+    </div>
+
+    <div class="form-group" style="margin-bottom:1.25rem">
+      <label>Connection Note <span style="opacity:0.4">(optional)</span></label>
+      <textarea id="connectorNote" class="comment-edit" rows="2"
+                placeholder="Hi! I'd love to connect about AI and machine learning."></textarea>
+    </div>
+
+    <div class="btn-group">
+      <button class="btn btn-primary" id="connectorBtn" onclick="startConnector()">
+        Start Connecting
+      </button>
+      <button class="btn btn-danger btn-sm" id="connectorStopBtn" onclick="stopConnector()" style="display:none">
+        Stop
+      </button>
+    </div>
+
+    <div class="console" id="connectorLog" style="display:none"></div>
+
+    <!-- Recent connections -->
+    <div style="margin-top:2rem">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+        <h3 style="font-size:1.1rem;font-weight:500">Recent Connections</h3>
+        <button class="btn btn-sm" onclick="loadConnectorHistory()">Refresh</button>
+      </div>
+      <div id="connectorHistory"></div>
+    </div>
+
+  </div><!-- end mode-connector -->
+
+  <!-- ═══ POST CREATOR MODE ═══════════════════════════ -->
+  <div class="mode-panel" id="mode-poster">
+
+    <div class="panel-header">
+      <div>
+        <div class="panel-title">Post Creator</div>
+        <div class="panel-subtitle">Generate and publish AI thought leadership posts</div>
+      </div>
+    </div>
+
+    <!-- Generate Controls -->
+    <div class="poster-split">
+
+      <!-- Thought Leadership -->
+      <div class="poster-section">
+        <h3>💡 Thought Leadership</h3>
+        <div class="form-group" style="margin-bottom:0.75rem">
+          <label>Style</label>
+          <select id="posterStyle">
+            <option value="">Random</option>
+            <option value="hot_take">Hot Take</option>
+            <option value="question">Question</option>
+            <option value="observation">Observation</option>
+            <option value="prediction">Prediction</option>
+            <option value="story">Story</option>
+            <option value="tip">Tip</option>
+            <option value="contrarian">Contrarian</option>
+            <option value="celebration">Celebration</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom:0.75rem">
+          <label>Custom Topic <span style="opacity:0.4">(optional)</span></label>
+          <input type="text" id="posterTopic" placeholder="Leave blank for random AI/automation topic">
+        </div>
+        <div class="settings-row" style="margin-bottom:0.75rem">
+          <div class="form-group">
+            <label>Count</label>
+            <input type="number" id="posterCount" value="1" min="1" max="10">
+          </div>
+          <div class="form-group">
+            <label>Model</label>
+            <select id="posterModel">
+              <option value="gpt-4o" selected>gpt-4o</option>
+              <option value="gpt-4o-mini">gpt-4o-mini</option>
+            </select>
+          </div>
+        </div>
+        <button class="btn btn-primary" id="generatePostBtn" onclick="generatePosts()">
+          Generate Posts
+        </button>
+      </div>
+
+      <!-- Article Reaction -->
+      <div class="poster-section">
+        <h3>📰 Article Reaction</h3>
+        <div class="form-group" style="margin-bottom:0.75rem">
+          <label>Article URL</label>
+          <input type="text" id="articleUrl" placeholder="https://techcrunch.com/...">
+        </div>
+        <div class="form-group" style="margin-bottom:0.75rem">
+          <label>Model</label>
+          <select id="articleModel">
+            <option value="gpt-4o" selected>gpt-4o</option>
+            <option value="gpt-4o-mini">gpt-4o-mini</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" id="articleBtn" onclick="generateArticlePost()">
+          Generate from Article
+        </button>
+      </div>
+
+    </div>
+
+    <div class="console" id="posterLog" style="display:none"></div>
+
+    <!-- Post Queue -->
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;margin-top:0.5rem">
+      <h3 style="font-size:1.1rem;font-weight:500">Post Queue</h3>
+      <div class="btn-group">
+        <button class="btn btn-sm" onclick="loadPosterQueue()">Refresh</button>
+        <button class="btn btn-primary btn-sm" id="publishNextBtn" onclick="publishNext()">Publish Next →</button>
+      </div>
+    </div>
+
+    <div id="posterQueue"></div>
+
+    <!-- Post History -->
+    <div class="history-section">
+      <h3>Published History</h3>
+      <div id="posterHistory"></div>
+    </div>
+
+  </div><!-- end mode-poster -->
+
+  <!-- ─── Scheduler ────────────────────────────────────── -->
+  <div class="mode-panel" id="mode-scheduler">
+
+    <div class="panel-header feeder feeder-comment">
+      <div>
+        <div class="panel-title">💬 Comment sweeper
+          <span class="feeder-badge">Background feeder &middot; drives the browser</span></div>
+        <div class="panel-subtitle">Auto-posts queued <strong>comments</strong> on a randomized twice-daily schedule. Opens a real browser, so it takes the browser lock. Runs only while this dashboard is open.</div>
+        <div class="feeder-other">Not the Post drain &mdash; that one lives on the
+          <strong>Scheduled Posting</strong> tab, only calls Buffer's API, and feeds held posts into free slots.</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:0.75rem">
+        <span id="schedRunning" class="trash-reason">status unknown</span>
+        <label class="feeder-switch">
+          <input type="checkbox" id="schedMaster" onchange="schedToggle('master', this.checked)">
+          <strong>Comment sweeper</strong>
+        </label>
+      </div>
+    </div>
+
+    <div id="schedBody">
+      <!-- Post comments job -->
+      <div class="poster-section" style="margin-bottom:1rem">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <h3>💬 Post Comments</h3>
+          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer">
+            <input type="checkbox" id="schedPostEnabled" onchange="schedToggle('post_comments', this.checked)">
+            enabled
+          </label>
+        </div>
+        <p style="color:var(--text-dim);font-size:0.85rem;margin:0.25rem 0 0.75rem">
+          Works through the GENERATED queue until empty. A random count per run, a random fire time in each window, re-rolled daily.
+        </p>
+        <div class="form-row" style="gap:1rem;flex-wrap:wrap">
+          <div class="form-group" style="margin:0">
+            <label>Windows (HH:MM-HH:MM, comma separated)</label>
+            <input type="text" id="schedPostWindows" placeholder="08:00-11:00, 14:00-17:00">
+          </div>
+          <div class="form-group" style="margin:0;max-width:90px">
+            <label>Count min</label>
+            <input type="number" id="schedPostMin" min="1">
+          </div>
+          <div class="form-group" style="margin:0;max-width:90px">
+            <label>Count max</label>
+            <input type="number" id="schedPostMax" min="1">
+          </div>
+          <div class="form-group" style="margin:0;max-width:110px">
+            <label>Skip chance</label>
+            <input type="number" id="schedPostSkip" min="0" max="1" step="0.05">
+          </div>
+        </div>
+        <div id="schedPostWhen" style="color:var(--text-dim);font-size:0.85rem;margin-top:0.5rem"></div>
+        <div class="form-row" style="margin-top:0.75rem">
+          <button class="btn" onclick="schedSaveConfig()">Save Settings</button>
+          <button class="btn btn-primary" onclick="schedRunNow('post_comments')">Run Now (test)</button>
+        </div>
+      </div>
+
+      <!-- Scrape job -->
+      <div class="poster-section" style="margin-bottom:1rem">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <h3>🔎 Scrape (refill pipeline)</h3>
+          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer">
+            <input type="checkbox" id="schedScrapeEnabled" onchange="schedToggle('scrape', this.checked)">
+            enabled
+          </label>
+        </div>
+        <p style="color:var(--text-dim);font-size:0.85rem;margin:0.25rem 0 0.75rem">
+          Optional. Scrapes on its own randomized window to top up the queue. Default off.
+        </p>
+        <div class="form-row" style="gap:1rem;flex-wrap:wrap">
+          <div class="form-group" style="margin:0">
+            <label>Windows (HH:MM-HH:MM, comma separated)</label>
+            <input type="text" id="schedScrapeWindows" placeholder="09:00-12:00">
+          </div>
+          <div class="form-group" style="margin:0;max-width:110px">
+            <label>Max posts</label>
+            <input type="number" id="schedScrapeMax" min="1">
+          </div>
+          <div class="form-group" style="margin:0;max-width:110px">
+            <label>Min quality</label>
+            <input type="number" id="schedScrapeQuality" min="0">
+          </div>
+          <div class="form-group" style="margin:0;max-width:110px">
+            <label>Skip chance</label>
+            <input type="number" id="schedScrapeSkip" min="0" max="1" step="0.05">
+          </div>
+        </div>
+        <div id="schedScrapeWhen" style="color:var(--text-dim);font-size:0.85rem;margin-top:0.5rem"></div>
+        <div class="form-row" style="margin-top:0.75rem">
+          <button class="btn" onclick="schedSaveConfig()">Save Settings</button>
+          <button class="btn btn-primary" onclick="schedRunNow('scrape')">Run Now (test)</button>
+        </div>
+      </div>
+
+      <!-- Recent runs -->
+      <div class="poster-section">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <h3>Recent Scheduled Runs</h3>
+          <button class="btn" onclick="loadScheduler()">Refresh</button>
+        </div>
+        <div id="schedRuns"></div>
+      </div>
+    </div>
+
+  </div><!-- end mode-scheduler -->
+
+  <!-- ─── Scheduled Posting (Buffer hybrid) ─────────────── -->
+  <div class="mode-panel" id="mode-scheduled">
+
+    <!-- The acting account is shown persistently, not buried in settings.
+         This section drives a browser against live posts, so which identity it
+         is allowed to act as belongs on screen at all times. -->
+    <div class="schp-card" id="schpHeader">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">Scheduled Posting</div>
+          <div class="panel-subtitle" id="schpIdentityLine">Loading…</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:0.75rem;color:var(--text-dim)">Queue &amp; scheduling</div>
+          <div style="font-size:0.72rem;color:var(--text-dim)" id="schpStateFile"></div>
+        </div>
+      </div>
+      <div id="schpConfigWarn" style="display:none;margin-top:0.6rem;padding:0.6rem 0.8rem;
+           border-radius:6px;background:rgba(255,170,0,0.12);color:#ffcc66;font-size:0.82rem"></div>
+    </div>
+
+    <!-- Both inputs write PENDING rows through the same endpoint. Adding to
+         the queue is NOT scheduling: nothing here contacts Buffer. -->
+    <div class="schp-card">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">Add posts</div>
+          <div class="panel-subtitle">Queued as <strong>Pending</strong>.
+            Nothing is sent to Buffer until you schedule it.</div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;
+                  padding-bottom:0.8rem;border-bottom:1px solid var(--border)">
+        <input type="file" id="schpCsvFile" accept=".csv,text/csv"
+               style="font-size:0.82rem">
+        <button class="btn" onclick="schpUploadCsv()">Upload CSV</button>
+        <span style="font-size:0.75rem;color:var(--text-dim)">
+          columns: date, time_window, post_text, topic, tags, image_path,
+          first_comment_link</span>
+      </div>
+
+      <div style="margin-top:0.9rem">
+        <div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:0.5rem">
+          Or add one post</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.5rem">
+          <input class="input" id="schpDate" placeholder="date (YYYY-MM-DD)">
+          <select class="input" id="schpWindow">
+            <option value="morning">morning</option>
+            <option value="afternoon">afternoon</option>
+            <option value="evening">evening</option>
+          </select>
+          <input class="input" id="schpTags" placeholder="tags (#a #b)">
+        </div>
+        <textarea class="input" id="schpText" rows="4"
+                  style="margin-top:0.5rem;width:100%"
+                  placeholder="post text — leave blank to generate from a topic"></textarea>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.5rem;
+                    margin-top:0.5rem">
+          <input class="input" id="schpTopic" placeholder="topic (used if text is blank)">
+          <input class="input" id="schpImage" placeholder="image_path (local path)">
+          <input class="input" id="schpLink" placeholder="first_comment_link">
+        </div>
+        <div style="margin-top:0.6rem">
+          <button class="btn" onclick="schpAddOne()">Add to queue</button>
+        </div>
+      </div>
+
+      <div id="schpAddResult" style="margin-top:0.8rem"></div>
+    </div>
+
+    <div class="schp-card feeder feeder-drain" id="schpDrainCard">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">📤 Post drain
+            <span class="feeder-badge">Background feeder &middot; Buffer API only</span></div>
+          <div class="panel-subtitle">Pushes <strong>Held</strong> posts into Buffer as
+            scheduled-post slots free up, earliest first. Never opens a browser.</div>
+          <div class="feeder-other">Feeds <strong>Held</strong> rows only &mdash; never a
+            Pending one. A held row already went through the confirmation dialog and was
+            stopped by Buffer's plan limit; a pending row has not been confirmed at all.
+            <br>Not the Comment sweeper &mdash; that one lives on the
+            <strong>Engagement Scheduler</strong> tab and drives the browser.</div>
+        </div>
+        <div style="text-align:right">
+          <label class="feeder-switch">
+            <input type="checkbox" id="drainEnabled" onchange="drainToggle(this.checked)">
+            <strong>Post drain</strong>
+          </label>
+          <div id="drainRunning" class="trash-reason" style="margin-top:0.4rem">status unknown</div>
+        </div>
+      </div>
+      <div class="feeder-status" id="drainStatus">Loading…</div>
+      <div style="display:flex;gap:0.6rem;align-items:flex-end;flex-wrap:wrap;margin-top:0.6rem">
+        <div class="form-group" style="margin:0;max-width:130px">
+          <label>Check every (min)</label>
+          <input type="number" id="drainInterval" min="1" step="1" value="15">
+        </div>
+        <button class="btn" onclick="drainSaveConfig()">Save interval</button>
+        <button class="btn" onclick="drainRunNow()">Check now</button>
+        <button class="btn" onclick="loadDrain(true)">Refresh</button>
+      </div>
+      <div id="drainResult" style="margin-top:0.6rem"></div>
+      <div id="drainRuns" style="margin-top:0.7rem"></div>
+    </div>
+
+    <div class="schp-card">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">Queue</div>
+          <div class="panel-subtitle">Every row and what state it is in.
+            Read from scheduled_posts_state.json, the single source of truth.</div>
+        </div>
+        <div style="display:flex;gap:0.5rem;align-items:center">
+          <button class="btn" onclick="loadScheduledQueue()">Refresh</button>
+          <button class="btn btn-primary" id="schpScheduleBtn"
+                  onclick="schpSchedule()">Schedule pending…</button>
+        </div>
+      </div>
+      <div id="schpScheduleResult" style="margin-bottom:0.6rem"></div>
+      <div class="lifecycle-bar" id="schpCounts" style="display:flex;gap:0.5rem;
+           flex-wrap:wrap;margin-bottom:0.75rem"></div>
+      <div id="schpQueue"></div>
+    </div>
+
+  </div><!-- end mode-scheduled -->
+
+</div>
+
+<!-- ─── Add Profile Modal ─────────────────────────────── -->
+<div class="modal-backdrop" id="addProfileModal">
+  <div class="modal">
+    <h2>Add Profile</h2>
+    <div class="form-group">
+      <label>Profile Name</label>
+      <input type="text" id="newProfileName" placeholder="e.g. work, personal">
+    </div>
+    <div class="form-group">
+      <label>LinkedIn Email</label>
+      <input type="email" id="newProfileEmail" placeholder="you@email.com">
+    </div>
+    <div class="form-group">
+      <label>LinkedIn Password</label>
+      <input type="password" id="newProfilePass" placeholder="••••••••">
+    </div>
+    <div class="form-row">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="addProfile()">Create Profile</button>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Profile Config Modal ──────────────────────────── -->
+<div class="modal-backdrop" id="configModal">
+  <div class="modal" style="max-width:600px;max-height:88vh;overflow-y:auto">
+    <h2>Profile Config — <span id="configProfileName"></span></h2>
+    <div class="form-group">
+      <label>Persona</label>
+      <textarea id="cfgPersona" rows="3" placeholder="Who you are…"></textarea>
+    </div>
+    <div class="form-group">
+      <label>Tone</label>
+      <textarea id="cfgTone" rows="2" placeholder="How you sound…"></textarea>
+    </div>
+    <div class="form-group">
+      <label>Voice</label>
+      <input type="text" id="cfgVoice" placeholder="e.g. first-person, concise">
+    </div>
+    <div class="form-group">
+      <label>Topics of Expertise (comma-separated)</label>
+      <input type="text" id="cfgTopics" placeholder="AI, ML, data engineering">
+    </div>
+    <div class="form-group">
+      <label>Things to Avoid (comma-separated)</label>
+      <input type="text" id="cfgAvoid" placeholder="hype, self-promotion">
+    </div>
+    <div class="form-group">
+      <label>Keywords — Tier 1 (comma-separated)</label>
+      <textarea id="cfgKw1" rows="2" placeholder="primary keywords"></textarea>
+    </div>
+    <div class="form-group">
+      <label>Keywords — Tier 2 (comma-separated)</label>
+      <textarea id="cfgKw2" rows="2" placeholder="secondary keywords"></textarea>
+    </div>
+    <div id="configMsg" style="display:none;font-family:var(--mono);font-size:0.78rem;color:var(--green);margin-top:0.5rem"></div>
+    <div class="form-row">
+      <button class="btn btn-sm" onclick="resetConfig()">Reset to defaults</button>
+      <button class="btn" onclick="closeConfigModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveConfig()">Save Config</button>
+    </div>
+  </div>
+</div>
+
+
+<script>
+// ─── State ──────────────────────────────────────────────
+
+let currentProfile = null;
+let currentStep = 'scrape';
+let postsData = { posts: [], file: null };
+let commentsData = { comments: [], file: null };
+// Comments queued for posting after Save & Continue. Kept separate from
+// commentsData (the Review state) so returning to Review shows empty once the
+// originals are archived, while the Post panel still has its preview.
+let postQueue = [];
+
+// ─── Init ───────────────────────────────────────────────
+
+document.addEventListener('DOMContentLoaded', loadProfiles);
+
+async function loadProfiles() {
+  const res = await fetch('/api/profiles');
+  const data = await res.json();
+  const sel = document.getElementById('profileSelect');
+  const profiles = data.profiles || {};
+  const defaultP = data.default;
+  
+  sel.innerHTML = '';
+  
+  if (Object.keys(profiles).length === 0) {
+    sel.innerHTML = '<option value="">No profiles</option>';
+    return;
+  }
+  
+  for (const [name, info] of Object.entries(profiles)) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name + (name === defaultP ? ' ★' : '');
+    sel.appendChild(opt);
+  }
+  
+  if (defaultP && profiles[defaultP]) sel.value = defaultP;
+  switchProfile();
+}
+
+function switchProfile() {
+  currentProfile = document.getElementById('profileSelect').value;
+  if (!currentProfile) return;
+  
+  postsData = { posts: [], file: null };
+  commentsData = { comments: [], file: null };
+  postQueue = [];
+
+  loadExistingPosts();
+  loadExistingComments();
+  loadLifecycle();
+}
+
+// Read the store's NEW bin. Always assigns — an empty result must be able to
+// clear a stale cache, and a non-empty one must be able to refill it. (The old
+// `if (length > 0)` guard meant a cleared cache could never be refilled.)
+async function loadExistingPosts() {
+  if (!currentProfile) return;
+  try {
+    const res = await fetch(`/api/posts/${currentProfile}`);
+    const data = await res.json();
+    postsData = data;
+    if (data.counts) { lifecycleCounts = data.counts; updateLifecycleChips(); }
+    updateCounts();
+  } catch(e) { /* leave the previous render state alone on a transport error */ }
+}
+
+// Read the store's GENERATED bin (drafts awaiting review).
+async function loadExistingComments() {
+  if (!currentProfile) return;
+  try {
+    const res = await fetch(`/api/comments/${currentProfile}`);
+    const data = await res.json();
+    commentsData = data;
+    if (data.counts) { lifecycleCounts = data.counts; updateLifecycleChips(); }
+    updateCounts();
+  } catch(e) { /* leave the previous render state alone on a transport error */ }
+}
+
+// The Post panel previews the drafts that will actually be posted — also the
+// GENERATED bin, so it can never default to an empty file again.
+async function loadPostQueue() {
+  if (!currentProfile) return;
+  try {
+    const res = await fetch(`/api/comments/${currentProfile}?include_reviewed=1`);
+    const data = await res.json();
+    postQueue = data.comments || [];
+    updateCounts();
+  } catch(e) { /* leave the previous render state alone on a transport error */ }
+}
+
+// ─── Navigation ─────────────────────────────────────────
+
+function goStep(step) {
+  currentStep = step;
+  
+  document.querySelectorAll('.pipeline-step').forEach(el => {
+    el.classList.toggle('active', el.dataset.step === step);
+  });
+  
+  document.querySelectorAll('.panel').forEach(el => {
+    el.classList.toggle('active', el.id === 'panel-' + step);
+  });
+  
+  // Every panel re-reads the store when its cache is empty. postsData /
+  // commentsData are RENDER STATE, never the source of truth — the store is.
+  // Without this fallback the Review Posts tab stayed empty for the rest of the
+  // session after any mutation, while the chips (which do re-read) showed the
+  // true count. That mismatch is the bug this guard exists to prevent.
+  if (step === 'posts') {
+    if (!postsData.posts || postsData.posts.length === 0) {
+      loadExistingPosts().then(() => renderPosts());
+    } else {
+      renderPosts();
+    }
+  }
+  if (step === 'review') {
+    if (!commentsData.comments || commentsData.comments.length === 0) {
+      loadExistingComments().then(() => renderComments());
+    } else {
+      renderComments();
+    }
+  }
+  if (step === 'post') {
+    if (!postQueue || postQueue.length === 0) {
+      loadPostQueue().then(() => renderPostPreview());
+    } else {
+      renderPostPreview();
+    }
+  }
+}
+
+function updateCounts() {
+  const pc = postsData.posts ? postsData.posts.length : 0;
+  const cc = commentsData.comments ? commentsData.comments.length : 0;
+  
+  const qc = postQueue ? postQueue.length : 0;
+  document.getElementById('postsCount').textContent = pc ? pc + ' posts' : '';
+  document.getElementById('reviewCount').textContent = cc ? cc + ' comments' : '';
+  document.getElementById('generateCount').textContent = '';
+  document.getElementById('postCount').textContent = qc ? qc + ' queued' : '';
+}
+
+// ─── Lifecycle (status bins, trash, restore) ────────────
+
+let lifecycleCounts = { NEW: 0, GENERATED: 0, COMMENTED: 0, TRASH: 0 };
+
+const REASON_LABEL = {
+  ad: 'Ad / promo',
+  job_card: 'Job / recommendation card',
+  low_quality: 'Below quality threshold',
+  no_url: 'No URL (cannot link/comment)',
+  evaluator_rejected: 'Rejected by evaluator',
+  manual: 'Manually rejected'
+};
+
+async function loadLifecycle() {
+  if (!currentProfile) return;
+  try {
+    const res = await fetch(`/api/posts/${currentProfile}/lifecycle`);
+    const data = await res.json();
+    lifecycleCounts = data.counts || lifecycleCounts;
+    updateLifecycleChips();
+  } catch (e) { /* no store yet */ }
+}
+
+function updateLifecycleChips() {
+  const c = lifecycleCounts || {};
+  const total = (c.NEW || 0) + (c.GENERATED || 0) + (c.COMMENTED || 0) + (c.TRASH || 0);
+  document.getElementById('lifecycleBar').style.display = total > 0 ? 'flex' : 'none';
+  document.getElementById('lcNew').textContent = c.NEW || 0;
+  document.getElementById('lcGenerated').textContent = c.GENERATED || 0;
+  document.getElementById('lcCommented').textContent = c.COMMENTED || 0;
+  document.getElementById('lcTrash').textContent = c.TRASH || 0;
+}
+
+// The New chip, like its three siblings, does a fresh store read. It used to
+// call goStep('posts') directly, which rendered whatever stale thing was in the
+// postsData cache — the reason the tab could show nothing while the chip said 49.
+async function showNewPosts() {
+  if (!currentProfile) return;
+  await loadExistingPosts();
+  goStep('posts');
+  renderPosts();
+}
+
+function activatePanel(panelId) {
+  document.querySelectorAll('.pipeline-step').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(el => el.classList.toggle('active', el.id === panelId));
+}
+
+async function showLifecycle(status) {
+  if (!currentProfile) return;
+  activatePanel('panel-lifecycle');
+  const list = document.getElementById('lifecycleList');
+  const TITLES = { TRASH: 'Trash', COMMENTED: 'Commented', GENERATED: 'Generated', NEW: 'New' };
+  const SUBTITLES = {
+    TRASH: 'Posts that were filtered or rejected, and why — restore any wrongly filtered',
+    COMMENTED: 'Posts you have already commented on',
+    GENERATED: 'Posts with a drafted comment awaiting posting (from the lifecycle store)',
+    NEW: 'Scraped posts not acted on yet'
+  };
+  document.getElementById('lifecycleTitle').textContent = TITLES[status] || status;
+  document.getElementById('lifecycleSubtitle').textContent = SUBTITLES[status] || '';
+  list.innerHTML = '<p style="color:var(--text-muted);padding:1rem">Loading…</p>';
+  try {
+    const res = await fetch(`/api/posts/${currentProfile}/lifecycle?status=${status}`);
+    const data = await res.json();
+    lifecycleCounts = data.counts || lifecycleCounts;
+    updateLifecycleChips();
+    renderLifecycle(status, data.posts || []);
+  } catch (e) {
+    list.innerHTML = '<p style="color:var(--danger,#c96d6d);padding:1rem">Failed to load.</p>';
+  }
+}
+
+function renderLifecycle(status, posts) {
+  const list = document.getElementById('lifecycleList');
+  if (!posts.length) {
+    const emptyMsg = {
+      TRASH: 'No filtered or rejected posts.',
+      GENERATED: 'No drafted comments awaiting posting.',
+      COMMENTED: 'No commented posts yet.'
+    }[status] || 'Nothing here yet.';
+    list.innerHTML = `<div class="empty"><div class="empty-icon">◇</div><h3>Nothing here</h3>` +
+      `<p>${emptyMsg}</p></div>`;
+    return;
+  }
+  list.innerHTML = posts.map(p => {
+    const author = esc(p.author || 'Unknown');
+    const preview = esc((p.text || '').substring(0, 240));
+    const ellipsis = (p.text || '').length > 240 ? '…' : '';
+    const openLink = p.url
+      ? `<a href="${esc(p.url)}" target="_blank" style="color:var(--text-muted);font-family:var(--mono);font-size:0.75rem;text-decoration:none">Open ↗</a>`
+      : '';
+    if (status === 'GENERATED') {
+      return `<div class="card">
+        <div class="card-header"><div>
+          <div class="card-author">${author}</div>
+          <div class="card-meta">${p.category ? '<span class="tag">' + esc(p.category) + '</span>' : ''}</div>
+        </div><span class="score-badge">${p.relevance_score || 0}</span></div>
+        ${p.comment ? '<div class="card-text"><strong>Draft comment:</strong> ' + esc(p.comment) + '</div>'
+                    : '<div class="card-text" style="color:var(--danger,#c96d6d)">⚠ Draft missing (will regenerate)</div>'}
+        <div class="card-text" style="color:var(--text-dim)">${preview}${ellipsis}</div>
+        ${p.url ? '<div style="margin-top:0.5rem">' + openLink + '</div>' : ''}
+      </div>`;
+    }
+    if (status === 'TRASH') {
+      const reason = REASON_LABEL[p.trash_reason] || p.trash_reason || 'unknown';
+      return `<div class="card">
+        <div class="card-header"><div>
+          <div class="card-author">${author}</div>
+          <div class="card-meta"><span class="trash-reason">${esc(reason)}</span>
+          ${p.category ? '<span class="tag">' + esc(p.category) + '</span>' : ''}</div>
+        </div><span class="score-badge">${p.relevance_score || 0}</span></div>
+        <div class="card-text">${preview}${ellipsis}</div>
+        <div style="margin-top:0.5rem;display:flex;gap:0.75rem;align-items:center">
+          <button class="btn btn-sm" onclick='restorePost(${JSON.stringify(p.key)})'>↩ Restore</button>
+          ${openLink}
+        </div></div>`;
+    }
+    const when = p.commented_at ? esc(p.commented_at.substring(0, 10)) : '';
+    return `<div class="card">
+      <div class="card-header"><div>
+        <div class="card-author">${author}</div>
+        <div class="card-meta">${when ? '<span>Posted ' + when + '</span>' : ''}</div>
+      </div></div>
+      ${p.comment ? '<div class="card-text"><strong>Your comment:</strong> ' + esc(p.comment) + '</div>' : ''}
+      <div class="card-text" style="color:var(--text-dim)">${preview}${ellipsis}</div>
+      ${p.url ? '<div style="margin-top:0.5rem">' + openLink + '</div>' : ''}
+    </div>`;
+  }).join('');
+}
+
+async function restorePost(key) {
+  if (!currentProfile || !key) return;
+  try {
+    await fetch(`/api/posts/${currentProfile}/restore`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key })
+    });
+  } catch (e) { /* ignore */ }
+  await showLifecycle('TRASH');
+  loadExistingPosts();
+}
+
+async function rejectPost(key, index) {
+  if (!currentProfile || !key) return;
+  try {
+    await fetch(`/api/posts/${currentProfile}/reject`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key })
+    });
+  } catch (e) { /* ignore */ }
+  // Optimistic removal, then re-read the store so list and chips can't diverge.
+  if (typeof index === 'number' && postsData.posts) {
+    postsData.posts.splice(index, 1);
+    renderPosts();
+  }
+  await loadExistingPosts();
+  renderPosts();
+}
+
+// ─── Scraping ───────────────────────────────────────────
+
+
+function renderPostPreview() {
+  const container = document.getElementById('postPreview');
+  const comments = postQueue || [];
+  if (!comments.length) {
+    container.innerHTML = '<p style="color:var(--text-muted);padding:1rem">No comments queued. Generate and review comments first.</p>';
+    return;
+  }
+  container.innerHTML = '<div style="font-size:0.85rem;color:var(--text-dim);margin-bottom:0.75rem">' + comments.length + ' comments ready to post:</div>' +
+    comments.map(function(c) {
+      var author = c.post_author || c.author || 'Unknown';
+      var url = c.post_url || c.url || '';
+      return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:0.75rem;margin-bottom:0.5rem">' +
+        '<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.3rem">Re: <strong>' + esc(author) + '</strong></div>' +
+        '<div style="font-size:0.88rem;color:var(--text)">' + esc(c.comment || c.text || '') + '</div>' +
+        (url ? '<div style="font-size:0.7rem;color:var(--text-dim);margin-top:0.3rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(url) + '</div>' : '') +
+        '</div>';
+    }).join('');
+}
+
+async function startScrape() {
+  if (!currentProfile) return alert('Select a profile first');
+
+  await launchJob(
+    `/api/posts/${currentProfile}/scrape`,
+    {
+      max_posts: parseInt(document.getElementById('maxPosts').value),
+      min_quality: parseInt(document.getElementById('minQuality').value)
+    },
+    document.getElementById('scrapeBtn'),
+    'Start Scraping',
+    document.getElementById('scrapeLog'),
+    () => {
+      loadExistingPosts().then(() => {
+        renderPosts();
+        goStep('posts');
+      });
+      loadLifecycle();
+    }
+  );
+}
+
+// ─── Posts ───────────────────────────────────────────────
+
+function renderPosts() {
+  const container = document.getElementById('postsList');
+  const toolbar = document.getElementById('postsToolbar');
+  const posts = postsData.posts || [];
+  
+  if (!posts.length) {
+    container.innerHTML = `
+      <div class="empty">
+        <div class="empty-icon">◇</div>
+        <h3>No posts yet</h3>
+        <p>Run the scraper first to find AI discussion posts</p>
+      </div>`;
+    toolbar.style.display = 'none';
+    return;
+  }
+  
+  toolbar.style.display = 'flex';
+  document.getElementById('postsToolbarInfo').textContent = posts.length + ' posts found';
+  document.getElementById('postsSubtitle').textContent = `${posts.length} posts found — uncheck ones you don't want`;
+  
+  container.innerHTML = posts.map((p, i) => {
+    const score = p.relevance_score || 0;
+    const scoreCls = score >= 35 ? 'high' : score >= 20 ? 'medium' : '';
+    const preview = (p.text || '').substring(0, 280);
+    const engagement = [
+      p.likes ? p.likes + ' likes' : '',
+      p.comments ? p.comments + ' comments' : '',
+      p.reposts ? p.reposts + ' reposts' : ''
+    ].filter(Boolean).join(' · ');
+    
+    return `
+      <div class="card" id="post-${i}">
+        <input type="checkbox" class="card-check post-check" data-index="${i}" checked>
+        <div class="card-header">
+          <div>
+            <div class="card-author">${esc(p.author_name || 'Unknown')}</div>
+            <div class="card-meta">
+              <span class="tag">${esc(p.post_type || 'other')}</span>
+              <span class="tag">${esc(p.quality || '')}</span>
+              ${engagement ? '<span>' + engagement + '</span>' : ''}
+            </div>
+          </div>
+          <span class="score-badge ${scoreCls}">${score}</span>
+        </div>
+        <div class="card-text">${esc(preview)}${p.text && p.text.length > 280 ? '...' : ''}</div>
+        <div style="margin-top:0.5rem;display:flex;gap:0.9rem;align-items:center">
+          ${p.url ? `<a href="${esc(p.url)}" target="_blank" style="color:var(--text-muted);font-family:var(--mono);font-size:0.75rem;text-decoration:none">Open on LinkedIn ↗</a>` : ''}
+          <button class="btn btn-sm btn-danger" onclick='rejectPost(${JSON.stringify(p.key || p.url || "")}, ${i})'>✕ Reject</button>
+        </div>
+      </div>`;
+  }).join('');
+  
+  updateCounts();
+}
+
+function toggleAllPosts() {
+  const checked = document.getElementById('selectAllPosts').checked;
+  document.querySelectorAll('.post-check').forEach(cb => cb.checked = checked);
+}
+
+function removeUncheckedPosts() {
+  const checks = document.querySelectorAll('.post-check');
+  const keep = [];
+  const rejected = [];
+  checks.forEach((cb, i) => {
+    if (cb.checked) {
+      keep.push(postsData.posts[i]);
+    } else if (postsData.posts[i]) {
+      rejected.push(postsData.posts[i]);
+    }
+  });
+  // Remember the removed posts as TRASH (manual) instead of silently dropping
+  // them, so they show up in the Trash view and can be restored.
+  // Await every reject, then re-read the store rather than splicing the cache —
+  // the server is the only thing that knows the resulting bin state.
+  Promise.all(rejected.map(p => {
+    const key = p.key || p.url;
+    if (!key || !currentProfile) return Promise.resolve();
+    return fetch(`/api/posts/${currentProfile}/reject`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key })
+    }).catch(() => {});
+  })).then(() => {
+    if (rejected.length) {
+      loadExistingPosts().then(() => renderPosts());
+    }
+  });
+  // Optimistic render so the click feels immediate; the reload above corrects it.
+  postsData.posts = keep;
+  renderPosts();
+}
+
+// "Save & Continue" is now just a snapshot-to-disk + navigate. It no longer
+// decides what gets generated — generation always reads the store's NEW bin —
+// so an empty or mis-derived selection here can't silently gut the next run.
+async function savePosts() {
+  if (!currentProfile) return;
+  const posts = postsData.posts || [];
+
+  // Filter to checked only
+  const checks = document.querySelectorAll('.post-check');
+  const kept = [];
+  checks.forEach((cb, i) => {
+    if (cb.checked && posts[i]) kept.push(posts[i]);
+  });
+
+  if (!kept.length) {
+    alert('Nothing selected. Uncheck-and-save would archive an empty list; ' +
+          'use "Remove Unchecked" to reject posts instead.');
+    return;
+  }
+
+  await fetch(`/api/posts/${currentProfile}/save`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ posts: kept, source_file: postsData.file })
+  });
+
+  goStep('generate');
+}
+
+// ─── Generate Comments ──────────────────────────────────
+
+function toggleCommentLimit() {
+  // "No limit" disables the number input; null limit => generate for all posts.
+  document.getElementById('commentLimit').disabled =
+    document.getElementById('commentNoLimit').checked;
+}
+
+async function startGenerate() {
+  if (!currentProfile) return alert('Select a profile first');
+
+  const noLimit = document.getElementById('commentNoLimit').checked;
+  // No input_file: generation ALWAYS runs on the store's NEW bin. Sending a
+  // curated file here is what bypassed the store-driven path for three weeks.
+  const body = {
+    model: document.getElementById('commentModel').value,
+    limit: noLimit ? null : parseInt(document.getElementById('commentLimit').value)
+  };
+
+  await launchJob(
+    `/api/comments/${currentProfile}/generate`,
+    body,
+    document.getElementById('generateBtn'),
+    'Generate Comments',
+    document.getElementById('generateLog'),
+    () => {
+      // Re-read both bins from the store rather than blanking the caches: posts
+      // that were drafted moved NEW -> GENERATED, and posts the evaluator
+      // rejected moved NEW -> TRASH(evaluator_rejected). Only the server knows.
+      loadExistingPosts();
+      loadExistingComments().then(() => {
+        renderComments();
+        goStep('review');
+      });
+    }
+  );
+}
+
+// ─── Review Comments ────────────────────────────────────
+
+function renderComments() {
+  const container = document.getElementById('commentsList');
+  const comments = commentsData.comments || [];
+  // Always say what was filtered out. A queue shorter than the GENERATED bin is
+  // now explained by a number instead of looking like the drafts vanished.
+  const reviewed = commentsData.reviewed_count || 0;
+  const genBin = (commentsData.counts && commentsData.counts.GENERATED) || 0;
+  const reviewedNote = reviewed
+    ? ` · ${reviewed} already reviewed and awaiting posting (${genBin} drafted in total)`
+    : '';
+
+  if (!comments.length) {
+    container.innerHTML = `
+      <div class="empty">
+        <div class="empty-icon">◇</div>
+        <h3>Nothing to review</h3>
+        <p>${reviewed
+              ? `All ${genBin} drafted comment(s) have been reviewed — continue to Post.`
+              : 'Generate comments from your NEW posts first.'}</p>
+      </div>`;
+    document.getElementById('reviewSubtitle').textContent =
+      reviewed ? `0 awaiting review${reviewedNote}` : 'Edit or remove comments before posting';
+    return;
+  }
+
+  document.getElementById('reviewSubtitle').textContent =
+    `${comments.length} comments — edit or remove before posting${reviewedNote}`;
+
+  container.innerHTML = comments.map((c, i) => {
+    const author = c.post_author || c.author || 'Unknown';
+    const preview = (c.post_preview || c.post_text || '').substring(0, 120);
+    
+    return `
+      <div class="card comment-card" id="comment-${i}">
+        <div class="for-post">
+          Re: <strong>${esc(author)}</strong> — ${esc(preview)}${preview.length >= 120 ? '...' : ''}
+          ${c.url ? ` <a href="${esc(c.url)}" target="_blank">↗</a>` : ''}
+        </div>
+        <textarea class="comment-edit" id="cedit-${i}" rows="3">${esc(c.comment || c.text || '')}</textarea>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:0.5rem">
+          <span class="comment-style">${esc(c.style || '')} · ${c.word_count || '?'} words</span>
+          <button class="btn btn-danger btn-sm" onclick="removeComment(${i})">Remove</button>
+        </div>
+      </div>`;
+  }).join('');
+  
+  updateCounts();
+}
+
+function removeComment(index) {
+  commentsData.comments.splice(index, 1);
+  renderComments();
+}
+
+async function saveComments() {
+  if (!currentProfile) return;
+
+  // Collect edited text from the textareas. `key` rides along so the server can
+  // write each edit back onto the right store record — an edit that only reached
+  // the TXT file would never be what the scheduler actually posts.
+  const comments = (commentsData.comments || []).map((c, i) => {
+    const textarea = document.getElementById(`cedit-${i}`);
+    if (textarea) {
+      c.comment = textarea.value;
+      c.word_count = textarea.value.split(/\s+/).filter(Boolean).length;
+    }
+    return c;
+  });
+
+  if (!comments.length) {
+    alert('Nothing to save — the review queue is empty.');
+    return;
+  }
+
+  const res = await fetch(`/api/comments/${currentProfile}/save`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ comments })
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    alert(err.error || 'Could not save comments.');
+    return;
+  }
+
+
+  // Re-read both the review queue and the post queue from the store. The saved
+  // drafts are now reviewed_at-stamped, so they leave Review and appear under
+  // Post — driven by store state, not by which files still exist on disk.
+  await loadExistingComments();
+  await loadPostQueue();
+
+  document.getElementById('postCountInput').value = Math.min(comments.length, 3);
+  goStep('post');
+}
+
+// ─── Posting ────────────────────────────────────────────
+
+async function startPosting() {
+  if (!currentProfile) return alert('Select a profile first');
+
+  // No comments_file: the server builds the poster input from the store's
+  // GENERATED bin (reviewed drafts first), so posting can't fall back to a
+  // stale — or empty — TXT file.
+  const body = { count: parseInt(document.getElementById('postCountInput').value) };
+
+  await launchJob(
+    `/api/post/${currentProfile}`,
+    body,
+    document.getElementById('postBtn'),
+    'Start Posting',
+    document.getElementById('postLog'),
+    () => {
+      // Posted comments become COMMENTED in the store (reconciled from
+      // posting_progress.json), so re-read every bin instead of guessing.
+      loadExistingPosts();
+      loadExistingComments();
+      loadPostQueue().then(() => renderPostPreview());
+    }
+  );
+}
+
+// ─── Job Polling ────────────────────────────────────────
+
+function pollJob(jobId, logEl, onDone, onFail) {
+  const iv = setInterval(async () => {
+    try {
+      const res = await fetch(`/api/jobs/${jobId}`);
+      const job = await res.json();
+      
+      // Render log
+      if (job.log && job.log.length) {
+        logEl.innerHTML = job.log.map(line => {
+          let cls = '';
+          if (line.includes('ERROR') || line.includes('❌') || line.includes('failed')) cls = 'error';
+          if (line.includes('✓') || line.includes('✅') || line.includes('Success')) cls = 'success';
+          return `<div class="line ${cls}">${esc(line)}</div>`;
+        }).join('');
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+      
+      if (job.status === 'completed') {
+        clearInterval(iv);
+        onDone();
+        refreshActiveJobs();
+      } else if (job.status === 'failed') {
+        clearInterval(iv);
+        logEl.innerHTML += `<div class="line error">Job failed: ${esc(job.error || 'Unknown error')}</div>`;
+        onFail();
+        refreshActiveJobs();
+      }
+    } catch(e) {
+      clearInterval(iv);
+      logEl.innerHTML += `<div class="line error">Polling error: ${e.message}</div>`;
+      onFail();
+      refreshActiveJobs();
+    }
+  }, 2000);
+}
+
+// ─── Active Jobs Monitor ────────────────────────────
+
+let activeJobsInterval = null;
+
+function startActiveJobsPolling() {
+  if (activeJobsInterval) return;
+  refreshActiveJobs();
+  activeJobsInterval = setInterval(refreshActiveJobs, 3000);
+}
+
+async function refreshActiveJobs() {
+  try {
+    const res = await fetch('/api/jobs/active');
+    const data = await res.json();
+    const jobsBar = document.getElementById('jobsBar');
+    const jobsList = document.getElementById('jobsList');
+
+    if (data.jobs && data.jobs.length > 0) {
+      jobsBar.classList.add('active');
+      const catLabels = {
+        'scrape': '🔍 Scraping',
+        'generate_comments': '💬 Gen Comments',
+        'post_comments': '📤 Posting Comments',
+        'connector': '🔗 Connecting',
+        'generate_posts': '✏️ Gen Posts',
+        'generate_article': '📰 Gen Article Post',
+        'publish': '📣 Publishing',
+      };
+      let connectorActive = false;
+      jobsList.innerHTML = data.jobs.map(j => {
+        const label = catLabels[j.category] || j.category;
+        const taskIcon = j.task_type === 'browser' ? '🌐' : '⚡';
+        const isConnector = j.category === 'connector' ||
+          j.category === 'connect' ||
+          (j.id && String(j.id).startsWith('connect_'));
+        let stopBtn = '';
+        if (isConnector) {
+          connectorActive = true;
+          stopBtn = ` <button class="jb-stop" onclick="stopConnector()" title="Stop connector">Stop</button>`;
+        }
+        return `<span class="jb-chip">${taskIcon} <span class="jbc-profile">${esc(j.profile)}</span> <span class="jbc-cat">${label}</span>${stopBtn}</span>`;
+      }).join('');
+      const csBtn = document.getElementById('connectorStopBtn');
+      if (csBtn) csBtn.style.display = connectorActive ? '' : 'none';
+    } else {
+      jobsBar.classList.remove('active');
+      const csBtn = document.getElementById('connectorStopBtn');
+      if (csBtn) csBtn.style.display = 'none';
+    }
+  } catch(e) { /* silent */ }
+}
+
+// Start polling on page load
+document.addEventListener('DOMContentLoaded', startActiveJobsPolling);
+
+// ─── Async Job Launcher ─────────────────────────────
+
+async function launchJob(url, body, btn, btnLabel, logEl, onDone) {
+  const spinLabel = btnLabel.replace(/^[^a-zA-Z]*/, '').trim();
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner"></span> ${spinLabel}...`;
+  logEl.style.display = 'block';
+  logEl.innerHTML = `<div class="line">Starting ${spinLabel.toLowerCase()}...</div>`;
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    if (res.status === 409) {
+      const err = await res.json();
+      logEl.innerHTML += `<div class="line error">⚠️ ${esc(err.error || 'A browser task is already running for this profile')}</div>`;
+      btn.disabled = false;
+      btn.innerHTML = btnLabel;
+      return;
+    }
+
+    const { job_id } = await res.json();
+    refreshActiveJobs();
+
+    pollJob(job_id, logEl, () => {
+      btn.disabled = false;
+      btn.innerHTML = btnLabel;
+      if (onDone) onDone();
+    }, () => {
+      btn.disabled = false;
+      btn.innerHTML = btnLabel;
+    });
+  } catch(e) {
+    logEl.innerHTML += `<div class="line error">Request failed: ${e.message}</div>`;
+    btn.disabled = false;
+    btn.innerHTML = btnLabel;
+  }
+}
+
+// ─── Profile Modal ──────────────────────────────────────
+
+function openAddProfile() {
+  document.getElementById('addProfileModal').classList.add('active');
+  document.getElementById('newProfileName').focus();
+}
+
+function closeModal() {
+  document.getElementById('addProfileModal').classList.remove('active');
+  document.getElementById('newProfileName').value = '';
+  document.getElementById('newProfileEmail').value = '';
+  document.getElementById('newProfilePass').value = '';
+}
+
+async function addProfile() {
+  const name = document.getElementById('newProfileName').value.trim();
+  const username = document.getElementById('newProfileEmail').value.trim();
+  const password = document.getElementById('newProfilePass').value.trim();
+  
+  if (!name || !username || !password) return alert('All fields required');
+  
+  const res = await fetch('/api/profiles', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, username, password, set_default: false })
+  });
+  
+  const data = await res.json();
+  if (data.error) return alert(data.error);
+  
+  closeModal();
+  await loadProfiles();
+  
+  // Select the new profile
+  document.getElementById('profileSelect').value = name;
+  switchProfile();
+}
+
+// ─── Profile Config Editor ──────────────────────────────
+
+function populateConfigForm(config) {
+  const cg = (config && config.comment_generator) || {};
+  const pf = (config && config.post_finder) || {};
+  const joinArr = (a) => Array.isArray(a) ? a.join(', ') : (a || '');
+  document.getElementById('cfgPersona').value = cg.persona || '';
+  document.getElementById('cfgTone').value = cg.tone || '';
+  document.getElementById('cfgVoice').value = cg.voice || '';
+  document.getElementById('cfgTopics').value = joinArr(cg.topics_of_expertise);
+  document.getElementById('cfgAvoid').value = joinArr(cg.things_to_avoid);
+  document.getElementById('cfgKw1').value = joinArr(pf.keywords_tier1);
+  document.getElementById('cfgKw2').value = joinArr(pf.keywords_tier2);
+}
+
+async function openConfigModal() {
+  if (!currentProfile) return alert('Select a profile first');
+  document.getElementById('configProfileName').textContent = currentProfile;
+  document.getElementById('configMsg').style.display = 'none';
+  try {
+    const res = await fetch(`/api/profiles/${currentProfile}/config`);
+    const data = await res.json();
+    if (data.error) return alert(data.error);
+    populateConfigForm(data.config || data);
+    document.getElementById('configModal').classList.add('active');
+  } catch(e) {
+    alert('Could not load config: ' + e.message);
+  }
+}
+
+function closeConfigModal() {
+  document.getElementById('configModal').classList.remove('active');
+}
+
+// Split a comma-separated string into a trimmed, non-empty array
+function splitCsv(id) {
+  return document.getElementById(id).value
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+async function saveConfig() {
+  if (!currentProfile) return;
+  const partial = {
+    comment_generator: {
+      persona: document.getElementById('cfgPersona').value.trim(),
+      tone: document.getElementById('cfgTone').value.trim(),
+      voice: document.getElementById('cfgVoice').value.trim(),
+      topics_of_expertise: splitCsv('cfgTopics'),
+      things_to_avoid: splitCsv('cfgAvoid'),
+    },
+    post_finder: {
+      keywords_tier1: splitCsv('cfgKw1'),
+      keywords_tier2: splitCsv('cfgKw2'),
+    }
+  };
+  try {
+    const res = await fetch(`/api/profiles/${currentProfile}/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(partial)
+    });
+    const data = await res.json();
+    if (data.error) return alert(data.error);
+    const msg = document.getElementById('configMsg');
+    msg.textContent = '✓ Config saved';
+    msg.style.display = 'block';
+    setTimeout(closeConfigModal, 800);
+  } catch(e) {
+    alert('Save failed: ' + e.message);
+  }
+}
+
+async function resetConfig() {
+  if (!currentProfile) return;
+  try {
+    const res = await fetch(`/api/profiles/${currentProfile}/config/reset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    const data = await res.json();
+    if (data.error) return alert(data.error);
+    populateConfigForm(data.config || data);
+    const msg = document.getElementById('configMsg');
+    msg.textContent = '✓ Reset to defaults';
+    msg.style.display = 'block';
+  } catch(e) {
+    alert('Reset failed: ' + e.message);
+  }
+}
+
+// ─── Set Default Profile ────────────────────────────────
+
+async function setDefaultProfile() {
+  if (!currentProfile) return alert('Select a profile first');
+  try {
+    const res = await fetch(`/api/profiles/${currentProfile}/default`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    const data = await res.json();
+    if (data.error) return alert(data.error);
+    const sel = document.getElementById('profileSelect');
+    const keep = sel.value;
+    await loadProfiles();
+    if (keep) { sel.value = keep; switchProfile(); }
+  } catch(e) {
+    alert('Could not set default: ' + e.message);
+  }
+}
+
+// ─── Selector Health Check ──────────────────────────────
+
+async function checkSelectors() {
+  if (!currentProfile) return alert('Select a profile first');
+  const btn = document.getElementById('checkSelectorsBtn');
+  const badge = document.getElementById('selectorBadge');
+  const result = document.getElementById('selectorResult');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Checking...';
+  badge.style.display = 'none';
+  result.style.display = 'none';
+
+  const finish = () => { btn.disabled = false; btn.innerHTML = 'Check Selectors'; };
+
+  try {
+    const res = await fetch(`/api/health/${currentProfile}/selectors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    if (res.status === 409) {
+      const err = await res.json();
+      alert(err.error || 'A task is already running for this profile');
+      return finish();
+    }
+    const { job_id } = await res.json();
+    refreshActiveJobs();
+
+    const iv = setInterval(async () => {
+      try {
+        const jr = await fetch(`/api/jobs/${job_id}`);
+        const job = await jr.json();
+        if (job.status === 'completed') {
+          clearInterval(iv);
+          renderSelectorResult(job.result || {});
+          refreshActiveJobs();
+          finish();
+        } else if (job.status === 'failed') {
+          clearInterval(iv);
+          result.style.display = 'block';
+          result.textContent = 'Health check failed: ' + (job.error || 'Unknown error');
+          refreshActiveJobs();
+          finish();
+        }
+      } catch(e) {
+        clearInterval(iv);
+        result.style.display = 'block';
+        result.textContent = 'Polling error: ' + e.message;
+        finish();
+      }
+    }, 2000);
+  } catch(e) {
+    result.style.display = 'block';
+    result.textContent = 'Request failed: ' + e.message;
+    finish();
+  }
+}
+
+function renderSelectorResult(result) {
+  const badge = document.getElementById('selectorBadge');
+  const detail = document.getElementById('selectorResult');
+  const status = result.status || 'UNKNOWN';
+  const colors = {
+    HEALTHY: 'var(--green)',
+    DEGRADED: 'var(--yellow)',
+    BROKEN: 'var(--red)',
+  };
+  const color = colors[status] || 'var(--text-muted)';
+  badge.className = 'cfg-badge';
+  badge.style.background = color;
+  badge.style.color = '#000';
+  badge.textContent = status;
+  badge.style.display = 'inline-block';
+
+  const failed = result.failed || [];
+  if (failed.length) {
+    detail.style.display = 'block';
+    detail.innerHTML = 'Failed selectors: ' +
+      failed.map(f => `<span style="color:var(--red)">${esc(f)}</span>`).join(', ');
+  } else {
+    detail.style.display = 'none';
+    detail.innerHTML = '';
+  }
+}
+
+// ─── Helpers ────────────────────────────────────────────
+
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+
+// Close modal on backdrop click
+document.getElementById('addProfileModal').addEventListener('click', (e) => {
+  if (e.target.classList.contains('modal-backdrop')) closeModal();
+});
+document.getElementById('configModal').addEventListener('click', (e) => {
+  if (e.target.classList.contains('modal-backdrop')) closeConfigModal();
+});
+
+// Keyboard shortcut: Escape closes modals
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { closeModal(); closeConfigModal(); }
+});
+
+// ─── Mode Switching ─────────────────────────────────────
+
+function switchMode(mode) {
+  document.querySelectorAll('.mode-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.mode === mode);
+  });
+  document.querySelectorAll('.mode-panel').forEach(p => {
+    p.classList.toggle('active', p.id === 'mode-' + mode);
+  });
+
+  if (mode === 'connector') {
+    loadConnectorStats();
+    loadConnectorHistory();
+  }
+  if (mode === 'poster') {
+    loadPosterQueue();
+  }
+  if (mode === 'scheduler') {
+    loadScheduler();
+  }
+  if (mode === 'scheduled') {
+    loadScheduledQueue();
+    loadDrain(true);
+  }
+}
+
+// ─── Scheduled Posting (Buffer hybrid) ──────────────────
+//
+// Read-only in Phase 1: this renders scheduled_posts_state.json and writes
+// nothing. There is deliberately no control here that could publish or comment.
+
+const SCHP_BADGE = {
+  pending:        {bg: 'rgba(255,255,255,0.10)', fg: 'var(--text-dim)'},
+  held:           {bg: 'rgba(190,150,255,0.16)', fg: '#c4a6ff'},
+  scheduled:      {bg: 'rgba(90,160,255,0.16)',  fg: '#8ab6ff'},
+  published:      {bg: 'rgba(120,200,255,0.16)', fg: '#7fd0ff'},
+  commented:      {bg: 'rgba(80,200,120,0.16)',  fg: '#6fd694'},
+  comment_failed: {bg: 'rgba(255,120,80,0.18)',  fg: '#ff9a72'},
+  failed:         {bg: 'rgba(255,90,90,0.16)',   fg: '#ff8080'}
+};
+
+function schpEsc(v) {
+  return String(v === null || v === undefined ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function schpWhen(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d)) return schpEsc(iso);
+  return d.toLocaleString([], {month: 'short', day: 'numeric',
+                               hour: '2-digit', minute: '2-digit'});
+}
+
+function schpToggleText(key) {
+  const el = document.getElementById('schpFull-' + key);
+  const btn = document.getElementById('schpToggle-' + key);
+  if (!el) return;
+  const open = el.style.display !== 'none';
+  el.style.display = open ? 'none' : 'block';
+  btn.textContent = open ? 'Show full text' : 'Hide';
+}
+
+// Deleting a row removes OUR RECORD. It cannot unschedule a Buffer post or
+// unpublish a LinkedIn one, so a row with a live post says so before it goes,
+// and needs a second, explicit confirmation.
+async function schpDeleteRow(key, hasPost, postId) {
+  if (hasPost) {
+    const ok = confirm(
+      'This row has a LIVE Buffer post (' + postId + ').\n\n' +
+      'Deleting it here removes only OUR record of it. The post stays\n' +
+      'scheduled in Buffer, and if it has already published it stays on\n' +
+      'LinkedIn. This does NOT unschedule or unpublish anything.\n\n' +
+      'Remove our record anyway?');
+    if (!ok) return;
+  } else if (!confirm('Remove this row from the queue?')) {
+    return;
+  }
+  const url = `/api/scheduled/${currentProfile}/rows/${encodeURIComponent(key)}` +
+              (hasPost ? '?confirm_live=1' : '');
+  const res = await fetch(url, {method: 'DELETE'});
+  const d = await res.json();
+  if (!res.ok) {
+    alert(d.error || 'delete failed');
+    return;
+  }
+  await loadScheduledQueue();
+}
+
+function schpRow(r) {
+  const badge = SCHP_BADGE[r.status] || SCHP_BADGE.pending;
+  const bits = [];
+  if (r.due_at) bits.push('due ' + schpWhen(r.due_at));
+  if (r.post_id) bits.push('buffer ' + schpEsc(r.post_id));
+  if (r.image_url) bits.push('image');
+  if (r.first_comment_link) bits.push('comment link');
+
+  let link = '';
+  if (r.permalink) {
+    link = '<div style="margin-top:0.35rem;font-size:0.78rem">' +
+           '<a href="' + schpEsc(r.permalink) + '" target="_blank" ' +
+           'rel="noopener" style="color:#7fd0ff">view the published post ↗</a></div>';
+  }
+
+  // A failure is only useful if it says what to do about it. FAILED published
+  // nothing; COMMENT_FAILED left a real post live. Those must never read alike.
+  let problem = '';
+  if (r.errors && r.errors.length) {
+    problem += '<div style="margin-top:0.4rem;font-size:0.78rem;color:#ff9a72">' +
+               r.errors.map(e => schpEsc(e)).join('<br>') + '</div>';
+  }
+  if (r.action) {
+    problem += '<div style="margin-top:0.25rem;font-size:0.78rem;color:#ffcc66">' +
+               '→ ' + schpEsc(r.action) + '</div>';
+  }
+
+  // A held row is waiting on capacity, not on a person. It gets its own line
+  // and deliberately never reads like a failure.
+  let hold = '';
+  if (r.hold_reason) {
+    hold = '<div style="margin-top:0.4rem;font-size:0.78rem;color:#c4a6ff">' +
+           schpEsc(r.hold_reason) + '</div>';
+  }
+
+  const truncated = r.full_text && r.full_text.length > (r.preview || '').length;
+  const expand = truncated
+    ? '<button id="schpToggle-' + r.key + '" class="btn btn-sm" ' +
+      'style="margin-top:0.4rem;font-size:0.72rem;padding:0.15rem 0.5rem" ' +
+      'onclick="schpToggleText(\'' + r.key + '\')">Show full text</button>' +
+      '<div id="schpFull-' + r.key + '" style="display:none;margin-top:0.45rem;' +
+      'padding:0.6rem 0.75rem;border-radius:6px;background:rgba(255,255,255,0.04);' +
+      'font-size:0.82rem;line-height:1.5;white-space:pre-wrap">' +
+      schpEsc(r.full_text) + '</div>'
+    : '';
+
+  // Where this row actually IS, in words. The badge gives the state a name;
+  // this says what the name means, so "Published" cannot be read as "about to
+  // publish". It is the sentence that was computed all along and never shown.
+  const meaning = r.meaning
+    ? '<div style="margin-top:0.3rem;font-size:0.76rem;color:var(--text-dim)">'
+      + schpEsc(r.meaning) + '</div>'
+    : '';
+
+  const img = schpImageCell(r);
+
+  const del = '<button class="btn btn-sm" title="Remove from the queue" ' +
+    'style="margin-top:0.4rem;font-size:0.72rem;padding:0.15rem 0.5rem;' +
+    'color:#ff9a72" onclick="schpDeleteRow(\'' + r.key + '\',' +
+    (r.has_post ? 'true' : 'false') + ',\'' + schpEsc(r.post_id || '') + '\')">' +
+    'Delete</button>';
+
+  return '<div style="padding:0.7rem 0.85rem;border:1px solid var(--border);' +
+    'border-radius:8px;margin-bottom:0.5rem;background:var(--panel)">' +
+    '<div style="display:flex;justify-content:space-between;gap:1rem;align-items:flex-start">' +
+      img.thumb +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="font-size:0.86rem;line-height:1.45">' +
+          (schpEsc(r.preview) || '<span style="color:var(--text-dim)">(no text)</span>') +
+        '</div>' +
+        meaning + img.line + link + hold + problem + expand +
+        '<div style="display:flex;gap:0.4rem">' + del + '</div>' +
+      '</div>' +
+      '<div style="text-align:right;white-space:nowrap">' +
+        '<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:999px;' +
+          'font-size:0.72rem;background:' + badge.bg + ';color:' + badge.fg + '">' +
+          schpEsc(r.label) + '</span>' +
+        '<div style="margin-top:0.3rem;font-size:0.7rem;color:var(--text-dim)">' +
+          schpEsc(bits.join(' · ')) + '</div>' +
+      '</div>' +
+    '</div></div>';
+}
+
+// What happened to a row's image, as a thumbnail plus one line of text.
+//
+// Every state renders something. The one thing this must never do is show
+// nothing for a row that asked for an image and did not get one.
+function schpImageCell(r) {
+  const im = r.image || {state: 'none'};
+  const detail = schpEsc(im.detail || '');
+
+  if (im.state === 'attached' && im.url) {
+    // The R2 objects are public, so the browser loads them directly. If one
+    // fails to load, say so - a silently broken thumbnail is a blank cell
+    // again, which is the whole failure being fixed here.
+    const alt = schpEsc(im.filename || 'attached image');
+    return {
+      thumb: '<div class="schp-thumb" id="schpThumb-' + r.key + '">' +
+             '<img loading="lazy" decoding="async" src="' + schpEsc(im.url) + '" ' +
+             'alt="' + alt + '" ' +
+             'onerror="schpThumbBroke(\'' + r.key + '\')"></div>',
+      line: '<div class="schp-imgline schp-imgline-ok">🖼 ' +
+            '<a href="' + schpEsc(im.url) + '" target="_blank" rel="noopener" ' +
+            'style="color:#7fd0ff">image attached ↗</a></div>',
+    };
+  }
+
+  if (im.state === 'ready') {
+    return {
+      thumb: '<div class="schp-thumb schp-thumb-ready">🖼<br>ready</div>',
+      line: '<div class="schp-imgline schp-imgline-ok">🖼 image ready · ' +
+            '<span title="' + detail + '">' + schpEsc(im.filename || im.path) +
+            '</span> — uploads when scheduled</div>',
+    };
+  }
+
+  if (im.state === 'missing' || im.state === 'lost') {
+    const heading = im.state === 'missing'
+      ? 'image file NOT found' : 'image did NOT make it onto this post';
+    return {
+      thumb: '<div class="schp-thumb schp-thumb-problem">⚠</div>',
+      line: '<div class="schp-imgline schp-imgline-problem">⚠ ' + heading +
+            '</div><div class="schp-imgline schp-imgline-problem" ' +
+            'style="font-weight:400">' + detail + '</div>',
+    };
+  }
+
+  return {
+    thumb: '<div class="schp-thumb schp-thumb-none">text<br>only</div>',
+    line: '<div class="schp-imgline schp-imgline-none" title="' + detail +
+          '">text-only — no image for this row</div>',
+  };
+}
+
+// A thumbnail that fails to load must not leave an empty square.
+function schpThumbBroke(key) {
+  const box = document.getElementById('schpThumb-' + key);
+  if (!box) return;
+  box.className = 'schp-thumb schp-thumb-problem';
+  box.innerHTML = '⚠<br>load<br>failed';
+  box.title = 'The image is attached to the post, but its URL did not load here.';
+}
+
+function schpReport(d) {
+  const box = document.getElementById('schpAddResult');
+  const parts = [];
+  const c = d.counts || {};
+  parts.push('<div style="font-size:0.82rem;margin-bottom:0.4rem">' +
+    'read ' + (c.read || 0) + ' · <span style="color:#6fd694">queued ' +
+    (c.accepted || 0) + '</span>' +
+    (c.rejected ? ' · <span style="color:#ff8080">rejected ' + c.rejected + '</span>' : '') +
+    (c.skipped ? ' · <span style="color:var(--text-dim)">skipped ' + c.skipped + '</span>' : '') +
+    '</div>');
+
+  // A column we do not read is the quiet failure: rows are ACCEPTED and the
+  // image never attaches. Shown above the rejections, because a run that looks
+  // entirely successful is exactly when nobody scrolls.
+  (d.warnings || []).forEach(w => {
+    parts.push('<div style="padding:0.5rem 0.7rem;border-radius:6px;margin-bottom:0.35rem;' +
+      'background:rgba(255,170,0,0.12);border-left:3px solid #ffcc66;' +
+      'font-size:0.8rem;color:#ffcc66">' + schpEsc(w) + '</div>');
+  });
+
+  // Rejections have to say WHICH row and WHAT is wrong, or the user is left
+  // diffing a spreadsheet against a count.
+  (d.rejected || []).forEach(r => {
+    parts.push('<div style="padding:0.5rem 0.7rem;border-radius:6px;margin-bottom:0.35rem;' +
+      'background:rgba(255,90,90,0.10);border-left:3px solid #ff8080">' +
+      '<div style="font-size:0.8rem"><strong>row ' + r.index + '</strong> — ' +
+      (schpEsc(r.preview) || '<span style="color:var(--text-dim)">(no text)</span>') + '</div>' +
+      r.errors.map(e => '<div style="font-size:0.78rem;color:#ff9a72">' +
+        schpEsc(e) + '</div>').join('') + '</div>');
+  });
+  (d.skipped || []).forEach(r => {
+    parts.push('<div style="padding:0.45rem 0.7rem;border-radius:6px;margin-bottom:0.35rem;' +
+      'background:rgba(255,255,255,0.05);font-size:0.78rem;color:var(--text-dim)">' +
+      'row ' + r.index + ' — ' + schpEsc(r.reason) + '</div>');
+  });
+  box.innerHTML = parts.join('');
+}
+
+async function schpPostRows(payload) {
+  const res = await fetch(`/api/scheduled/${currentProfile}/rows`, payload);
+  const d = await res.json();
+  if (!res.ok) {
+    document.getElementById('schpAddResult').innerHTML =
+      '<div style="color:#ff8080;font-size:0.82rem">' + schpEsc(d.error) + '</div>';
+    return null;
+  }
+  schpReport(d);
+  await loadScheduledQueue();
+  return d;
+}
+
+async function schpUploadCsv() {
+  const input = document.getElementById('schpCsvFile');
+  if (!input.files || !input.files[0]) {
+    document.getElementById('schpAddResult').innerHTML =
+      '<div style="color:#ffcc66;font-size:0.82rem">Choose a CSV first.</div>';
+    return;
+  }
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  await schpPostRows({method: 'POST', body: fd});
+}
+
+async function schpAddOne() {
+  const body = {
+    date: document.getElementById('schpDate').value,
+    time_window: document.getElementById('schpWindow').value,
+    post_text: document.getElementById('schpText').value,
+    topic: document.getElementById('schpTopic').value,
+    tags: document.getElementById('schpTags').value,
+    image_path: document.getElementById('schpImage').value,
+    first_comment_link: document.getElementById('schpLink').value
+  };
+  const d = await schpPostRows({
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  });
+  // Only clear the form when the row actually made it in - otherwise the user
+  // loses what they typed along with the chance to fix it.
+  if (d && d.counts.accepted) {
+    ['schpText', 'schpTopic', 'schpImage', 'schpLink'].forEach(
+      id => { document.getElementById(id).value = ''; });
+  }
+}
+
+// Scheduling creates REAL posts that publish on a timer and cannot be
+// unpublished. So the confirmation names the account the channel id actually
+// resolves to - asked of Buffer, not read from local config, which could go
+// stale and still say "dev".
+async function schpSchedule() {
+  const btn = document.getElementById('schpScheduleBtn');
+  const out = document.getElementById('schpScheduleResult');
+  out.innerHTML = '';
+
+  let pre;
+  try {
+    const res = await fetch(`/api/scheduled/${currentProfile}/schedule/preflight`);
+    pre = await res.json();
+  } catch (e) {
+    out.innerHTML = '<div style="color:#ff8080">' + schpEsc(e.message) + '</div>';
+    return;
+  }
+
+  if (!pre.ready) {
+    out.innerHTML = pre.problems.map(p =>
+      '<div style="color:#ffcc66;font-size:0.82rem">' + schpEsc(p) + '</div>').join('');
+    return;
+  }
+
+  const ch = pre.channel || {};
+  const who = ch.displayName || ch.name || pre.channel_id;
+  const handle = ch.name ? ' (' + ch.service + ' · ' + ch.name + ')' : '';
+  const n = pre.pending_count;
+  const send = (pre.will_send === undefined) ? n : pre.will_send;
+  const hold = pre.will_hold || 0;
+  const lines = [
+    'Schedule ' + send + ' post' + (send === 1 ? '' : 's') + ' to ' + who + handle + '?',
+    '',
+    'This creates real scheduled posts on that account. They will publish at',
+    'their scheduled times and cannot be unpublished.',
+    ''
+  ];
+  // Promising to schedule 15 when Buffer will accept 3 is how a plan limit read
+  // as a broken calendar.
+  if (pre.slots) {
+    lines.push('Buffer slots: ' + pre.slots.used + ' of ' + pre.slots.limit +
+               ' used, ' + pre.slots.free + ' free.');
+  }
+  if (hold) {
+    lines.push(hold + ' row' + (hold === 1 ? '' : 's') +
+               ' will be HELD until a slot frees. Nothing is wrong with them.');
+  }
+  lines.push('');
+  pre.previews.forEach(p => lines.push('  • ' + p));
+  if (n > pre.previews.length) {
+    lines.push('  … and ' + (n - pre.previews.length) + ' more');
+  }
+  if (!confirm(lines.join('\n'))) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Scheduling…';
+  try {
+    const res = await fetch(`/api/scheduled/${currentProfile}/schedule`,
+                            {method: 'POST'});
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || 'schedule failed');
+    if (!d.job_id) {
+      out.innerHTML = '<div style="color:var(--text-dim);font-size:0.82rem">' +
+        schpEsc(d.note || 'Nothing to do.') + '</div>';
+      return;
+    }
+    await schpAwaitJob(d.job_id, out);
+  } catch (e) {
+    out.innerHTML = '<div style="color:#ff8080">' + schpEsc(e.message) + '</div>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Schedule pending…';
+    await loadScheduledQueue();
+  }
+}
+
+async function schpAwaitJob(jobId, out) {
+  for (;;) {
+    await new Promise(r => setTimeout(r, 1200));
+    const res = await fetch(`/api/jobs/${jobId}`);
+    const j = await res.json();
+    const tail = (j.log || []).slice(-6).map(l =>
+      '<div>' + schpEsc(l) + '</div>').join('');
+    out.innerHTML = '<div style="font-size:0.8rem;color:var(--text-dim);' +
+      'font-family:var(--mono)">' + tail + '</div>';
+    if (j.status === 'completed') {
+      const r = j.result || {};
+      out.innerHTML =
+        '<div style="font-size:0.84rem"><span style="color:#6fd694">scheduled ' +
+        (r.scheduled || 0) + '</span>' +
+        (r.held ? ' · <span style="color:#c4a6ff">held ' + r.held + '</span>' : '') +
+        (r.failed ? ' · <span style="color:#ff8080">failed ' + r.failed + '</span>' : '') +
+        '</div>' + out.innerHTML;
+      return;
+    }
+    if (j.status === 'failed') {
+      out.innerHTML = '<div style="color:#ff8080;font-size:0.84rem">' +
+        schpEsc(j.error || 'the job failed') + '</div>' + out.innerHTML;
+      return;
+    }
+  }
+}
+
+async function loadScheduledQueue() {
+  if (!currentProfile) return;
+  const box = document.getElementById('schpQueue');
+  box.innerHTML = '<div style="color:var(--text-dim)">Loading…</div>';
+  try {
+    const res = await fetch(`/api/scheduled/${currentProfile}/queue`);
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || 'failed to load the queue');
+
+    // Identity, always visible - this section acts on a real account.
+    const idLine = document.getElementById('schpIdentityLine');
+    const warn = document.getElementById('schpConfigWarn');
+    if (d.config.identity_configured) {
+      idLine.innerHTML = 'Acts as <strong style="color:#7fd0ff">' +
+        schpEsc(d.config.identity_slug) + '</strong>' +
+        (d.config.buffer_channel_id
+          ? ' · Buffer channel ' + schpEsc(d.config.buffer_channel_id) : '');
+      warn.style.display = 'none';
+    } else {
+      idLine.innerHTML = '<span style="color:#ffcc66">No identity configured</span>';
+      warn.style.display = 'block';
+      warn.innerHTML = 'Set <code>scheduled_posting.identity_slug</code> in this ' +
+        'profile\'s config before anything can post or comment. Until it is set, ' +
+        'the comment sweep cannot be enabled — there would be no identity to enforce.';
+    }
+    document.getElementById('schpStateFile').textContent = d.state_file || '';
+
+    // Counts, in the display order the endpoint dictates.
+    document.getElementById('schpCounts').innerHTML = d.order.map(st => {
+      const b = SCHP_BADGE[st] || SCHP_BADGE.pending;
+      const n = d.counts[st] || 0;
+      const label = (d.labels && d.labels[st]) || st;
+      return '<span style="padding:0.25rem 0.6rem;border-radius:999px;font-size:0.75rem;' +
+        'background:' + b.bg + ';color:' + b.fg + ';opacity:' + (n ? 1 : 0.45) + '">' +
+        schpEsc(label) + ' ' + n + '</span>';
+    }).join('');
+
+    if (!d.total) {
+      box.innerHTML = '<div style="color:var(--text-dim);padding:1rem 0">' +
+        'Nothing queued yet.</div>';
+      return;
+    }
+    let html = '';
+    d.order.forEach(st => {
+      const rows = d.posts[st] || [];
+      if (!rows.length) return;
+      const lbl = (d.labels && d.labels[st]) || st;
+      const mn = (d.meanings && d.meanings[st]) ? ' — ' + schpEsc(d.meanings[st]) : '';
+      html += '<div style="margin:0.9rem 0 0.4rem;font-size:0.78rem;' +
+        'color:var(--text-dim);text-transform:uppercase;letter-spacing:0.05em">' +
+        schpEsc(lbl) + ' (' + rows.length + ')' + mn + '</div>';
+      html += rows.map(schpRow).join('');
+    });
+    box.innerHTML = html;
+  } catch (e) {
+    box.innerHTML = '<div style="color:#ff8080">' + schpEsc(e.message) + '</div>';
+  }
+}
+
+// ─── Scheduler ──────────────────────────────────────────
+
+function fmtFireTime(iso, willSkip, status) {
+  if (!iso) return '—';
+  const t = new Date(iso).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+  const tags = [];
+  if (willSkip) tags.push('will skip');
+  if (status && status !== 'pending') tags.push(status);
+  return t + (tags.length ? ` (${tags.join(', ')})` : '');
+}
+
+function fmtWindows(job) {
+  return (job.windows || [])
+    .map(w => `${w.window[0]}-${w.window[1]} → ${fmtFireTime(w.fire_at, w.will_skip, w.status)}`)
+    .join('  •  ');
+}
+
+// --- Post drain (feeder 2 of 2: Buffer API, no browser) ---------------------
+//
+// Deliberately separate from loadScheduler() below. Sharing a loader between
+// the two feeders is how a status line ends up describing the wrong one.
+
+const DRAIN_ACTION_TEXT = {
+  fed:           r => `fed ${r.count} held post${r.count === 1 ? '' : 's'} into Buffer`,
+  no_slots:      r => `no slot free (${r.held} still held)`,
+  nothing_held:  () => 'nothing held',
+  busy:          () => 'skipped: another scheduling pass was running',
+  error:         r => `error: ${r.note || 'unknown'}`,
+};
+
+function fmtWhen(iso) {
+  if (!iso) return 'never';
+  const d = new Date(iso);
+  return isNaN(d) ? iso : d.toLocaleTimeString();
+}
+
+async function loadDrain(withSlots) {
+  if (!currentProfile) return;
+  try {
+    const res = await fetch(
+      `/api/drain/${currentProfile}/status${withSlots ? '?slots=1' : ''}`);
+    const d = await res.json();
+
+    document.getElementById('drainEnabled').checked = !!d.enabled;
+    document.getElementById('drainInterval').value = d.interval_minutes ?? 15;
+    document.getElementById('drainRunning').textContent =
+      (d.running ? '● thread running' : '○ thread stopped') +
+      (d.enabled ? '' : ' · switched off');
+
+    const bits = [];
+    bits.push(`<b>${d.held_count}</b> held`);
+    if (d.slots) {
+      bits.push(`<b>${d.slots.free}</b> of ${d.slots.limit} Buffer slots free`);
+    }
+    if (d.enabled) {
+      bits.push(`last checked ${fmtWhen(d.last_check_at)}`);
+      bits.push(`next ${fmtWhen(d.next_check_at)}`);
+      if (d.last_feed_at) bits.push(`last fed ${fmtWhen(d.last_feed_at)}`);
+    } else {
+      bits.push('switched off — held posts stay held until you turn this on or click Schedule');
+    }
+    document.getElementById('drainStatus').innerHTML = bits.join(' &middot; ');
+
+    renderDrainRuns(d.recent_runs || []);
+  } catch (e) {
+    console.error('Drain load error:', e);
+    document.getElementById('drainStatus').textContent =
+      'Could not read the drain status.';
+  }
+}
+
+function renderDrainRuns(runs) {
+  const el = document.getElementById('drainRuns');
+  if (!runs.length) {
+    el.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem">' +
+                   'No drain activity yet.</div>';
+    return;
+  }
+  el.innerHTML = '<div style="font-size:0.75rem;color:var(--text-dim);' +
+    'margin-bottom:0.3rem">Recent drain checks</div>' +
+    runs.slice(0, 10).map(r => {
+      const fn = DRAIN_ACTION_TEXT[r.action] || (x => x.action);
+      const fed = r.action === 'fed';
+      return `<div style="font-size:0.8rem;padding:0.25rem 0;border-bottom:` +
+        `1px solid rgba(255,255,255,0.05)">` +
+        `<span style="color:${fed ? '#4dd6b0' : 'var(--text-dim)'}">` +
+        `${fed ? '▲' : '·'}</span> ` +
+        `<span style="color:var(--text-dim)">${fmtWhen(r.at)}</span> — ` +
+        `${esc(fn(r))}${r.manual ? ' <em>(manual)</em>' : ''}</div>`;
+    }).join('');
+}
+
+async function drainToggle(enabled) {
+  if (!currentProfile) return;
+  const out = document.getElementById('drainResult');
+  try {
+    const res = await fetch(`/api/drain/${currentProfile}/toggle`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: enabled}),
+    });
+    const d = await res.json();
+    if (!res.ok) {
+      // Put the switch back: it did NOT take effect.
+      document.getElementById('drainEnabled').checked = !enabled;
+      out.innerHTML = `<div class="error-box">${esc(d.error || 'Toggle failed.')}</div>`;
+      return;
+    }
+    out.innerHTML = '';
+    loadDrain(true);
+  } catch (e) {
+    document.getElementById('drainEnabled').checked = !enabled;
+    out.innerHTML = `<div class="error-box">${esc(String(e))}</div>`;
+  }
+}
+
+async function drainSaveConfig() {
+  if (!currentProfile) return;
+  const minutes = parseInt(document.getElementById('drainInterval').value, 10);
+  const out = document.getElementById('drainResult');
+  if (!minutes || minutes < 1) {
+    out.innerHTML = '<div class="error-box">Interval must be at least 1 minute.</div>';
+    return;
+  }
+  try {
+    await fetch(`/api/drain/${currentProfile}/config`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({interval_minutes: minutes}),
+    });
+    out.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem">Saved.</div>';
+    loadDrain(true);
+  } catch (e) {
+    out.innerHTML = `<div class="error-box">${esc(String(e))}</div>`;
+  }
+}
+
+async function drainRunNow() {
+  if (!currentProfile) return;
+  const out = document.getElementById('drainResult');
+  out.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem">Checking…</div>';
+  try {
+    const res = await fetch(`/api/drain/${currentProfile}/run-now`,
+                            {method: 'POST'});
+    const d = await res.json();
+    const r = d.result || {};
+    const fn = DRAIN_ACTION_TEXT[r.action] || (x => x.action || 'done');
+    out.innerHTML = `<div style="font-size:0.82rem">${esc(fn(r))}</div>`;
+    // A feed runs as a background job; give it a moment, then re-read.
+    setTimeout(() => { loadDrain(true); loadScheduledQueue(); }, 2500);
+  } catch (e) {
+    out.innerHTML = `<div class="error-box">${esc(String(e))}</div>`;
+  }
+}
+
+async function loadScheduler() {
+  if (!currentProfile) return;
+  try {
+    const res = await fetch(`/api/scheduler/${currentProfile}/status`);
+    const s = await res.json();
+
+    document.getElementById('schedRunning').textContent =
+      (s.running ? '● running' : '○ stopped') + (s.enabled ? '' : ' (disabled)');
+    document.getElementById('schedMaster').checked = !!s.enabled;
+
+    const pc = s.jobs.post_comments;
+    document.getElementById('schedPostEnabled').checked = !!pc.enabled;
+    document.getElementById('schedPostWindows').value =
+      (pc.windows || []).map(w => `${w.window[0]}-${w.window[1]}`).join(', ');
+    document.getElementById('schedPostMin').value = pc.count_min ?? 4;
+    document.getElementById('schedPostMax').value = pc.count_max ?? 8;
+    document.getElementById('schedPostSkip').value = pc.skip_chance ?? 0.1;
+    document.getElementById('schedPostWhen').textContent =
+      `Count ${pc.count_min}-${pc.count_max} per run. Today: ${fmtWindows(pc)}`;
+
+    const sc = s.jobs.scrape;
+    document.getElementById('schedScrapeEnabled').checked = !!sc.enabled;
+    document.getElementById('schedScrapeWindows').value =
+      (sc.windows || []).map(w => `${w.window[0]}-${w.window[1]}`).join(', ');
+    document.getElementById('schedScrapeMax').value = sc.max_posts ?? 100;
+    document.getElementById('schedScrapeQuality').value = sc.min_quality ?? 10;
+    document.getElementById('schedScrapeSkip').value = sc.skip_chance ?? 0.1;
+    document.getElementById('schedScrapeWhen').textContent = `Today: ${fmtWindows(sc)}`;
+
+    renderSchedRuns(s.recent_runs || []);
+  } catch (e) {
+    console.error('Scheduler load error:', e);
+  }
+}
+
+function renderSchedRuns(runs) {
+  const el = document.getElementById('schedRuns');
+  if (!runs.length) {
+    el.innerHTML = `<div class="empty"><h3>No scheduled runs yet</h3></div>`;
+    return;
+  }
+  el.innerHTML = runs.slice(0, 30).map(r => {
+    const when = new Date(r.fired_at).toLocaleString([], {month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit'});
+    const badge = {fired: '✅', skipped: '⏭️', queue_empty: '∅', missed: '⚠️'}[r.action] || '•';
+    const detail = r.action === 'fired' ? `${r.count} item(s)`
+      : r.action === 'queue_empty' ? 'queue empty, nothing to post'
+      : r.action;
+    return `<div class="card" style="padding:0.6rem 0.8rem">
+      <div class="card-meta">${badge} <strong>${r.job_type}</strong>${r.manual ? ' (manual)' : ''}
+      — ${detail} <span style="color:var(--text-dim)">· ${when}</span>
+      ${r.note ? '<span style="color:var(--text-dim)"> · ' + esc(r.note) + '</span>' : ''}</div>
+    </div>`;
+  }).join('');
+}
+
+function parseWindows(text) {
+  return text.split(',').map(s => s.trim()).filter(Boolean).map(pair => {
+    const [a, b] = pair.split('-').map(x => x.trim());
+    return [a, b];
+  });
+}
+
+async function schedToggle(job, enabled) {
+  if (!currentProfile) return;
+  try {
+    await fetch(`/api/scheduler/${currentProfile}/toggle`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({job, enabled}),
+    });
+    loadScheduler();
+  } catch (e) {
+    console.error('Scheduler toggle error:', e);
+  }
+}
+
+async function schedSaveConfig() {
+  if (!currentProfile) return;
+  const patch = {
+    post_comments: {
+      windows: parseWindows(document.getElementById('schedPostWindows').value),
+      count_min: parseInt(document.getElementById('schedPostMin').value, 10),
+      count_max: parseInt(document.getElementById('schedPostMax').value, 10),
+      skip_chance: parseFloat(document.getElementById('schedPostSkip').value),
+    },
+    scrape: {
+      windows: parseWindows(document.getElementById('schedScrapeWindows').value),
+      max_posts: parseInt(document.getElementById('schedScrapeMax').value, 10),
+      min_quality: parseInt(document.getElementById('schedScrapeQuality').value, 10),
+      skip_chance: parseFloat(document.getElementById('schedScrapeSkip').value),
+    },
+  };
+  try {
+    await fetch(`/api/scheduler/${currentProfile}/config`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(patch),
+    });
+    loadScheduler();
+  } catch (e) {
+    console.error('Scheduler save error:', e);
+  }
+}
+
+async function schedRunNow(job) {
+  if (!currentProfile) return;
+  try {
+    const res = await fetch(`/api/scheduler/${currentProfile}/run-now`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({job}),
+    });
+    const data = await res.json();
+    const r = data.result || {};
+    alert(`Ran ${job}: ${r.action}${r.count ? ' (' + r.count + ')' : ''}${r.note ? ' — ' + r.note : ''}`);
+    loadScheduler();
+  } catch (e) {
+    console.error('Scheduler run-now error:', e);
+  }
+}
+
+// ─── Connector ──────────────────────────────────────────
+
+async function loadConnectorStats() {
+  if (!currentProfile) return;
+  try {
+    const res = await fetch(`/api/connector/${currentProfile}/stats`);
+    const stats = await res.json();
+    document.getElementById('statWeekly').textContent = stats.this_week ?? '—';
+    document.getElementById('statRemaining').textContent = stats.remaining ?? '—';
+    document.getElementById('statTotal').textContent = stats.total_sent ?? '—';
+  } catch(e) {
+    console.error('Stats load error:', e);
+  }
+}
+
+async function loadConnectorHistory() {
+  if (!currentProfile) return;
+  const container = document.getElementById('connectorHistory');
+
+  try {
+    const res = await fetch(`/api/connector/${currentProfile}/history`);
+    const data = await res.json();
+    const requests = data.requests || [];
+
+    if (!requests.length) {
+      container.innerHTML = `
+        <div class="empty" style="padding:2rem">
+          <div class="empty-icon">◇</div>
+          <h3>No connections yet</h3>
+          <p>Paste a LinkedIn search URL above and start connecting</p>
+        </div>`;
+      return;
+    }
+
+    container.innerHTML = requests.slice(0, 30).map(r => {
+      const time = r.sent_at ? new Date(r.sent_at).toLocaleDateString('en-US', {
+        month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+      }) : '';
+      return `
+        <div class="history-item">
+          <span class="hi-name">${esc(r.name)}</span>
+          <span class="hi-title">${esc(r.title || '')}</span>
+          <span class="hi-time">${esc(time)}</span>
+        </div>`;
+    }).join('');
+  } catch(e) {
+    container.innerHTML = '<p style="color:var(--text-muted);padding:1rem">Could not load history</p>';
+  }
+}
+
+async function startConnector() {
+  if (!currentProfile) return alert('Select a profile first');
+
+  const url = document.getElementById('connectorUrl').value.trim();
+  if (!url) return alert('Enter a LinkedIn search URL');
+  if (!url.includes('linkedin.com')) return alert('Please enter a valid LinkedIn URL');
+
+  await launchJob(
+    `/api/connector/${currentProfile}/start`,
+    {
+      search_url: url,
+      max_requests: parseInt(document.getElementById('connectorMax').value),
+      max_pages: parseInt(document.getElementById('connectorPages').value),
+      note: document.getElementById('connectorNote').value.trim()
+    },
+    document.getElementById('connectorBtn'),
+    'Start Connecting',
+    document.getElementById('connectorLog'),
+    () => { loadConnectorStats(); loadConnectorHistory(); }
+  );
+}
+
+async function stopConnector() {
+  if (!currentProfile) return;
+  const btn = document.getElementById('connectorStopBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Stopping...'; }
+  try {
+    const res = await fetch(`/api/connector/${currentProfile}/stop`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    const data = await res.json();
+    if (data.error) alert(data.error);
+    refreshActiveJobs();
+  } catch(e) {
+    alert('Stop failed: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Stop'; }
+  }
+}
+// ─── Post Creator ───────────────────────────────────
+
+async function loadPosterQueue() {
+  if (!currentProfile) return;
+  const queueEl = document.getElementById('posterQueue');
+  const historyEl = document.getElementById('posterHistory');
+
+  try {
+    const res = await fetch(`/api/poster/${currentProfile}/queue`);
+    const data = await res.json();
+    const posts = data.posts || [];
+    const nextId = data.next_id;
+    const history = data.history || [];
+
+    if (!posts.length) {
+      queueEl.innerHTML = `
+        <div class="queue-empty">
+          <div class="qe-icon">✎</div>
+          <p>Queue is empty — generate some posts above</p>
+        </div>`;
+    } else {
+      queueEl.innerHTML = posts.map(p => {
+        const isNext = p.id === nextId;
+        const isArticle = p.type === 'article';
+        const queued = p.queued_at ? new Date(p.queued_at).toLocaleDateString('en-US', {
+          month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+        }) : '';
+        const styleLabel = p.style ? ` · ${p.style}` : '';
+
+        return `
+          <div class="queue-card ${isNext ? 'is-next' : ''}">
+            <div class="qc-header">
+              <div>
+                <span class="qc-badge ${isArticle ? 'article' : 'thought'}">
+                  ${isArticle ? '📰 Article' : '💡 Thought' + esc(styleLabel)}
+                </span>
+                ${isNext ? '<span class="qc-badge next-up">▸ Next Up</span>' : ''}
+              </div>
+              <span style="font-family:var(--mono);font-size:0.72rem;color:var(--text-muted)">#${p.id}</span>
+            </div>
+            ${isArticle && p.url ? `<div class="qc-url">${esc(p.url)}</div>` : ''}
+            <div class="qc-text">${esc(p.text)}</div>
+            <div class="qc-meta">
+              <span>${esc(queued)}</span>
+              <div class="qc-actions">
+                <button class="btn btn-sm" onclick="publishById(${p.id})">Publish</button>
+                <button class="btn btn-danger btn-sm" onclick="removePost(${p.id})">Remove</button>
+              </div>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    // History
+    if (!history.length) {
+      historyEl.innerHTML = '<p style="color:var(--text-muted);padding:1rem">No posts published yet</p>';
+    } else {
+      historyEl.innerHTML = history.map(p => {
+        const posted = p.posted_at ? new Date(p.posted_at).toLocaleDateString('en-US', {
+          month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+        }) : '';
+        return `
+          <div class="history-card">
+            <div class="hc-text">${esc(p.text)}</div>
+            <div class="hc-meta">Posted ${esc(posted)} · ${p.type === 'article' ? '📰 Article' : '💡 Thought Leadership'}</div>
+          </div>`;
+      }).join('');
+    }
+
+  } catch(e) {
+    queueEl.innerHTML = '<p style="color:var(--text-muted);padding:1rem">Could not load queue</p>';
+    console.error('Queue load error:', e);
+  }
+}
+
+async function generatePosts() {
+  if (!currentProfile) return alert('Select a profile first');
+
+  await launchJob(
+    `/api/poster/${currentProfile}/generate`,
+    {
+      count: parseInt(document.getElementById('posterCount').value) || 1,
+      style: document.getElementById('posterStyle').value || null,
+      topic: document.getElementById('posterTopic').value.trim() || null,
+      model: document.getElementById('posterModel').value
+    },
+    document.getElementById('generatePostBtn'),
+    'Generate Posts',
+    document.getElementById('posterLog'),
+    () => { loadPosterQueue(); }
+  );
+}
+
+async function generateArticlePost() {
+  if (!currentProfile) return alert('Select a profile first');
+
+  const url = document.getElementById('articleUrl').value.trim();
+  if (!url) return alert('Enter an article URL');
+
+  await launchJob(
+    `/api/poster/${currentProfile}/article`,
+    { url, model: document.getElementById('articleModel').value },
+    document.getElementById('articleBtn'),
+    'Generate from Article',
+    document.getElementById('posterLog'),
+    () => { document.getElementById('articleUrl').value = ''; loadPosterQueue(); }
+  );
+}
+
+async function publishNext() {
+  if (!currentProfile) return alert('Select a profile first');
+  await doPublish(null);
+}
+
+async function publishById(id) {
+  if (!confirm(`Publish post #${id} to LinkedIn?`)) return;
+  await doPublish(id);
+}
+
+async function doPublish(postId) {
+  const body = postId ? { id: postId } : {};
+
+  await launchJob(
+    `/api/poster/${currentProfile}/post`,
+    body,
+    document.getElementById('publishNextBtn'),
+    'Publish Next →',
+    document.getElementById('posterLog'),
+    () => { loadPosterQueue(); }
+  );
+}
+
+async function removePost(id) {
+  if (!confirm(`Remove post #${id} from queue?`)) return;
+
+  try {
+    await fetch(`/api/poster/${currentProfile}/queue/${id}`, { method: 'DELETE' });
+    loadPosterQueue();
+  } catch(e) {
+    alert('Failed to remove post');
+  }
+}
+
+</script>
+
+</body>
+</html>

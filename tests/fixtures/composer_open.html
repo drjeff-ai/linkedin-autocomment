@@ -1,0 +1,70 @@
+<!--
+  Synthetic LinkedIn POST COMPOSER, open. Hand-authored, no live data.
+
+  This is the feed after "Start a post" has been clicked. It is the only state in
+  which the two gated composer entries exist at all:
+    composer_editor       div[contenteditable='true'][role='textbox']
+    composer_post_button  //button[normalize-space(.)='Post']   (XPath)
+
+  It carries the same class of trap the comment fixture does. THREE controls here
+  involve the word "Post":
+
+    1. the feed trigger, aria-label="Start a post"
+       — this OPENS the composer (and is still in the DOM behind the modal)
+    2. the audience selector, visible text "Post to Anyone"
+       — this opens a dropdown; clicking it publishes NOTHING
+    3. the submit button, visible text "Post"
+       — this PUBLISHES
+
+  normalize-space(.)='Post' must match (3) and only (3). A CSS substring match on
+  the word would hit all three and return a confident wrong answer; the XPath
+  returns an obvious zero if LinkedIn relabels the real one. Same reasoning as
+  LinkedInCommentPoster.SUBMIT_BUTTON_XPATH, and the same reason it is an XPath.
+
+  The editor deliberately carries aria-label="Text editor" so the aria fallbacks
+  in COMPOSER_EDITOR_ARIA_SELECTORS are exercised too, not just the primary.
+-->
+<html>
+<head><title>Feed | Synthetic composer</title></head>
+<body>
+<div id="app">
+  <nav aria-label="Primary">
+    <a href="/feed/">Home</a>
+  </nav>
+
+  <!-- (1) still present behind the modal -->
+  <div class="composer-entry">
+    <button aria-label="Start a post">Start a post</button>
+  </div>
+
+  <div role="dialog" aria-label="Create a post" class="j1k2l3">
+    <header>
+      <div>
+        <a href="/in/example-person-one/">Example Person One</a>
+        <!-- (2) the trap: starts with "Post", publishes nothing -->
+        <button class="m4n5o6">Post to Anyone</button>
+      </div>
+      <button aria-label="Dismiss">&#215;</button>
+    </header>
+
+    <div class="p7q8r9">
+      <div contenteditable="true" role="textbox" aria-label="Text editor"
+           aria-placeholder="What do you want to talk about?"
+           data-placeholder="What do you want to talk about?">
+        <p>Synthetic draft body.</p>
+      </div>
+    </div>
+
+    <footer>
+      <!-- class harvested live 2026-09-04: the real button carries
+           share-promoted-detour-button, which the more specific registry
+           selector matches on. -->
+      <button aria-label="Add media" class="share-promoted-detour-button">Media</button>
+      <button aria-label="Add a document">Document</button>
+      <!-- (3) the real one -->
+      <button class="s1t2u3">Post</button>
+    </footer>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,85 @@
+<!--
+  composer_media_editor_open.html — the MID-FLIGHT state, media editor open.
+
+  HAND-AUTHORED from the same 2026-09-04 staged harvest as
+  composer_image_attached.html. No real URNs, names, licdn URLs or base64.
+
+  This is the state the attachment wait must NOT mistake for completion:
+
+      the media editor is PRESENT       (.media-editor__layout-container)
+      the preview container is ABSENT
+      Post is GONE entirely             (replaced by "Next")
+
+  Post vanishing during media editing is a live-observed fact, not a guess, and
+  it is why `media_is_attached()` requires the editor to be GONE as well as the
+  preview to be present. A check that only looked for the preview would be
+  fooled here; a check that only looked for "editor gone" would be fooled by
+  Cancel.
+
+  The file input the real page mounts is NOT represented, and cannot be: it
+  lives in a shadow root, and dom_probe parses saved HTML with no shadow
+  concept. Registering it would produce a confident zero for an element that is
+  really there — the exact false all-clear the registry exists to prevent. It is
+  covered by test_poster_media_attach.py instead.
+-->
+<html lang="en">
+<head><title>Feed | LinkedIn</title></head>
+<body>
+  <div class="application-outlet">
+    <div class="feed-outlet">
+
+      <div class="share-box-feed-entry__wrapper">
+        <button aria-label="Start a post" class="artdeco-button">Start a post</button>
+      </div>
+
+      <div role="dialog" aria-label="Create a post" class="share-box-modal">
+        <div class="media-detour__container">
+          <div class="media-editor__container">
+            <div class="media-editor__layout-container">
+
+              <div class="media-editor-content-preview__container">
+                <div class="media-editor-content-preview__content-container">
+                  <img class="media-editor-content-preview__image"
+                       alt="Selected image"
+                       src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" />
+                </div>
+                <div class="media-editor-content-preview__toolbar-menu">
+                  <div class="media-editor-button-with-tooltip__container">Edit</div>
+                  <div class="media-editor-button-with-tooltip__container">Tag</div>
+                  <div class="media-editor-button-with-tooltip__container">Alternative text</div>
+                </div>
+              </div>
+
+              <div class="media-editor-control-panel__container">
+                <div class="media-editor-file-manager__file-container">
+                  <p class="media-editor-file-manager__file-number">1 of 1</p>
+                  <ul class="media-editor-file-manager__file-list">
+                    <li>
+                      <button aria-label="Select sample.png"
+                              class="media-editor-file-manager__file-preview"></button>
+                      <p class="media-editor-file-manager__file-index">01</p>
+                    </li>
+                  </ul>
+                </div>
+                <div class="media-editor-file-manager__file-manager-controls">
+                  <button class="artdeco-button artdeco-button--circle">Duplicate</button>
+                  <button class="artdeco-button artdeco-button--circle">Delete</button>
+                  <button class="artdeco-button artdeco-button--circle">Add</button>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- No Post button here at all: it is replaced by Next while the
+               media editor is open. -->
+          <div class="share-box-footer">
+            <button aria-label="Next"
+                    class="share-box-footer__primary-btn artdeco-button artdeco-button--primary">Next</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

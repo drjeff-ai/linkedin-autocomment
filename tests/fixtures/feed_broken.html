@@ -1,0 +1,72 @@
+<!--
+  Synthetic LinkedIn feed, BROKEN variant.
+
+  Exactly one deliberate change from feed_healthy.html:
+      role="listitem"  ->  role="list-item"
+
+  This is the shape of every real break this project has seen: a hook is
+  renamed, nothing errors, and the scraper simply finds nothing. feed_container
+  is CRITICAL and drops to zero, so the status must be BROKEN and the exit code
+  non-zero. Every other entry still passes, which is the point: a single renamed
+  hook is enough, and the report must name which one.
+-->
+<html>
+<head><title>Feed | Synthetic</title></head>
+<body>
+<div id="app">
+  <nav aria-label="Primary">
+    <a href="/feed/">Home</a>
+  </nav>
+
+    <!-- The composer trigger. Ungated: this is on the feed with the composer
+       CLOSED, which is why composer_trigger is checkable on a plain feed load
+       while composer_editor / composer_post_button are not. -->
+  <div class="composer-entry">
+    <button aria-label="Start a post">Start a post</button>
+  </div>
+
+  <div data-testid="mainFeed" class="a1b2c3">
+    <div role="list-item" class="d4e5f6">
+      <div class="g7h8i9">
+        <a data-view-name="feed-actor-image" href="/in/example-person-one/"><img alt=""></a>
+        <div>
+          <a href="/in/example-person-one/">Example Person One</a>
+          <span>Synthetic headline one</span>
+        </div>
+        <button aria-label="Open control menu for post by Example Person One">&#8943;</button>
+      </div>
+      <span data-testid="expandable-text-box">First synthetic post body. Nothing here came from a live feed.</span>
+    </div>
+
+    <div role="list-item" class="d4e5f6">
+      <div class="g7h8i9">
+        <a data-view-name="feed-actor-image" href="/in/example-person-two/"><img alt=""></a>
+        <div>
+          <a href="/in/example-person-two/">Example Person Two</a>
+          <span>Synthetic headline two</span>
+        </div>
+        <button aria-label="Open control menu for post by Example Person Two">&#8943;</button>
+      </div>
+      <span data-testid="expandable-text-box">Second synthetic post body.</span>
+    </div>
+
+    <div role="list-item" class="d4e5f6">
+      <div class="g7h8i9">
+        <a data-view-name="feed-actor-image" href="/company/example-company/"><img alt=""></a>
+        <div>
+          <a href="/company/example-company/">Example Company</a>
+          <span>Synthetic company tagline</span>
+        </div>
+        <button aria-label="Open control menu for post by Example Company">&#8943;</button>
+      </div>
+      <span data-testid="expandable-text-box">Third synthetic post body.</span>
+    </div>
+  </div>
+
+  <aside aria-label="Sidebar">
+    <div role="list-item">A sidebar item outside mainFeed, deliberately, so the
+      scoped selector is doing real work.</div>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,90 @@
+<!--
+  composer_image_attached.html — the composer with ONE image attached.
+
+  HAND-AUTHORED, not a raw capture. The class names, aria-labels and the DOM
+  shape were taken from a staged live harvest of the dev account on 2026-09-04
+  (tools/composer_media_dump.py, run 3); everything identifying was rewritten.
+  There are no real URNs, no member names, no licdn URLs and no base64 image
+  data in this file — the live dumps carried compound URNs like
+  urn:li:comment:(urn:li:activity:...) that the harvest scrubber missed, and
+  none of that has any business in a committed fixture.
+
+  It represents the END state of the attachment flow, which is the state the
+  fail-closed wait is looking for:
+
+      the media editor is GONE          (no .media-editor__layout-container)
+      the preview container is PRESENT  (.share-creation-state__preview-container)
+      Post is present and ENABLED
+
+  The preview src is a `data:` URI on purpose. That is what the live capture
+  showed — never blob:, never a CDN host — and a fixture that used a CDN URL
+  would quietly license the wrong completion signal.
+
+  The mid-flight counterpart is composer_media_editor_open.html.
+-->
+<html lang="en">
+<head><title>Feed | LinkedIn</title></head>
+<body>
+  <div class="application-outlet">
+    <div class="feed-outlet">
+
+      <!-- The share box stays in the DOM behind the modal. It is NOT proof the
+           composer is closed: the live capture showed it present alongside a
+           fully open composer, so only a zero editor count means "closed". -->
+      <div class="share-box-feed-entry__wrapper">
+        <button aria-label="Start a post" class="artdeco-button">Start a post</button>
+      </div>
+
+      <div role="dialog" aria-label="Create a post" class="share-box-modal">
+        <div class="share-box">
+
+          <div class="share-box__header">
+            <div class="artdeco-entity-lockup__image"></div>
+            <span class="share-box__name">Test Account</span>
+          </div>
+
+          <div class="share-box__content">
+            <div class="ql-editor" contenteditable="true" role="textbox"
+                 aria-label="Text editor for creating content">
+              <p>Phase 1 harvest test</p>
+            </div>
+
+            <!-- THE ATTACHED IMAGE. Media editor absent, preview present. -->
+            <div class="share-creation-state__preview-container share-creation-state__preview-container--as-box">
+              <div class="share-creation-state__preview-container-controls">
+                <button aria-label="Edit media preview"
+                        class="share-creation-state__preview-container-btn artdeco-button artdeco-button--circle"></button>
+                <button class="share-creation-state__preview-container-btn artdeco-button artdeco-button--circle">Remove media</button>
+              </div>
+              <div class="update-components-image update-components-image--single-image">
+                <div class="update-components-image__container-wrapper relative">
+                  <div class="update-components-image__container update-components-image__container--preview">
+                    <div class="update-components-image__image-link">
+                      <img class="ivm-view-attr__img ivm-view-attr__img--aspect-fill update-components-image__image"
+                           alt="Attached image preview"
+                           src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="share-box__footer">
+            <div class="share-creation-state__additional-toolbar">
+              <button aria-label="Add media" class="share-promoted-detour-button"></button>
+              <button aria-label="Create an event" class="share-promoted-detour-button"></button>
+              <button aria-label="Celebrate an occasion" class="share-promoted-detour-button"></button>
+            </div>
+            <div class="share-actions">
+              <button aria-label="Schedule post" class="share-actions__scheduled-post-btn artdeco-button"></button>
+              <button class="share-actions__primary-action artdeco-button artdeco-button--primary">Post</button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

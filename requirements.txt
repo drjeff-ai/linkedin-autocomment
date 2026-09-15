@@ -1,0 +1,32 @@
+flask==3.1.3
+python-dotenv==1.2.2
+openai==2.44.0
+# Article fetching + parsing for the post generator's "react to an article" mode
+# (post_generator.py imports both). Neither was ever declared, so that mode raised
+# ModuleNotFoundError on any clean install — including a fresh checkout of this
+# repo. requests was present only as a transitive dependency of other packages,
+# which is not something to rely on; bs4 was absent outright.
+requests==2.34.2
+beautifulsoup4==4.15.0
+selenium==4.45.0
+webdriver-manager==4.1.2
+# Routes TLS through the OS trust store so OpenAI / webdriver-manager work behind
+# corporate TLS-intercepting proxies (httpx/requests use certifi otherwise).
+truststore==0.10.1
+# Cloudflare R2 image hosting for the scheduled-posting hybrid. R2 is
+# S3-compatible, so this is the standard S3 client rather than an R2-specific
+# one. Buffer requires a PUBLICLY FETCHABLE image URL - it reads the bytes at
+# createPost time and rejects the whole post if it cannot - so the local
+# image_path in the CSV has to be uploaded somewhere public first.
+boto3==1.43.89
+# Imported DIRECTLY by image_host (botocore.client.Config, for the s3v4
+# signer and the retry policy), so it is declared rather than leaned on as
+# a transitive dependency of boto3 - the same trap `requests` fell into
+# above. The declared-dependency test catches this.
+botocore==1.43.89
+# Windows ships no system timezone database, so stdlib zoneinfo cannot resolve
+# "America/Los_Angeles" without this. It is data, not code, so nothing imports
+# it by name and the declared-dependency test cannot catch its absence - which
+# is exactly why it is called out here. Without it the scheduler raises
+# ZoneInfoNotFoundError on a clean Windows checkout.
+tzdata==2026.3

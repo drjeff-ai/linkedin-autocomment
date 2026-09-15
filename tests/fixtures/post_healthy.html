@@ -1,0 +1,40 @@
+<!--
+  Synthetic LinkedIn post permalink, as it loads. Hand-authored, no live data.
+
+  Shaped to satisfy every non-gated post registry entry:
+    post_detail          span[data-testid='expandable-text-box']              (min 1, critical)
+    post_like_button     button[aria-label*='Like'][aria-pressed='false']     (min 1, optional)
+    post_comment_button  button[aria-label*='Comment']                        (min 1, critical)
+
+  The comment box is CLOSED here, which is what a permalink actually looks like
+  before anything is clicked. post_comment_input and post_submit_button do not
+  exist yet, so a check against this page must report them as not checked. See
+  post_box_open.html for the state where they do exist.
+-->
+<html>
+<head><title>Synthetic post | Feed</title></head>
+<body>
+<div id="app">
+  <div role="listitem" data-urn="urn:li:activity:0000000000000000000">
+    <div class="j1k2l3">
+      <a href="/in/example-person-one/">Example Person One</a>
+      <span>Synthetic headline one</span>
+    </div>
+
+    <span data-testid="expandable-text-box">Synthetic permalink post body. Nothing here came from a live feed.</span>
+
+    <div class="m4n5o6" role="group" aria-label="Post actions">
+      <button aria-label="Like" aria-pressed="false" class="react-button__trigger">
+        <span class="artdeco-button__text">Like</span>
+      </button>
+      <button aria-label="Comment" class="p7q8r9">
+        <span class="artdeco-button__text">4</span>
+      </button>
+      <button aria-label="Repost" class="p7q8r9">
+        <span class="artdeco-button__text">Repost</span>
+      </button>
+    </div>
+  </div>
+</div>
+</body>
+</html>

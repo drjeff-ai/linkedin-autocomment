@@ -1,0 +1,6 @@
+# Dev / test tooling (pinned). Install into the project venv:
+#   uv pip install -r requirements-dev.txt
+# Validation gates use: uv run pytest tests/ ; uv run ruff check .
+pytest==8.3.4
+pytest-cov==6.0.0
+ruff==0.8.4

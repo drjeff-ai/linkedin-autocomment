@@ -1,0 +1,185 @@
+{
+  "display_name": "",
+  "headline": "",
+  "niche": "",
+  "post_finder": {
+    "keywords_tier1": [
+      "artificial intelligence",
+      "machine learning",
+      "generative ai",
+      "gen ai",
+      "large language model",
+      "computer vision",
+      "neural network",
+      "deep learning"
+    ],
+    "keywords_tier2": [
+      "ai",
+      "gpt",
+      "llm",
+      "agents",
+      "agentic",
+      "openai",
+      "anthropic",
+      "claude",
+      "midjourney",
+      "stable diffusion",
+      "diffusion model",
+      "transformer",
+      "fine-tune",
+      "fine-tuning",
+      "rlhf",
+      "prompt engineering",
+      "rag",
+      "automation",
+      "chatbot",
+      "copilot",
+      "mlops",
+      "training data"
+    ],
+    "min_quality_score": 5,
+    "max_posts_per_scan": 50,
+    "post_types_to_engage": [
+      "thought_leadership",
+      "technical",
+      "other"
+    ],
+    "ad_indicators": []
+  },
+  "comment_generator": {
+    "persona": "Professional who engages thoughtfully with industry content.",
+    "tone": "warm, charming, clever. Light wit welcome. Never snarky, sarcastic, dismissive, or condescending.",
+    "voice": "Always use I/my, never we/our. Individual perspective only.",
+    "topics_of_expertise": [],
+    "things_to_avoid": [
+      "being salesy",
+      "mentioning own company unprompted",
+      "generic praise",
+      "hyphens or em dashes as punctuation between clauses",
+      "saying we or our"
+    ],
+    "comment_length_range": [
+      15,
+      60
+    ],
+    "stay_on_post_topic": true,
+    "style_mix": {
+      "add_insight": 0.3,
+      "share_experience": 0.25,
+      "ask_question": 0.2,
+      "respectful_pushback": 0.15,
+      "short_agreement": 0.1
+    }
+  },
+  "post_generator": {
+    "persona": "Professional who engages thoughtfully with industry content.",
+    "tone": "warm, charming, clever. Light wit welcome. Never snarky, sarcastic, dismissive, or condescending.",
+    "voice": "Always use I/my, never we/our. Individual perspective only.",
+    "topics": [
+      "how AI is changing everyday business workflows",
+      "practical uses of LLMs that people overlook",
+      "agentic AI workflows and why they matter",
+      "automation replacing repetitive tasks so people can do real work",
+      "AI literacy for non-technical professionals",
+      "the gap between AI hype and practical AI implementation",
+      "the future of work with AI assistants",
+      "real ROI from AI automation projects",
+      "AI tools that actually save time vs ones that waste it",
+      "generative AI for content, communication, and productivity"
+    ],
+    "things_to_avoid": [
+      "being salesy",
+      "mentioning own company unprompted",
+      "generic praise",
+      "hyphens or em dashes as punctuation between clauses",
+      "saying we or our",
+      "hashtags"
+    ],
+    "styles": {
+      "hot_take": "Write a bold, confident take on the topic. Have a strong opinion. Don't hedge.",
+      "question": "Ask a thought-provoking question that invites discussion. End with the question.",
+      "observation": "Share something you've noticed or a pattern you're seeing in the industry. Be specific.",
+      "prediction": "Make a prediction about where things are heading. Be specific about timeframes.",
+      "story": "Share a brief anecdote or experience related to the topic. Keep it real. First person.",
+      "tip": "Share a practical tip or insight people can actually use. Be concrete and actionable.",
+      "contrarian": "Challenge a common assumption. Respectfully disagree with conventional wisdom.",
+      "celebration": "Highlight something exciting in the space. Genuine enthusiasm, not over the top."
+    }
+  },
+  "connector": {
+    "note_template": "",
+    "max_daily_requests": 25,
+    "weekly_limit": 100
+  },
+  "behavior": {
+    "typing_speed_range": [
+      0.04,
+      0.12
+    ],
+    "typing_pause_chance": 0.08,
+    "reading_time_range": [
+      1.5,
+      4.0
+    ],
+    "action_delay_range": [
+      0.5,
+      1.5
+    ],
+    "scroll_pixels_range": [
+      200,
+      600
+    ],
+    "scroll_delay_range": [
+      0.8,
+      2.0
+    ],
+    "break_frequency": 5,
+    "break_duration_range": [
+      8.0,
+      25.0
+    ],
+    "posts_per_break_range": [
+      3,
+      7
+    ]
+  },
+  "scheduler": {
+    "enabled": false,
+    "post_comments": {
+      "enabled": true,
+      "windows": [
+        [
+          "08:00",
+          "11:00"
+        ],
+        [
+          "14:00",
+          "17:00"
+        ]
+      ],
+      "count_min": 4,
+      "count_max": 8,
+      "skip_chance": 0.1
+    },
+    "scrape": {
+      "enabled": false,
+      "windows": [
+        [
+          "09:00",
+          "12:00"
+        ]
+      ],
+      "max_posts": 100,
+      "min_quality": 10,
+      "skip_chance": 0.1
+    }
+  },
+  "scheduled_posting": {
+    "buffer_channel_id": "",
+    "identity_slug": "",
+    "drain": {
+      "enabled": false,
+      "interval_minutes": 30
+    }
+  }
+}

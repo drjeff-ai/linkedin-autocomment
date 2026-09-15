@@ -1,0 +1,74 @@
+<!--
+  Synthetic LinkedIn feed, DEGRADED variant.
+
+  Exactly one deliberate change from feed_healthy.html:
+      data-testid="mainFeed"  ->  data-testid="mainFeedContainer"
+
+  That kills scroll_container (non-critical: both of its selectors are the
+  mainFeed testid and a legacy class this fixture does not carry) while
+  feed_container survives on its unscoped fallback div[role='listitem'].
+  One non-critical failure and no critical one is the definition of DEGRADED,
+  which the CLI must report with a NON-ZERO exit so a scheduled check can act
+  on it. A watchdog that only trips on total breakage is a watchdog that tells
+  you after it is too late.
+-->
+<html>
+<head><title>Feed | Synthetic</title></head>
+<body>
+<div id="app">
+  <nav aria-label="Primary">
+    <a href="/feed/">Home</a>
+  </nav>
+
+    <!-- The composer trigger. Ungated: this is on the feed with the composer
+       CLOSED, which is why composer_trigger is checkable on a plain feed load
+       while composer_editor / composer_post_button are not. -->
+  <div class="composer-entry">
+    <button aria-label="Start a post">Start a post</button>
+  </div>
+
+  <div data-testid="mainFeedContainer" class="a1b2c3">
+    <div role="listitem" class="d4e5f6">
+      <div class="g7h8i9">
+        <a data-view-name="feed-actor-image" href="/in/example-person-one/"><img alt=""></a>
+        <div>
+          <a href="/in/example-person-one/">Example Person One</a>
+          <span>Synthetic headline one</span>
+        </div>
+        <button aria-label="Open control menu for post by Example Person One">&#8943;</button>
+      </div>
+      <span data-testid="expandable-text-box">First synthetic post body. Nothing here came from a live feed.</span>
+    </div>
+
+    <div role="listitem" class="d4e5f6">
+      <div class="g7h8i9">
+        <a data-view-name="feed-actor-image" href="/in/example-person-two/"><img alt=""></a>
+        <div>
+          <a href="/in/example-person-two/">Example Person Two</a>
+          <span>Synthetic headline two</span>
+        </div>
+        <button aria-label="Open control menu for post by Example Person Two">&#8943;</button>
+      </div>
+      <span data-testid="expandable-text-box">Second synthetic post body.</span>
+    </div>
+
+    <div role="listitem" class="d4e5f6">
+      <div class="g7h8i9">
+        <a data-view-name="feed-actor-image" href="/company/example-company/"><img alt=""></a>
+        <div>
+          <a href="/company/example-company/">Example Company</a>
+          <span>Synthetic company tagline</span>
+        </div>
+        <button aria-label="Open control menu for post by Example Company">&#8943;</button>
+      </div>
+      <span data-testid="expandable-text-box">Third synthetic post body.</span>
+    </div>
+  </div>
+
+  <aside aria-label="Sidebar">
+    <div role="listitem">A sidebar item outside mainFeed, deliberately, so the
+      scoped selector is doing real work.</div>
+  </aside>
+</div>
+</body>
+</html>

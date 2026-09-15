@@ -1,0 +1,8 @@
+date,time_window,post_text,topic,tags,image_path,first_comment_link
+2036-09-14,morning,"Everything filled in: a real-length post with an image and a link in the first comment.
+
+Two paragraphs, because blank lines survive Buffer intact.",,#AI #FutureOfWork,S:\content\img\agents.png,https://example.com/the-article
+2036-09-15,afternoon,"No first_comment_link. This publishes normally and simply never gets a comment.",,#AI,S:\content\img\hiring.png,
+2036-09-16,evening,"No image_path. This publishes as a text-only post, no asset attached.",,#Automation,,https://example.com/another-article
+2036-09-17,morning,,how AI agents change knowledge work,#AI #KnowledgeWork,S:\content\img\agents.png,https://example.com/third-article
+2036-09-18,afternoon,"Bare minimum: only the three columns that must exist. Everything else omitted from this row.",,,,

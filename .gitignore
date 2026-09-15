@@ -1,0 +1,92 @@
+# ─── Credentials & secrets ───────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# ─── Runtime data (ALL of it) ────────────────────────────────────────────────
+# Everything under data/ is generated at runtime and contains personal LinkedIn
+# content: encrypted profile credentials, Chrome sessions, scraped timelines,
+# generated comments, the posts_db.json lifecycle store, connection trackers,
+# post queues/history, failure screenshots, and selector-health dumps. None of
+# it is ever committed. (default_profile_config.json — the template — lives at
+# the repo root, not under data/, so it is still tracked.)
+data/
+
+# Chrome session dirs if ever created outside data/
+chrome_user_data*/
+
+# ─── API cost log (may contain endpoint details) ─────────────────────────────
+api_usage.jsonl
+
+# ─── AI-assistant operating instructions (never public) ──────────────────────
+# The AI coding-assistant guidance is maintainer-local, not part of the public
+# repo. Kept on disk, never tracked.
+CLAUDE.md
+**/CLAUDE.md
+CLAUDE.local.md
+.claude/
+.cursor/
+.cursorrules
+.github/copilot-instructions.md
+AGENTS.md
+.aider*
+
+# ─── Internal planning docs ──────────────────────────────────────────────────
+# These live in .dev/ and are never part of the public tree. The root-anchored
+# entries are a safety net: the dev workflow writes DECISIONS/UPDATES/BACKLOG by
+# bare name, so guard against a stray root copy being staged.
+.dev/
+/DECISIONS.md
+/UPDATES.md
+/BACKLOG.md
+/ROADMAP.md
+/PROJECT.md
+/BLOCKED.md
+/HANDOFF.md
+/AUDIT_REPORT.md
+/VISION_AUDIT.md
+
+# ─── Live feed/search HTML dumps (contain personal feed + member content) ─────
+# feed_dump.py / connector_dump.py write these when debugging selectors.
+*_dump.html
+selector_debug_dump.html
+
+# ─── Staged live harvest output (composer_media_dump.py, Phase 1) ─────────────
+# Every artifact of a live harvest — scrubbed HTML, probe JSON, residue reports,
+# burst snapshots — lands in ONE directory so a new artifact type cannot escape
+# by not matching a pattern. The repo gets a hand-authored synthetic fixture,
+# never the raw capture.
+.harvest/
+
+# ─── Atomic-write temp files & logs ──────────────────────────────────────────
+*.tmp
+*.log
+
+# ─── Stop-signal files ───────────────────────────────────────────────────────
+.stop_connector_*
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# ─── Test / lint / coverage artifacts ────────────────────────────────────────
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ─── OS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── IDE ─────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+
+# Scratch register-review artifact (like the DOM dumps): regenerated on demand.
+register_review.txt

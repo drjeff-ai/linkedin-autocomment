@@ -1,0 +1,59 @@
+<!--
+  Synthetic LinkedIn post permalink WITH THE COMMENT BOX OPEN. Hand-authored.
+
+  This is post_healthy.html after the action-bar Comment button has been
+  clicked. It is the only state in which the two interaction-gated selectors
+  exist at all:
+    post_comment_input   div.ql-editor[contenteditable='true']
+    post_submit_button   //button[normalize-space(.)='Comment']   (XPath)
+
+  It carries the trap that broke posting on 2026-07-31. TWO buttons here involve
+  the word Comment:
+
+    1. the action-bar button, aria-label="Comment", visible text "4"
+       — this OPENS the box
+    2. the submit button, NO aria-label, visible text "Comment"
+       — this SUBMITS the comment
+
+  The old code skipped any button labelled "Comment" to avoid re-clicking (1),
+  and in doing so skipped (2) as well, so three comments were typed and none
+  were posted. The submit selector is XPath and matched on VISIBLE TEXT for
+  exactly this reason: a CSS attribute match cannot tell these two apart, and
+  would return a confident wrong answer rather than an obvious zero.
+-->
+<html>
+<head><title>Synthetic post | Feed</title></head>
+<body>
+<div id="app">
+  <div role="listitem" data-urn="urn:li:activity:0000000000000000000">
+    <div class="j1k2l3">
+      <a href="/in/example-person-one/">Example Person One</a>
+      <span>Synthetic headline one</span>
+    </div>
+
+    <span data-testid="expandable-text-box">Synthetic permalink post body. Nothing here came from a live feed.</span>
+
+    <div class="m4n5o6" role="group" aria-label="Post actions">
+      <button aria-label="Like" aria-pressed="false" class="react-button__trigger">
+        <span class="artdeco-button__text">Like</span>
+      </button>
+      <button aria-label="Comment" class="p7q8r9">
+        <span class="artdeco-button__text">4</span>
+      </button>
+      <button aria-label="Repost" class="p7q8r9">
+        <span class="artdeco-button__text">Repost</span>
+      </button>
+    </div>
+
+    <div class="s1t2u3" aria-label="Comment box">
+      <div class="ql-editor ql-blank" contenteditable="true" role="textbox"
+           data-placeholder="Add a comment&#8230;"></div>
+      <div class="v4w5x6">
+        <button class="y7z8a9">Cancel</button>
+        <button class="y7z8a9">Comment</button>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
