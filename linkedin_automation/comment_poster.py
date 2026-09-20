@@ -532,6 +532,12 @@ class LinkedInCommentPoster:
                     continue          # the button that OPENS the box
                 if not el.is_displayed():
                     continue
+                # DEDUPE. The XPath and the class fallbacks routinely match
+                # the SAME button, and counting it twice makes an
+                # unambiguous page look ambiguous - which now decides
+                # whether we post at all, not merely which selector won.
+                if any(el == seen for seen in out):
+                    continue
             except Exception:
                 continue
             out.append(el)
@@ -591,10 +597,138 @@ class LinkedInCommentPoster:
                 "No comment submit control was found on the page at all.")
         return None
 
+    # ─── Scoping the submit button to the composer ───────────────────────────
+    #
+    # A post page carries TWO enabled buttons whose visible text is exactly
+    # "Comment" (proved by failure_comment_not_posted_20260920_103314):
+    #
+    #   * the ACTION-BAR button, which only focuses the comment box; and
+    #   * the COMPOSER's submit, which actually posts.
+    #
+    # Neither carries an aria-label, and both are enabled, so no attribute test
+    # separates them - `//button[normalize-space(.)='Comment']` matches both and
+    # takes the first in document order, which is the action-bar one. The
+    # comment was typed, the wrong button was clicked, and nothing posted.
+    #
+    # What DOES separate them is structure. From the editor, the composer's
+    # submit shares an ancestor 6 levels up; the action-bar button not until 11,
+    # and level 11 IS the post card (role="listitem"). So: walk up from the
+    # editor and take the FIRST ancestor that contains a submit-looking button,
+    # stopping before the post card. Nearest-enclosing, not page-wide.
+    #
+    # Anchored on role="listitem" as the stop because it is a structural ARIA
+    # role this codebase already depends on (POST_DETAIL_SELECTORS), not a
+    # hashed class. Every container between the editor and the composer is a
+    # div with nothing but hashed classes - there is no form and no data-testid
+    # to anchor on, which is why proximity is the hook.
+
+    #: Visible labels a comment-submit control uses.
+    SUBMIT_BUTTON_TEXTS = ("Comment", "Post", "Reply")
+
+    #: The structural boundary the walk must not cross: the post card. The
+    #: action-bar "Comment" lives at this level, so stopping here is what makes
+    #: selecting it impossible rather than merely unlikely.
+    COMPOSER_STOP_ROLE = "listitem"
+
+    #: Guard against an unbounded climb if the DOM shape changes.
+    COMPOSER_MAX_HOPS = 12
+
+    _FIND_COMPOSER_SUBMIT_JS = """
+    const box = arguments[0];
+    const texts = arguments[1];
+    const stopRole = arguments[2];
+    const maxHops = arguments[3];
+
+    function isSubmit(b) {
+      const t = (b.textContent || '').trim();
+      if (texts.indexOf(t) === -1) return false;
+      if (b.disabled) return false;
+      if ((b.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return false;
+      if (b.offsetParent === null) return false;
+      return true;
+    }
+
+    let node = box.parentElement;
+    let hops = 0;
+    while (node && hops < maxHops) {
+      // Stop BEFORE the post card. The action-bar button is inside it, so
+      // crossing this line is exactly how the wrong button gets picked.
+      if (node.getAttribute && node.getAttribute('role') === stopRole) break;
+      const found = Array.from(node.querySelectorAll('button')).filter(isSubmit);
+      if (found.length) {
+        // The submit sits after the editor in the composer footer, so on the
+        // rare container holding more than one, the last is ours.
+        return found[found.length - 1];
+      }
+      node = node.parentElement;
+      hops += 1;
+    }
+    return null;
+    """
+
+    def find_composer_submit(self, comment_input):
+        """The submit button belonging to THIS comment box, or None.
+
+        Never a page-wide text match: that is the bug. Returns None rather than
+        guessing, because a wrong guess clicks a button that silently does
+        nothing and the run then has no idea the comment was lost.
+        """
+        try:
+            button = self.driver.execute_script(
+                self._FIND_COMPOSER_SUBMIT_JS, comment_input,
+                list(self.SUBMIT_BUTTON_TEXTS), self.COMPOSER_STOP_ROLE,
+                self.COMPOSER_MAX_HOPS)
+        except Exception as exc:
+            self.logger.warning("Could not scope the submit button: %s", exc)
+            return None
+        if button is None:
+            self.logger.warning(
+                "No submit button found inside the comment composer.")
+        return button
+
+    def unambiguous_page_submit(self):
+        """A page-wide submit, but ONLY when there is exactly one candidate.
+
+        The ambiguity is the defect, so this refuses the moment there is more
+        than one - which is precisely the two-"Comment"-button page. It exists
+        so a simpler composer (one button, no ambiguity) still works if the
+        structural walk finds nothing.
+        """
+        candidates = [b for b in self.submit_button_candidates()
+                      if self.submit_button_is_enabled(b)]
+        if len(candidates) == 1:
+            self.logger.info(
+                "Composer walk found nothing, but the page has exactly one "
+                "enabled submit - using it.")
+            return candidates[0]
+        if len(candidates) > 1:
+            self.logger.error(
+                "%d enabled submit-looking buttons on the page and none inside "
+                "the composer. Refusing to guess which one posts.",
+                len(candidates))
+        return None
+
+    def focus_comment_box(self, comment_input):
+        """Put the caret back in the editor before a keyboard submit.
+
+        Ctrl+Enter goes to whatever has focus. After a click on a button, that
+        is the button - so the shortcut may never have reached the box at all,
+        which would explain why the keyboard fallback never rescued anything.
+        """
+        try:
+            self.driver.execute_script("arguments[0].focus();", comment_input)
+            return True
+        except Exception:
+            self.logger.debug("could not focus the comment box", exc_info=True)
+            return False
+
     def post_comment_ctrl_enter(self, comment_input, comment_text, before=None):
         """Keyboard submit, used as the fallback after a click that did nothing."""
         self.logger.info("Falling back to the Ctrl+Enter keyboard submit...")
         try:
+            # Focus FIRST. The shortcut goes wherever focus is, and after the
+            # click above that is the button, not the editor.
+            self.focus_comment_box(comment_input)
             hb.human_sleep(0.4, 1.0)
             comment_input.send_keys(Keys.CONTROL + Keys.ENTER)
             hb.human_sleep(2.5, 3.5)
@@ -703,18 +837,33 @@ class LinkedInCommentPoster:
             # SUBMIT_BUTTON_FALLBACK_SELECTORS[0] and clicked it immediately
             # with no enabled check at all, so a button LinkedIn had not yet
             # enabled was clicked, nothing happened, and nothing raised.
-            button = self.await_enabled_submit()
-            if button is None:
-                # Loud, captured, and NOT a skip. The capture records every
-                # candidate control with its aria-label and disabled state,
-                # which is what says whether the button was absent or merely
-                # never enabled.
+            # Wait for SOME submit to be enabled first - still the gate
+            # against clicking before the editor has registered the text.
+            # Nothing enabled at all is a DIFFERENT diagnosis from "enabled
+            # but we could not tell which one posts", and they need
+            # different fixes, so they keep different reasons.
+            if self.await_enabled_submit() is None:
                 self.capture_submit_failure(comment_text, before,
                                             "submit_button_never_enabled")
                 return False
 
+            # Then pick the right one. Scoped to the composer, never page-wide:
+            # two enabled buttons on this page read "Comment", and the
+            # page-wide match took the action-bar one that merely focuses the
+            # box.
+            button = self.find_composer_submit(comment_input)
+            path = "scoped composer button"
+            if button is None:
+                button = self.unambiguous_page_submit()
+                path = "page-wide button (unambiguous)"
+
+            if button is None:
+                self.capture_submit_failure(comment_text, before,
+                                            "submit_button_not_found")
+                return False
+
             try:
-                self.logger.info("Clicking the enabled submit button: %r",
+                self.logger.info("Clicking the %s: %r", path,
                                  (button.text or "").strip() or "<no text>")
                 hb.human_click(self.driver, button)
             except Exception as exc:
@@ -722,12 +871,13 @@ class LinkedInCommentPoster:
             hb.human_sleep(2.5, 3.5)
 
             if self.verify_comment_posted(comment_input, comment_text, before):
-                self.logger.info("Comment posted and verified in the thread")
+                self.logger.info("Comment POSTED via the %s", path)
                 return True
 
             # STEP 3 - the click landed on an ENABLED button and still nothing
             # posted. Try the keyboard submit ONCE, then re-verify.
             if self.post_comment_ctrl_enter(comment_input, comment_text, before):
+                self.logger.info("Comment POSTED via Ctrl+Enter")
                 return True
 
             self.capture_submit_failure(comment_text, before,

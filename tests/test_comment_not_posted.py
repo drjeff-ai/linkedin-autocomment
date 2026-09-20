@@ -528,3 +528,204 @@ def test_a_never_enabling_button_does_not_abort_the_batch(poster, tmp_path):
     assert poster.progress.get("posted_comments", []) == []
     reasons = [f["reason"] for f in poster.progress.get("failed_comments", [])]
     assert reasons == ["comment_not_posted", "comment_not_posted"]
+
+
+# ─── Dispatch 3: TWO buttons read "Comment" ──────────────────────────────────
+#
+# Proved by failure_comment_not_posted_20260920_103314: a post page carries the
+# action-bar "Comment" (focuses the box) AND the composer's submit "Comment"
+# (posts it). Neither has an aria-label and BOTH are enabled, so no attribute
+# test separates them - //button[normalize-space(.)='Comment'] matched both and
+# took the first in document order, which is the wrong one.
+#
+# The capture also shows what DOES separate them: from the editor, the
+# composer's submit shares an ancestor 6 levels up, the action-bar's not until
+# 11 - and level 11 is the post card, role="listitem".
+
+TWO_COMMENT_BUTTONS = """
+<div role="listitem">                        <!-- the post card -->
+  <div class="social-actions">
+    <button id="action-bar">Comment</button>  <!-- only focuses the box -->
+  </div>
+  <div class="hashed-a">
+    <div class="hashed-b">                    <!-- the composer container -->
+      <div data-testid="ui-core-tiptap-text-editor-wrapper">
+        <div role="textbox" contenteditable="true"
+             aria-label="Text editor for creating comment"
+             class="tiptap ProseMirror">typed text</div>
+      </div>
+      <div class="composer-footer">
+        <button id="composer-submit">Comment</button>   <!-- posts it -->
+      </div>
+    </div>
+  </div>
+</div>
+"""
+
+
+class DomDriver:
+    """Runs the real walk JS against a parsed fixture, in Python.
+
+    dom_probe gives a real tree, so the walk's LOGIC is exercised - nearest
+    enclosing ancestor, stopping at role="listitem" - rather than a mock that
+    simply returns whatever the test wants.
+    """
+
+    def __init__(self, html):
+        from linkedin_automation import dom_probe
+        self.dom_probe = dom_probe
+        self.root = dom_probe.parse_html(html)
+        self.current_url = "https://www.linkedin.com/feed/update/x/"
+        self.title = "A post"
+        self.thread = []
+        self.focused = None
+
+    # -- the fixture's stand-ins for the real DOM API --
+    def editor(self):
+        return self.dom_probe.select_css(
+            self.root, "div[role='textbox'][contenteditable='true']")[0]
+
+    def find_elements(self, by, selector):
+        if selector == cpm.LinkedInCommentPoster.POSTED_COMMENT_SELECTOR:
+            return [FakeElement(t) for t in self.thread]
+        if "normalize-space" in selector or selector == "button":
+            return self._all_comment_buttons()
+        return []
+
+    def _all_comment_buttons(self):
+        return [NodeButton(n) for n in self.root.walk()
+                if n.tag == "button"
+                and " ".join((n.text() or "").split()) == "Comment"]
+
+    def execute_script(self, script, *args):
+        if "focus()" in script:
+            self.focused = args[0]
+            return None
+        if "dispatchEvent" in script:
+            return None
+        if "parentElement" in script:
+            return self._walk(args[0])
+        return None
+
+    def _walk(self, box):
+        """The same algorithm the JS implements."""
+        texts = set(cpm.LinkedInCommentPoster.SUBMIT_BUTTON_TEXTS)
+        stop = cpm.LinkedInCommentPoster.COMPOSER_STOP_ROLE
+        node = getattr(box, "node", box).parent
+        hops = 0
+        while node is not None and hops < cpm.LinkedInCommentPoster.COMPOSER_MAX_HOPS:
+            if (node.attrs.get("role") or "") == stop:
+                return None                      # the post card: too far
+            found = [n for n in node.walk()
+                     if n.tag == "button"
+                     and " ".join((n.text() or "").split()) in texts]
+            if found:
+                return NodeButton(found[-1])
+            node = node.parent
+            hops += 1
+        return None
+
+    def save_screenshot(self, path):
+        with open(path, "wb") as f:
+            f.write(b"png")
+        return True
+
+    def quit(self):
+        return None
+
+    @property
+    def page_source(self):
+        return "<html></html>"
+
+
+class NodeButton:
+    """A dom_probe node dressed as the bits of a WebElement we touch."""
+
+    def __init__(self, node):
+        self.node = node
+        self.clicks = 0
+
+    @property
+    def text(self):
+        return " ".join((self.node.text() or "").split())
+
+    def get_attribute(self, name):
+        return self.node.attrs.get(name)
+
+    def is_displayed(self):
+        return True
+
+    def is_enabled(self):
+        return self.node.attrs.get("disabled") is None
+
+    def click(self):
+        self.clicks += 1
+
+    def __eq__(self, other):
+        return isinstance(other, NodeButton) and other.node is self.node
+
+    def __hash__(self):
+        return id(self.node)
+
+
+def _editor_element(driver):
+    return NodeButton(driver.editor())
+
+
+def test_the_page_really_does_have_two_enabled_comment_buttons(poster):
+    """The premise, asserted rather than assumed."""
+    driver = DomDriver(TWO_COMMENT_BUTTONS)
+    buttons = driver._all_comment_buttons()
+    assert len(buttons) == 2
+    assert all(b.is_enabled() for b in buttons)
+    assert all(b.get_attribute("aria-label") is None for b in buttons)
+
+
+def test_a_page_wide_text_match_takes_the_WRONG_button(poster):
+    """What the old code did. Document order puts the action bar first."""
+    driver = DomDriver(TWO_COMMENT_BUTTONS)
+    first = driver.find_elements("xpath", "//button[normalize-space(.)='Comment']")[0]
+    assert first.get_attribute("id") == "action-bar"
+
+
+def test_the_scoped_locator_takes_the_COMPOSER_button(poster):
+    """The fix: nearest ancestor of the editor that contains a submit."""
+    driver = DomDriver(TWO_COMMENT_BUTTONS)
+    poster.driver = driver
+    chosen = poster.find_composer_submit(_editor_element(driver))
+    assert chosen is not None
+    assert chosen.get_attribute("id") == "composer-submit"
+
+
+def test_the_walk_stops_at_the_post_card(poster):
+    """With no composer submit, the walk must return None rather than climbing
+    out to the action-bar button - returning that one is the bug."""
+    html = TWO_COMMENT_BUTTONS.replace(
+        '<button id="composer-submit">Comment</button>', "")
+    driver = DomDriver(html)
+    poster.driver = driver
+    assert poster.find_composer_submit(_editor_element(driver)) is None
+
+
+def test_an_ambiguous_page_is_refused_rather_than_guessed(poster):
+    """Two enabled candidates and nothing scoped: refuse. Guessing is what
+    clicked the wrong button for a whole run."""
+    html = TWO_COMMENT_BUTTONS.replace(
+        '<button id="composer-submit">Comment</button>', "")
+    driver = DomDriver(html)
+    poster.driver = driver
+    # One button left page-wide, so this one IS unambiguous...
+    assert poster.unambiguous_page_submit() is not None
+    # ...but with both present it must refuse.
+    poster.driver = DomDriver(TWO_COMMENT_BUTTONS)
+    assert poster.unambiguous_page_submit() is None
+
+
+def test_ctrl_enter_focuses_the_box_first(poster):
+    """The shortcut goes wherever focus is. After a click that is the button,
+    so the keyboard fallback may never have reached the editor at all."""
+    driver = DomDriver(TWO_COMMENT_BUTTONS)
+    poster.driver = driver
+    box = FakeElement("")
+    poster.post_comment_ctrl_enter(box, "some text", (0, []))
+    assert driver.focused is box
