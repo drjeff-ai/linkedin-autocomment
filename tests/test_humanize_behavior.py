@@ -234,10 +234,17 @@ def test_post_comment_types_like_human_not_send_keys(monkeypatch, no_sleep, comm
     inp = MagicMock(name="comment_input")
     monkeypatch.setattr(comment_poster, "open_comment_box", lambda: inp)
     # First posting method succeeds so we don't exercise the button fallbacks.
-    # Takes the before-snapshot too now: verification compares the thread
-    # against its pre-submit state rather than trusting the box.
-    monkeypatch.setattr(comment_poster, "post_comment_method1",
+    # Stub the SUBMIT half: this test is about how the text is TYPED. The
+    # submit path is now "wait for an enabled button, click it, verify", so
+    # those are the seams to hold still.
+    monkeypatch.setattr(comment_poster, "await_enabled_submit",
+                        lambda timeout=None: MagicMock(name="submit_button"))
+    monkeypatch.setattr(comment_poster, "verify_comment_posted",
                         lambda ci, ct, before=None: True)
+    monkeypatch.setattr(comment_poster, "notify_editor_of_input",
+                        lambda ci: None)
+    monkeypatch.setattr(comment_poster, "comment_thread_snapshot",
+                        lambda: (0, []))
     comment_poster.driver = MagicMock()
 
     assert comment_poster.post_comment("hello there world") is True

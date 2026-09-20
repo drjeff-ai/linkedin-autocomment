@@ -126,7 +126,19 @@ def poster(monkeypatch, tmp_path):
 
     # No real waiting, no real mouse.
     monkeypatch.setattr(cpm.hb, "human_sleep", lambda *a, **k: None)
-    monkeypatch.setattr(cpm.hb, "human_click", lambda d, e: getattr(d, "_submit", lambda: None)())
+    def _click(driver, element):
+        """Click the ELEMENT, the way human_click does.
+
+        Falls back to the driver's own submit hook for the Dispatch-1 drivers,
+        whose "button" is a throwaway stand-in.
+        """
+        clicker = getattr(element, "click", None)
+        if callable(clicker):
+            clicker()
+        else:
+            getattr(driver, "_submit", lambda: None)()
+
+    monkeypatch.setattr(cpm.hb, "human_click", _click)
     monkeypatch.setattr(cpm.hb, "scroll_to_element", lambda d, e: None)
     monkeypatch.setattr(cpm.hb, "type_like_human",
                         lambda d, el, text: setattr(el, "_text", text))
@@ -331,3 +343,188 @@ def test_a_fully_successful_run_still_reads_as_success(poster, tmp_path, caplog)
     assert result["posted"] == 2
     messages = " ".join(r.getMessage() for r in caplog.records)
     assert "FAILED" not in messages
+
+
+# ─── Dispatch 2: submit only an ENABLED button ───────────────────────────────
+#
+# The click used to go to SUBMIT_BUTTON_FALLBACK_SELECTORS[0] with no enabled
+# check at all. LinkedIn keeps that button disabled until its editor registers
+# the typed text, and a click on a disabled button raises nothing and does
+# nothing - the reported symptom exactly.
+
+
+class FakeButton:
+    """A submit control that can start disabled and later enable."""
+
+    def __init__(self, text="Comment", enabled=False, aria_label=None,
+                 aria_disabled=None, classes="", on_click=None):
+        self.text = text
+        self._enabled = enabled
+        self._aria_label = aria_label
+        self._aria_disabled = aria_disabled
+        self._classes = classes
+        self.on_click = on_click
+        self.clicks = 0
+
+    def is_displayed(self):
+        return True
+
+    def is_enabled(self):
+        return self._enabled
+
+    def get_attribute(self, name):
+        return {"aria-label": self._aria_label,
+                "aria-disabled": self._aria_disabled,
+                "class": self._classes,
+                "disabled": None if self._enabled else "true"}.get(name)
+
+    def click(self):
+        self.clicks += 1
+        if self.on_click:
+            self.on_click()
+
+
+class SubmitDriver:
+    """A page whose submit button enables only once the input event fires."""
+
+    def __init__(self, button, box=None, thread=None,
+                 enable_on_input=True):
+        self.button = button
+        self.box = box
+        self.thread = thread if thread is not None else []
+        self.enable_on_input = enable_on_input
+        self.current_url = "https://www.linkedin.com/feed/update/x/"
+        self.title = "A post"
+        self.scripts = []
+
+    def find_elements(self, by, selector):
+        if selector == cpm.LinkedInCommentPoster.POSTED_COMMENT_SELECTOR:
+            return [FakeElement(t) for t in self.thread]
+        if selector == "button":
+            return [self.button]
+        return [self.button]
+
+    def find_element(self, by, selector):
+        return self.button
+
+    def execute_script(self, script, *args):
+        self.scripts.append(script)
+        if "dispatchEvent" in script and self.enable_on_input:
+            self.button._enabled = True     # React finally saw the text
+        return None
+
+    def save_screenshot(self, path):
+        with open(path, "wb") as f:
+            f.write(b"png")
+        return True
+
+    def quit(self):
+        """run() closes the browser in its finally block."""
+        return None
+
+    @property
+    def page_source(self):
+        return "<html></html>"
+
+
+def _wire(poster, driver, box):
+    poster.driver = driver
+    poster.open_comment_box = lambda: box
+    poster.navigate_to_post = lambda url: True
+    poster.like_post = lambda: True
+    poster.SUBMIT_ENABLE_TIMEOUT = 0.3
+    poster.SUBMIT_ENABLE_POLL = 0.01
+
+
+def test_a_disabled_button_that_enables_after_the_input_event_gets_clicked(poster):
+    """The dominant failure mode, fixed: wait for enabled, then click."""
+    box = FakeElement("")
+    button = FakeButton(enabled=False)
+    driver = SubmitDriver(button, box=box, enable_on_input=True)
+
+    def on_click():
+        driver.thread.append("me: a comment that posts")
+
+    button.on_click = on_click
+    _wire(poster, driver, box)
+
+    assert poster.post_comment("a comment that posts") is True
+    assert button.clicks == 1
+    assert any("dispatchEvent" in s for s in driver.scripts)
+
+
+def test_a_button_that_never_enables_is_a_loud_captured_failure(poster, tmp_path):
+    """Not a skip, not COMMENTED, and the evidence says WHY."""
+    box = FakeElement("")
+    button = FakeButton(enabled=False)
+    driver = SubmitDriver(button, box=box, enable_on_input=False)
+    _wire(poster, driver, box)
+
+    assert poster.post_comment("a comment that never posts") is False
+    assert button.clicks == 0, "a disabled button must never be clicked"
+
+    captures = [f for f in os.listdir(tmp_path / "failures")
+                if f.endswith("_submitdom.json")]
+    assert captures
+    data = json.loads((tmp_path / "failures" / captures[0]).read_text(encoding="utf-8"))
+    assert data["reason"] == "submit_button_never_enabled"
+
+
+def test_the_ctrl_enter_fallback_rescues_a_click_that_did_nothing(poster):
+    """An enabled button whose click is a no-op - then the keyboard works."""
+    box = FakeElement("")
+    button = FakeButton(enabled=True)          # enabled, but click does nothing
+    driver = SubmitDriver(button, box=box, enable_on_input=False)
+    _wire(poster, driver, box)
+
+    def on_ctrl_enter(*a):
+        driver.thread.append("me: rescued by the keyboard")
+
+    box.send_keys = on_ctrl_enter
+    assert poster.post_comment("rescued by the keyboard") is True
+    assert button.clicks == 1                  # the click was tried first
+
+
+def test_the_action_bar_comment_button_is_never_mistaken_for_submit(poster):
+    """The button that OPENS the box also reads "Comment" and is ALWAYS
+    enabled. Accepting it would click the wrong control forever."""
+    opener = FakeButton(text="Comment", enabled=True, aria_label="Comment")
+    driver = SubmitDriver(opener, box=FakeElement(""), enable_on_input=False)
+    poster.driver = driver
+    poster.SUBMIT_ENABLE_TIMEOUT = 0.05
+    poster.SUBMIT_ENABLE_POLL = 0.01
+    assert poster.await_enabled_submit() is None
+
+
+def test_aria_disabled_counts_as_disabled(poster):
+    """Selenium's is_enabled() only reads the `disabled` property. A button
+    carrying aria-disabled="true" reads as ENABLED to it and still does nothing
+    when clicked - which is the no-op this dispatch is about."""
+    button = FakeButton(enabled=True, aria_disabled="true")
+    assert poster.submit_button_is_enabled(button) is False
+
+
+def test_the_artdeco_disabled_class_counts_as_disabled(poster):
+    button = FakeButton(enabled=True,
+                        classes="artdeco-button artdeco-button--disabled")
+    assert poster.submit_button_is_enabled(button) is False
+
+
+def test_a_never_enabling_button_does_not_abort_the_batch(poster, tmp_path):
+    """Resilient AND loud, through the whole run."""
+    def outcome(comment, *a, **k):
+        box = FakeElement("")
+        button = FakeButton(enabled=False)
+        driver = SubmitDriver(button, box=box, enable_on_input=False)
+        _wire(poster, driver, box)
+        # The REAL method, called unbound: _run_with has replaced the bound
+        # attribute with this very function, so `poster.post_single_comment`
+        # here would recurse into itself.
+        return cpm.LinkedInCommentPoster.post_single_comment(poster, comment)
+
+    result = _run_with(poster, tmp_path, ["a", "b"], outcome)
+    assert result["posted"] == 0
+    assert result["failed"] == 2
+    assert poster.progress.get("posted_comments", []) == []
+    reasons = [f["reason"] for f in poster.progress.get("failed_comments", [])]
+    assert reasons == ["comment_not_posted", "comment_not_posted"]

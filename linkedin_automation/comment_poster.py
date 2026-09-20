@@ -467,113 +467,188 @@ class LinkedInCommentPoster:
                               exc_info=True)
             return False
 
-    def post_comment_method1(self, comment_input, comment_text, before=None):
-        """Method 1: Direct selector from debug script."""
-        primary = self.SUBMIT_BUTTON_FALLBACK_SELECTORS[0]
-        self.logger.info(f"Trying Method 1: Direct selector ({primary})")
+    # How long to wait for LinkedIn's editor to enable the submit button after
+    # the text is entered. React re-renders on its own schedule; clicking
+    # before it does is a no-op that raises nothing.
+    SUBMIT_ENABLE_TIMEOUT = 8.0
+    SUBMIT_ENABLE_POLL = 0.25
+
+    def notify_editor_of_input(self, comment_input):
+        """Nudge the editor's framework state after typing.
+
+        `type_like_human` enters text with real per-character `send_keys`
+        (human_behavior.py:319), so genuine key events already fire and a
+        well-behaved editor has already updated. This dispatches an explicit
+        `input` event anyway, because the cost is one JS call and the failure it
+        guards against - a submit button that never leaves `disabled` because
+        the framework never saw the text - is silent, and produces exactly the
+        reported symptom: a comment visibly typed and never sent.
+
+        Best-effort: a failure here is not a failure to comment, and the
+        enabled-wait below is what actually decides.
+        """
         try:
-            post_button = self.driver.find_element(By.CSS_SELECTOR, primary)
-            self.logger.info(f"Found submit button: '{post_button.text}'")
-            hb.human_click(self.driver, post_button)
-            hb.human_sleep(2.5, 3.5)
-            
-            if self.verify_comment_posted(comment_input, comment_text, before):
-                self.logger.info("✅ Comment posted using Method 1!")
-                return True
-        except Exception as e:
-            self.logger.debug(f"Method 1 failed: {e}")
-        return False
-    
-    def post_comment_method5(self, comment_input, comment_text, before=None):
-        """Method 5: JavaScript approach from debug script."""
-        self.logger.info("Trying Method 5: JavaScript approach")
+            self.driver.execute_script(
+                """
+                const el = arguments[0];
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                """, comment_input)
+        except Exception:
+            self.logger.debug("could not dispatch an input event on the editor",
+                              exc_info=True)
+
+    def submit_button_candidates(self):
+        """Every plausible comment-submit control, in priority order.
+
+        The text-based XPath is FIRST because it is the one the class comments
+        call primary: LinkedIn ships hashed class names that change between
+        deploys, so the class selectors below it are fallbacks that may match
+        nothing on a given day.
+
+        The action-bar button that OPENS the comment box also reads "Comment",
+        which is why `SUBMIT_BUTTON_EXCLUDED_ARIA_LABEL` is filtered out - that
+        one is always enabled, so a check that accepted it would happily click
+        the wrong control forever.
+        """
+        found = []
         try:
-            script = """
-            console.log('Starting button search...');
-            const buttons = document.querySelectorAll('button');
-            let foundButtons = [];
-            
-            for (let btn of buttons) {
-                if (btn.offsetParent !== null && !btn.disabled) {
-                    const text = btn.textContent.trim();
-                    const classes = btn.className;
-                    const aria = btn.getAttribute('aria-label') || '';
-                    
-                    foundButtons.push({
-                        text: text,
-                        classes: classes,
-                        aria: aria
-                    });
-                    
-                    // Check various conditions
-                    if (classes.includes('comments-comment-box__submit-button') ||
-                        (classes.includes('artdeco-button--primary') && text !== 'Comment') ||
-                        aria.toLowerCase().includes('post comment')) {
-                        
-                        console.log('Clicking button:', text || 'Submit');
-                        btn.click();
-                        return {clicked: true, button: text || 'Submit'};
-                    }
-                }
-            }
-            
-            return {clicked: false, buttons_found: foundButtons};
-            """
-            
-            result_js = self.driver.execute_script(script)
-            self.logger.info(f"JavaScript result: {result_js}")
-            
-            if result_js and result_js.get('clicked'):
-                hb.human_sleep(2.5, 3.5)
-                if self.verify_comment_posted(comment_input, comment_text, before):
-                    self.logger.info("✅ Comment posted using Method 5!")
-                    return True
-        except Exception as e:
-            self.logger.debug(f"Method 5 failed: {e}")
-        return False
-    
+            for el in self.driver.find_elements(By.XPATH, self.SUBMIT_BUTTON_XPATH):
+                found.append(el)
+        except Exception:
+            self.logger.debug("submit XPath failed", exc_info=True)
+        for selector in self.SUBMIT_BUTTON_FALLBACK_SELECTORS:
+            try:
+                found.extend(self.driver.find_elements(By.CSS_SELECTOR, selector))
+            except Exception:
+                self.logger.debug("submit selector %s failed", selector,
+                                  exc_info=True)
+
+        out = []
+        for el in found:
+            try:
+                if (el.get_attribute("aria-label") or "").strip() == \
+                        self.SUBMIT_BUTTON_EXCLUDED_ARIA_LABEL:
+                    continue          # the button that OPENS the box
+                if not el.is_displayed():
+                    continue
+            except Exception:
+                continue
+            out.append(el)
+        return out
+
+    @staticmethod
+    def submit_button_is_enabled(button):
+        """Is this control actually clickable, by every signal it exposes?
+
+        LinkedIn disables the submit in more than one way, and Selenium's
+        `is_enabled()` only reads the `disabled` property. A button carrying
+        `aria-disabled="true"` or the artdeco disabled class reads as ENABLED to
+        `is_enabled()` while doing nothing when clicked - which is the no-op
+        click this whole dispatch is about.
+        """
+        try:
+            if not button.is_enabled():
+                return False
+            if (button.get_attribute("disabled") or "") not in ("", "false", None):
+                return False
+            if (button.get_attribute("aria-disabled") or "").lower() == "true":
+                return False
+            classes = button.get_attribute("class") or ""
+            if "artdeco-button--disabled" in classes or "disabled" in classes.split():
+                return False
+        except Exception:
+            return False
+        return True
+
+    def await_enabled_submit(self, timeout=None):
+        """Wait for a submit control to become ENABLED. Returns it, or None.
+
+        This is the fix. The old primary path took
+        SUBMIT_BUTTON_FALLBACK_SELECTORS[0] and clicked it immediately with no
+        enabled check at all (comment_poster.py:475-477 before this change), so
+        a button LinkedIn had not yet enabled was clicked, nothing happened, and
+        nothing raised.
+        """
+        timeout = self.SUBMIT_ENABLE_TIMEOUT if timeout is None else timeout
+        deadline = time.time() + timeout
+        seen_any = False
+        while True:
+            for button in self.submit_button_candidates():
+                seen_any = True
+                if self.submit_button_is_enabled(button):
+                    return button
+            if time.time() >= deadline:
+                break
+            time.sleep(self.SUBMIT_ENABLE_POLL)
+
+        if seen_any:
+            self.logger.error(
+                "The comment submit button never became enabled within %.1fs - "
+                "LinkedIn did not accept the typed text as input.", timeout)
+        else:
+            self.logger.error(
+                "No comment submit control was found on the page at all.")
+        return None
+
     def post_comment_ctrl_enter(self, comment_input, comment_text, before=None):
-        """Try Ctrl+Enter to post comment."""
-        self.logger.info("Trying Ctrl+Enter shortcut...")
+        """Keyboard submit, used as the fallback after a click that did nothing."""
+        self.logger.info("Falling back to the Ctrl+Enter keyboard submit...")
         try:
-            # Brief pause before the keyboard submit (a human doesn't fire the
-            # shortcut the instant typing ends).
             hb.human_sleep(0.4, 1.0)
             comment_input.send_keys(Keys.CONTROL + Keys.ENTER)
             hb.human_sleep(2.5, 3.5)
-            
             if self.verify_comment_posted(comment_input, comment_text, before):
-                self.logger.info("✅ Comment posted using Ctrl+Enter!")
+                self.logger.info("Comment posted via Ctrl+Enter")
                 return True
         except Exception as e:
             self.logger.debug(f"Ctrl+Enter failed: {e}")
         return False
-    
-    def post_comment_alternative_selectors(self, comment_input, comment_text, before=None):
-        """Try alternative button selectors."""
-        self.logger.info("Trying alternative selectors...")
-        
-        selectors = self.SUBMIT_BUTTON_FALLBACK_SELECTORS
 
-        for selector in selectors:
+    def capture_submit_failure(self, comment_text, before, reason):
+        """Everything a human needs to fix this, written once per failure.
+
+        Screenshot and page for context, plus the narrow answer: every
+        candidate submit and comment-box control with its aria-label and
+        disabled state. `reason` separates the two failures that look identical
+        in a log and are not the same problem at all:
+
+          submit_button_never_enabled - the text never registered with the
+              editor, so LinkedIn never enabled the control. Nothing was ever
+              clickable.
+          comment_not_posted - an ENABLED button was clicked, and the keyboard
+              fallback was tried, and the comment still did not appear.
+        """
+        capture_failure(self.driver, reason, self.profile_name)
+        buttons = []
+        for button in self.submit_button_candidates():
             try:
-                buttons = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                for button in buttons:
-                    if button.is_displayed() and button.is_enabled():
-                        btn_text = button.text.strip()
-                        if btn_text != "Comment":  # Skip comment opener
-                            self.logger.info(f"Found button with selector {selector}: '{btn_text}'")
-                            hb.human_click(self.driver, button)
-                            hb.human_sleep(2.5, 3.5)
-                            
-                            if self.verify_comment_posted(comment_input, comment_text, before):
-                                self.logger.info(f"✅ Comment posted using selector: {selector}")
-                                return True
-            except Exception as e:
-                self.logger.debug(f"Selector {selector} failed: {e}")
-        
-        return False
-    
+                buttons.append({
+                    "text": (button.text or "").strip()[:80],
+                    "aria_label": button.get_attribute("aria-label"),
+                    "disabled": button.get_attribute("disabled"),
+                    "aria_disabled": button.get_attribute("aria-disabled"),
+                    "class": (button.get_attribute("class") or "")[:200],
+                    "enabled_by_our_check": self.submit_button_is_enabled(button),
+                })
+            except Exception:
+                buttons.append({"error": "went stale while reading"})
+
+        self.last_failure_evidence = capture_submit_state(
+            self.driver, reason, self.profile_name,
+            extra={"reason": reason,
+                   "comment_length": len(comment_text or ""),
+                   "thread_before": (before or (None, []))[0],
+                   "thread_after": self.comment_thread_snapshot()[0],
+                   "submit_candidates_seen": buttons},
+            submit_selectors=([self.SUBMIT_BUTTON_XPATH]
+                              + list(self.SUBMIT_BUTTON_FALLBACK_SELECTORS)),
+            box_selectors=list(self.COMMENT_INPUT_SELECTORS))
+        self.logger.error(
+            "COMMENT NOT POSTED (%s): typed %d chars, nothing published.",
+            reason, len(comment_text or ""))
+        return self.last_failure_evidence
+
     def post_comment(self, comment_text: str) -> bool:
         """Post a comment on the current post using all available methods."""
         try:
@@ -617,43 +692,46 @@ class LinkedInCommentPoster:
             # and a failed submit changes the box too.
             before = self.comment_thread_snapshot()
 
-            # Try all posting methods in order of success rate
-            posting_methods = [
-                self.post_comment_method1,  # Direct selector that works in debug
-                self.post_comment_method5,  # JavaScript method that works in debug
-                self.post_comment_ctrl_enter,  # Keyboard shortcut
-                self.post_comment_alternative_selectors  # Alternative selectors
-            ]
-            
-            for method in posting_methods:
-                if method(comment_input, comment_text, before):
-                    return True
-            
-            # Every method ran and NONE could prove the comment landed. Capture
-            # both the page state and - the part that actually answers the
-            # question - every candidate submit control with its aria-label and
-            # disabled state, so the submit can be fixed from evidence.
-            capture_failure(self.driver, "comment_not_posted", self.profile_name)
-            self.last_failure_evidence = capture_submit_state(
-                self.driver, "comment_not_posted", self.profile_name,
-                extra={"comment_length": len(comment_text),
-                       "thread_before": before[0],
-                       "thread_after": self.comment_thread_snapshot()[0]},
-                submit_selectors=([self.SUBMIT_BUTTON_XPATH]
-                                  + list(self.SUBMIT_BUTTON_FALLBACK_SELECTORS)),
-                box_selectors=list(self.COMMENT_INPUT_SELECTORS))
-            self.logger.error(
-                "COMMENT NOT POSTED: typed %d chars, but no submit method could "
-                "be verified. Nothing was published for this post.",
-                len(comment_text))
-            
-            # Log all visible buttons for debugging
-            self.logger.info("Debugging - All visible buttons:")
-            all_buttons = self.driver.find_elements(By.CSS_SELECTOR, "button")
-            for i, btn in enumerate(all_buttons):
-                if btn.is_displayed():
-                    self.logger.info(f"Button {i}: text='{btn.text}', class='{btn.get_attribute('class')[:100]}'")
-            
+            # STEP 1 - make sure the editor's framework state saw the text. The
+            # submit button stays disabled until it does, and a click on a
+            # disabled button is a silent no-op.
+            self.notify_editor_of_input(comment_input)
+
+            # STEP 2 - wait for an ENABLED submit control, then click THAT.
+            #
+            # This is the fix. The old primary path took
+            # SUBMIT_BUTTON_FALLBACK_SELECTORS[0] and clicked it immediately
+            # with no enabled check at all, so a button LinkedIn had not yet
+            # enabled was clicked, nothing happened, and nothing raised.
+            button = self.await_enabled_submit()
+            if button is None:
+                # Loud, captured, and NOT a skip. The capture records every
+                # candidate control with its aria-label and disabled state,
+                # which is what says whether the button was absent or merely
+                # never enabled.
+                self.capture_submit_failure(comment_text, before,
+                                            "submit_button_never_enabled")
+                return False
+
+            try:
+                self.logger.info("Clicking the enabled submit button: %r",
+                                 (button.text or "").strip() or "<no text>")
+                hb.human_click(self.driver, button)
+            except Exception as exc:
+                self.logger.warning("The submit click raised: %s", exc)
+            hb.human_sleep(2.5, 3.5)
+
+            if self.verify_comment_posted(comment_input, comment_text, before):
+                self.logger.info("Comment posted and verified in the thread")
+                return True
+
+            # STEP 3 - the click landed on an ENABLED button and still nothing
+            # posted. Try the keyboard submit ONCE, then re-verify.
+            if self.post_comment_ctrl_enter(comment_input, comment_text, before):
+                return True
+
+            self.capture_submit_failure(comment_text, before,
+                                        "comment_not_posted")
             return False
             
         except Exception as e:
