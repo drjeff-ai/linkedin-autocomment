@@ -115,3 +115,120 @@ def capture_failure(driver, label: str, profile_name: str = None,
         # The absolute backstop — a diagnostic must never crash its caller.
         logger.debug("capture_failure: unexpected error (ignored)", exc_info=True)
         return None
+
+
+# ─── PII scrubbing for captured evidence ─────────────────────────────────────
+#
+# A failure capture is read by a human and may be pasted into an issue, a chat
+# or a commit. `data/` is gitignored, so these files do not reach the repo on
+# their own - but the moment someone quotes one, whatever it holds travels with
+# it. Identity is scrubbed at the WRITE boundary so a field added later is
+# covered by default, the same rule the X dump scrubber follows.
+
+_PII_PATTERNS = (
+    # A LinkedIn vanity slug: the one thing in this DOM that names a real human.
+    (re.compile(r"(/in/)[^/\s\"'?)]+"), r"\1<redacted-slug>"),
+    (re.compile(r"(/company/)[^/\s\"'?)]+"), r"\1<redacted-company>"),
+    (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "<redacted-email>"),
+    # Activity/share URNs and any other long id run.
+    (re.compile(r"\b\d{9,}\b"), "<redacted-id>"),
+)
+
+
+def scrub_pii(value):
+    """Redact identity from a string (or recursively from a dict/list).
+
+    Deliberately blunt: over-redacting a diagnostic costs a little context,
+    while under-redacting puts a real person's profile into a file someone may
+    paste somewhere. The SHAPE survives - a reader can still see that a slug or
+    an id was present, and where.
+    """
+    if isinstance(value, str):
+        out = value
+        for pattern, replacement in _PII_PATTERNS:
+            out = pattern.sub(replacement, out)
+        return out
+    if isinstance(value, dict):
+        return {k: scrub_pii(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [scrub_pii(v) for v in value]
+    return value
+
+
+def capture_submit_state(driver, label, profile_name=None, extra=None,
+                         submit_selectors=(), box_selectors=()):
+    """Capture the evidence a failed comment-submit actually needs.
+
+    `capture_failure` saves a screenshot and the whole page. That is a third of
+    a megabyte to read through when the question is narrow: WAS THERE A SUBMIT
+    BUTTON, and could it be clicked? This adds the answer directly - every
+    candidate submit control with its text, aria-label, disabled state and
+    dimensions - so the next dispatch can fix the submit from evidence instead
+    of guessing.
+
+    Returns the sidecar path, or None. Never raises: a diagnostic that breaks
+    the run it is diagnosing is worse than no diagnostic.
+    """
+    try:
+        from selenium.webdriver.common.by import By
+    except Exception:
+        return None
+
+    def _probe(selectors, kind):
+        found = []
+        for selector in selectors or ():
+            try:
+                by = By.XPATH if selector.strip().startswith(("/", "(")) else By.CSS_SELECTOR
+                for el in driver.find_elements(by, selector):
+                    try:
+                        found.append({
+                            "kind": kind,
+                            "selector": selector,
+                            "tag": el.tag_name,
+                            "text": (el.text or "")[:120],
+                            "aria_label": el.get_attribute("aria-label"),
+                            "disabled": el.get_attribute("disabled"),
+                            "aria_disabled": el.get_attribute("aria-disabled"),
+                            "class": (el.get_attribute("class") or "")[:200],
+                            "displayed": el.is_displayed(),
+                            "enabled": el.is_enabled(),
+                            "size": el.size,
+                        })
+                    except Exception:
+                        # One stale element must not lose the others.
+                        found.append({"kind": kind, "selector": selector,
+                                      "error": "element went stale while reading"})
+            except Exception as exc:
+                found.append({"kind": kind, "selector": selector,
+                              "error": str(exc)[:200]})
+        return found
+
+    context = dict(extra or {})
+    context["label"] = label
+    context["timestamp"] = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for key, getter in (("url", lambda: driver.current_url),
+                        ("title", lambda: driver.title)):
+        try:
+            context[key] = getter()
+        except Exception:
+            context[key] = None
+    context["submit_candidates"] = _probe(submit_selectors, "submit")
+    context["comment_box_candidates"] = _probe(box_selectors, "comment_box")
+
+    try:
+        out_dir = pm.get_data_dir(profile_name, "failures")
+    except Exception:
+        logger.debug("capture_submit_state: no failures dir", exc_info=True)
+        return None
+
+    path = os.path.join(
+        out_dir, "failure_%s_%s_submitdom.json"
+        % (_safe_label(label), context["timestamp"]))
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(scrub_pii(context), f, indent=2, ensure_ascii=False)
+    except Exception:
+        logger.debug("capture_submit_state: write failed", exc_info=True)
+        return None
+    logger.error("Submit-state evidence written: %s", path)
+    return path

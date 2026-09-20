@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 import logging
 from . import profile_manager as pm
 from . import human_behavior as hb
-from .failure_capture import capture_failure
+from .failure_capture import capture_failure, capture_submit_state
 
 load_dotenv()
 
@@ -374,41 +374,100 @@ class LinkedInCommentPoster:
         
         return comment_input
     
-    def verify_comment_posted(self, comment_input, comment_text):
-        """Verify if comment was actually posted."""
+    def comment_thread_snapshot(self):
+        """(count, texts) of the comments currently rendered on this post.
+
+        Taken BEFORE submitting so "did a new comment appear" is answerable.
+        Without a before-count the only available signal is "the box changed",
+        which a FAILED submit also produces.
+        """
         try:
-            # Method 1: Check if input is cleared
-            try:
-                current_text = comment_input.text.strip()
-                if current_text != comment_text:
-                    self.logger.info("✅ Comment input changed/cleared")
-                    return True
-            except Exception:
-                # Element might be stale (good sign)
-                self.logger.info("✅ Comment input element changed (likely posted)")
-                return True
-            
-            # Method 2: Check for comment in the list
-            hb.human_sleep(1.5, 2.5)
-            comments = self.driver.find_elements(
+            found = self.driver.find_elements(
                 By.CSS_SELECTOR, self.POSTED_COMMENT_SELECTOR)
-            for comment in comments[-5:]:  # Check last 5 comments
-                if comment_text[:50] in comment.text:
-                    self.logger.info("✅ Comment found in comment list!")
+        except Exception:
+            return (None, [])
+        texts = []
+        for el in found:
+            try:
+                texts.append((el.text or "").strip())
+            except Exception:
+                texts.append("")
+        return (len(found), texts)
+
+    def verify_comment_posted(self, comment_input, comment_text, before=None):
+        """Did the comment ACTUALLY land? Positive proof only.
+
+        THIS IS THE GUARD THAT FAILED IN PRODUCTION. It used to return True on:
+
+          * any change to the box's text - including a box a failed submit had
+            simply cleared; and
+          * a StaleElementReferenceException, logged as "likely posted", which
+            is the opposite of proof: a stale handle means the DOM moved, and
+            says nothing about whether anything was sent.
+
+        Those two paths made the tool type a comment, fail to post it, and
+        record it as done. The ledger (`posting_progress.json`) is what the
+        store reconciles COMMENTED from, so the post was then marked done
+        forever and never retried.
+
+        Now nothing counts as posted unless the comment is VISIBLE IN THE
+        THREAD, or the thread grew by one AND the box emptied. Ambiguity is a
+        failure. A false negative costs a retry; a false positive loses the
+        comment silently and permanently.
+        """
+        try:
+            hb.human_sleep(1.5, 2.5)
+            after_count, after_texts = self.comment_thread_snapshot()
+            needle = (comment_text or "").strip()[:50]
+
+            # Strongest proof: our text is rendered in the thread.
+            if needle:
+                for text in after_texts:
+                    if needle in text:
+                        self.logger.info("✅ Verified: the comment is in the thread")
+                        return True
+
+            # Weaker but still POSITIVE: the thread grew and the box emptied.
+            # Both halves are required - a cleared box alone is exactly what a
+            # failed submit leaves behind.
+            before_count = (before or (None, []))[0]
+            if before_count is not None and after_count is not None \
+                    and after_count > before_count:
+                if self._comment_box_is_empty(comment_input):
+                    self.logger.info(
+                        "✅ Verified: thread grew %d -> %d and the box cleared",
+                        before_count, after_count)
                     return True
-            
-            # Ambiguous: the input didn't clear and the comment isn't in the list —
-            # could be a silent submit failure or an already-commented edge case.
-            # Capture so the state can be inspected.
-            self.logger.warning("❌ Comment not verified as posted")
-            capture_failure(self.driver, "comment_unverified", self.profile_name)
+                self.logger.warning(
+                    "Thread grew %d -> %d but the box still holds text - "
+                    "not treating that as posted",
+                    before_count, after_count)
+
+            self.logger.warning(
+                "❌ NOT verified as posted (thread %s -> %s)",
+                before_count, after_count)
             return False
-            
+
         except Exception as e:
-            self.logger.error(f"Verification error: {e}")
+            # An error while verifying is NOT a pass. It is the same unknown
+            # the old code resolved in favour of success.
+            self.logger.error(f"Verification error (treated as NOT posted): {e}")
             return False
-    
-    def post_comment_method1(self, comment_input, comment_text):
+
+    def _comment_box_is_empty(self, comment_input):
+        """True only if the box is readable AND empty.
+
+        A stale or unreadable box returns False: "I cannot tell" must not read
+        as "it cleared, so it sent".
+        """
+        try:
+            return not (comment_input.text or "").strip()
+        except Exception:
+            self.logger.debug("comment box unreadable during verification",
+                              exc_info=True)
+            return False
+
+    def post_comment_method1(self, comment_input, comment_text, before=None):
         """Method 1: Direct selector from debug script."""
         primary = self.SUBMIT_BUTTON_FALLBACK_SELECTORS[0]
         self.logger.info(f"Trying Method 1: Direct selector ({primary})")
@@ -418,14 +477,14 @@ class LinkedInCommentPoster:
             hb.human_click(self.driver, post_button)
             hb.human_sleep(2.5, 3.5)
             
-            if self.verify_comment_posted(comment_input, comment_text):
+            if self.verify_comment_posted(comment_input, comment_text, before):
                 self.logger.info("✅ Comment posted using Method 1!")
                 return True
         except Exception as e:
             self.logger.debug(f"Method 1 failed: {e}")
         return False
     
-    def post_comment_method5(self, comment_input, comment_text):
+    def post_comment_method5(self, comment_input, comment_text, before=None):
         """Method 5: JavaScript approach from debug script."""
         self.logger.info("Trying Method 5: JavaScript approach")
         try:
@@ -466,14 +525,14 @@ class LinkedInCommentPoster:
             
             if result_js and result_js.get('clicked'):
                 hb.human_sleep(2.5, 3.5)
-                if self.verify_comment_posted(comment_input, comment_text):
+                if self.verify_comment_posted(comment_input, comment_text, before):
                     self.logger.info("✅ Comment posted using Method 5!")
                     return True
         except Exception as e:
             self.logger.debug(f"Method 5 failed: {e}")
         return False
     
-    def post_comment_ctrl_enter(self, comment_input, comment_text):
+    def post_comment_ctrl_enter(self, comment_input, comment_text, before=None):
         """Try Ctrl+Enter to post comment."""
         self.logger.info("Trying Ctrl+Enter shortcut...")
         try:
@@ -483,14 +542,14 @@ class LinkedInCommentPoster:
             comment_input.send_keys(Keys.CONTROL + Keys.ENTER)
             hb.human_sleep(2.5, 3.5)
             
-            if self.verify_comment_posted(comment_input, comment_text):
+            if self.verify_comment_posted(comment_input, comment_text, before):
                 self.logger.info("✅ Comment posted using Ctrl+Enter!")
                 return True
         except Exception as e:
             self.logger.debug(f"Ctrl+Enter failed: {e}")
         return False
     
-    def post_comment_alternative_selectors(self, comment_input, comment_text):
+    def post_comment_alternative_selectors(self, comment_input, comment_text, before=None):
         """Try alternative button selectors."""
         self.logger.info("Trying alternative selectors...")
         
@@ -507,7 +566,7 @@ class LinkedInCommentPoster:
                             hb.human_click(self.driver, button)
                             hb.human_sleep(2.5, 3.5)
                             
-                            if self.verify_comment_posted(comment_input, comment_text):
+                            if self.verify_comment_posted(comment_input, comment_text, before):
                                 self.logger.info(f"✅ Comment posted using selector: {selector}")
                                 return True
             except Exception as e:
@@ -553,6 +612,11 @@ class LinkedInCommentPoster:
             # Variable pause to "review" between typing and submitting.
             hb.human_sleep(1.0, 2.5)
             
+            # The thread as it stands BEFORE any submit. Verification compares
+            # against this: without it, "the box changed" is the only signal,
+            # and a failed submit changes the box too.
+            before = self.comment_thread_snapshot()
+
             # Try all posting methods in order of success rate
             posting_methods = [
                 self.post_comment_method1,  # Direct selector that works in debug
@@ -562,12 +626,26 @@ class LinkedInCommentPoster:
             ]
             
             for method in posting_methods:
-                if method(comment_input, comment_text):
+                if method(comment_input, comment_text, before):
                     return True
             
-            # If all submit methods fail, capture the page state (screenshot + DOM).
-            capture_failure(self.driver, "comment_submit_failed", self.profile_name)
-            self.logger.error("All posting methods failed.")
+            # Every method ran and NONE could prove the comment landed. Capture
+            # both the page state and - the part that actually answers the
+            # question - every candidate submit control with its aria-label and
+            # disabled state, so the submit can be fixed from evidence.
+            capture_failure(self.driver, "comment_not_posted", self.profile_name)
+            self.last_failure_evidence = capture_submit_state(
+                self.driver, "comment_not_posted", self.profile_name,
+                extra={"comment_length": len(comment_text),
+                       "thread_before": before[0],
+                       "thread_after": self.comment_thread_snapshot()[0]},
+                submit_selectors=([self.SUBMIT_BUTTON_XPATH]
+                                  + list(self.SUBMIT_BUTTON_FALLBACK_SELECTORS)),
+                box_selectors=list(self.COMMENT_INPUT_SELECTORS))
+            self.logger.error(
+                "COMMENT NOT POSTED: typed %d chars, but no submit method could "
+                "be verified. Nothing was published for this post.",
+                len(comment_text))
             
             # Log all visible buttons for debugging
             self.logger.info("Debugging - All visible buttons:")
@@ -612,11 +690,16 @@ class LinkedInCommentPoster:
         # Variable pause between liking and opening the comment box.
         hb.human_sleep(0.8, 2.2)
 
-        # Post the comment
+        # Post the comment. A False here means NOT POSTED - it must never
+        # reach the ledger below, which is what post_store reconciles COMMENTED
+        # from. Marking an unposted comment done loses it permanently: the URL
+        # is skipped on every future run.
         if not self.post_comment(comment_text):
+            self.record_comment_failure(url, "comment_not_posted")
             return False
-        
-        # Mark as completed
+
+        # Mark as completed - reached ONLY when the comment was verified in the
+        # thread.
         self.progress['posted_comments'].append(url)
         self.progress['last_posted'] = datetime.now().isoformat()
         self.save_progress()
@@ -628,6 +711,70 @@ class LinkedInCommentPoster:
 
         return True
     
+
+    def _report_run(self, posted, failed, skipped, attempted, total):
+        """The run summary. A batch that posted nothing must be unmistakable.
+
+        The old line was `Done. Posted N, skipped M` at INFO with a tick, which
+        read as success whatever N was - and "skipped" quietly absorbed posts
+        that had been typed and lost.
+        """
+        result = {"posted": posted, "failed": failed, "skipped": skipped,
+                  "attempted": attempted, "total": total}
+        if failed:
+            self.logger.error("")
+            self.logger.error("!" * 68)
+            self.logger.error(
+                "  %d of %d comments FAILED to post - see data/%s/failures/",
+                failed, attempted, self.profile_name or "<profile>")
+            if not posted:
+                self.logger.error(
+                    "  NOTHING WAS POSTED THIS RUN. Do not read this as success.")
+            self.logger.error(
+                "  Failed posts were NOT marked commented and will be retried.")
+            self.logger.error("!" * 68)
+            self.logger.error("")
+        elif posted:
+            self.logger.info("Done. Posted %d of %d attempted (%d parsed, %d skipped).",
+                             posted, attempted, total, skipped)
+        else:
+            self.logger.warning(
+                "Nothing was posted: 0 of %d parsed (%d skipped, 0 attempted).",
+                total, skipped)
+        return result
+
+    def record_comment_failure(self, url, reason):
+        """Record a post whose comment did NOT go out, loudly and durably.
+
+        Written beside the posted ledger rather than into it. `posted_comments`
+        is the authoritative record of what actually published and nothing
+        unverified belongs there; this is the parallel record of what did not,
+        so a failure survives the run and can be retried rather than being a
+        line in a log nobody reads.
+        """
+        entry = {
+            "url": url,
+            "reason": reason,
+            "at": datetime.now().isoformat(),
+            "evidence": getattr(self, "last_failure_evidence", None),
+        }
+        self.progress.setdefault("failed_comments", []).append(entry)
+        try:
+            self.save_progress()
+        except Exception:
+            self.logger.debug("could not persist the failure record",
+                              exc_info=True)
+        self.logger.error("=" * 68)
+        self.logger.error("COMMENT FAILED TO POST (%s)", reason)
+        self.logger.error("  post: %s", url)
+        if entry["evidence"]:
+            self.logger.error("  evidence: %s", entry["evidence"])
+        self.logger.error("  this post was NOT marked commented and will be "
+                          "retried on the next run")
+        self.logger.error("=" * 68)
+        self.last_failure_evidence = None
+        return entry
+
     def run(self, comments_file: str, post_count: int = 1, manual_mode: bool = False):
         """Run the comment posting process."""
         # Parse comments
@@ -657,6 +804,12 @@ class LinkedInCommentPoster:
             # not abort-the-whole-run).
             posted = 0
             skipped = 0
+            # A FAILURE is not a skip. A skip is "we chose not to try"; a
+            # failure is "we tried, typed a comment, and nothing published".
+            # Counting them together is how a run that posted nothing read as
+            # a quiet success.
+            failed = 0
+            attempted = 0
             total = len(comments)
 
             # Non-uniform session shape: take a longer break after a re-rolled
@@ -699,16 +852,27 @@ class LinkedInCommentPoster:
                         posted += 1
 
                     elif self.post_single_comment(comment):
+                        attempted += 1
                         posted += 1
                     else:
-                        self.logger.warning(f"Skipping comment {label}: post attempt did not succeed")
-                        skipped += 1
+                        attempted += 1
+                        failed += 1
+                        self.logger.error(
+                            "❌ %s FAILED to post - see data/<profile>/failures/",
+                            label)
                         continue
 
                 except Exception as e:
-                    # One comment failing must not stop the others.
-                    self.logger.warning(f"Skipping comment {label}: {e}", exc_info=True)
-                    skipped += 1
+                    # One comment failing must not stop the others - but it is
+                    # a FAILURE, not a skip, and the run must say so.
+                    attempted += 1
+                    failed += 1
+                    self.logger.error("❌ %s FAILED to post: %s", label, e,
+                                      exc_info=True)
+                    try:
+                        self.record_comment_failure(url, "exception")
+                    except Exception:
+                        pass
                     continue
 
                 # Wait between successful posts to avoid rate limiting. Vary the
@@ -727,8 +891,7 @@ class LinkedInCommentPoster:
                         posts_since_break = 0
                         break_threshold = hb.random_break_threshold()
 
-            self.logger.info(f"\n✅ Done. Posted {posted}, skipped {skipped}, of {total} parsed.")
-            return {"posted": posted, "skipped": skipped, "total": total}
+            return self._report_run(posted, failed, skipped, attempted, total)
 
         finally:
             if self.driver:
