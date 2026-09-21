@@ -150,7 +150,12 @@ def poster(monkeypatch, tmp_path):
     monkeypatch.setattr(cpm.hb, "take_break", lambda *a, **k: None)
     monkeypatch.setattr(cpm.time, "sleep", lambda s: None)
 
-    return cpm.LinkedInCommentPoster(profile_name="default")
+    poster = cpm.LinkedInCommentPoster(profile_name="default")
+    # The submit wait polls for 8s in production. Left at its real value every
+    # test that reaches a disabled button would spend it, for no signal.
+    poster.SUBMIT_ENABLE_TIMEOUT = 0.2
+    poster.SUBMIT_ENABLE_POLL = 0.01
+    return poster
 
 
 # ─── the two false proofs ────────────────────────────────────────────────────
@@ -411,6 +416,13 @@ class SubmitDriver:
         self.scripts.append(script)
         if "dispatchEvent" in script and self.enable_on_input:
             self.button._enabled = True     # React finally saw the text
+            return None
+        if "focus()" in script:
+            return None
+        if "parentElement" in script:
+            # The composer walk. This driver models a page where the button IS
+            # inside the composer, so the walk finds it - enabled or not.
+            return self.button
         return None
 
     def save_screenshot(self, path):
@@ -454,7 +466,12 @@ def test_a_disabled_button_that_enables_after_the_input_event_gets_clicked(poste
 
 
 def test_a_button_that_never_enables_is_a_loud_captured_failure(poster, tmp_path):
-    """Not a skip, not COMMENTED, and the evidence says WHY."""
+    """Not a skip, not COMMENTED, and the disabled button is NEVER clicked.
+
+    This is the 15:00 capture's shape: the composer submit stays disabled
+    because the typed text never registered. Clicking it would do nothing, and
+    clicking anything else would be the action bar.
+    """
     box = FakeElement("")
     button = FakeButton(enabled=False)
     driver = SubmitDriver(button, box=box, enable_on_input=False)
@@ -467,7 +484,26 @@ def test_a_button_that_never_enables_is_a_loud_captured_failure(poster, tmp_path
                 if f.endswith("_submitdom.json")]
     assert captures
     data = json.loads((tmp_path / "failures" / captures[0]).read_text(encoding="utf-8"))
-    assert data["reason"] == "submit_button_never_enabled"
+    assert data["reason"] == "comment_not_posted"
+
+
+def test_a_disabled_submit_falls_through_to_the_keyboard(poster):
+    """The 15:00 scenario, end to end.
+
+    Composer submit disabled; the run must NOT click it, and must NOT reach for
+    the enabled action-bar button. It tries the keyboard instead.
+    """
+    box = FakeElement("")
+    button = FakeButton(enabled=False)
+    driver = SubmitDriver(button, box=box, enable_on_input=False)
+    _wire(poster, driver, box)
+
+    def on_ctrl_enter(*a):
+        driver.thread.append("me: rescued after a disabled submit")
+
+    box.send_keys = on_ctrl_enter
+    assert poster.post_comment("rescued after a disabled submit") is True
+    assert button.clicks == 0
 
 
 def test_the_ctrl_enter_fallback_rescues_a_click_that_did_nothing(poster):
@@ -485,15 +521,16 @@ def test_the_ctrl_enter_fallback_rescues_a_click_that_did_nothing(poster):
     assert button.clicks == 1                  # the click was tried first
 
 
-def test_the_action_bar_comment_button_is_never_mistaken_for_submit(poster):
-    """The button that OPENS the box also reads "Comment" and is ALWAYS
-    enabled. Accepting it would click the wrong control forever."""
-    opener = FakeButton(text="Comment", enabled=True, aria_label="Comment")
-    driver = SubmitDriver(opener, box=FakeElement(""), enable_on_input=False)
-    poster.driver = driver
-    poster.SUBMIT_ENABLE_TIMEOUT = 0.05
-    poster.SUBMIT_ENABLE_POLL = 0.01
-    assert poster.await_enabled_submit() is None
+def test_there_is_no_page_wide_submit_path_at_all(poster):
+    """The page-wide fallback WAS the bug, in its final form.
+
+    With the composer submit disabled and the action-bar button enabled, any
+    "pick the one enabled button on the page" rule resolves to the action bar.
+    So no such rule may exist - asserted on the object, because a helper added
+    back later would silently reintroduce it.
+    """
+    assert not hasattr(poster, "unambiguous_page_submit")
+    assert not hasattr(poster, "await_enabled_submit")
 
 
 def test_aria_disabled_counts_as_disabled(poster):
@@ -707,18 +744,17 @@ def test_the_walk_stops_at_the_post_card(poster):
     assert poster.find_composer_submit(_editor_element(driver)) is None
 
 
-def test_an_ambiguous_page_is_refused_rather_than_guessed(poster):
-    """Two enabled candidates and nothing scoped: refuse. Guessing is what
-    clicked the wrong button for a whole run."""
+def test_no_composer_submit_means_refuse_not_reach_outside(poster):
+    """With no submit in the composer, the answer is None - never the
+    action-bar button that is sitting right there, enabled."""
     html = TWO_COMMENT_BUTTONS.replace(
         '<button id="composer-submit">Comment</button>', "")
     driver = DomDriver(html)
     poster.driver = driver
-    # One button left page-wide, so this one IS unambiguous...
-    assert poster.unambiguous_page_submit() is not None
-    # ...but with both present it must refuse.
-    poster.driver = DomDriver(TWO_COMMENT_BUTTONS)
-    assert poster.unambiguous_page_submit() is None
+    poster.SUBMIT_ENABLE_TIMEOUT = 0.05
+    poster.SUBMIT_ENABLE_POLL = 0.01
+    button, enabled = poster.await_composer_submit(_editor_element(driver))
+    assert button is None and enabled is False
 
 
 def test_ctrl_enter_focuses_the_box_first(poster):

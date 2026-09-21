@@ -237,8 +237,8 @@ def test_post_comment_types_like_human_not_send_keys(monkeypatch, no_sleep, comm
     # Stub the SUBMIT half: this test is about how the text is TYPED. The
     # submit path is now "wait for an enabled button, click it, verify", so
     # those are the seams to hold still.
-    monkeypatch.setattr(comment_poster, "await_enabled_submit",
-                        lambda timeout=None: MagicMock(name="submit_button"))
+    monkeypatch.setattr(comment_poster, "await_composer_submit",
+                        lambda ci, timeout=None: (MagicMock(name="submit_button"), True))
     monkeypatch.setattr(comment_poster, "verify_comment_posted",
                         lambda ci, ct, before=None: True)
     monkeypatch.setattr(comment_poster, "notify_editor_of_input",
