@@ -248,3 +248,142 @@ This directory is git-ignored (it contains your live session). The highest-value
 capture is the connector's `send_modal_missing` — the shadow-DOM Send button from
 Lesson 6 — which is exactly where a silent selector break is otherwise hardest to
 see.
+
+---
+
+## 6. LinkedIn comment posting (the 2026-09-20 outage)
+
+For two weeks the tool typed comments, failed to submit them, and marked the
+posts done. Everything below is from live captures, not documentation.
+
+### 6.1 The editor is TipTap/ProseMirror, and typing works
+
+The comment box is **not an input**. It is a contenteditable div:
+
+```
+div[role='textbox'][contenteditable='true']
+    class="tiptap ProseMirror …"
+    aria-label="Text editor for creating comment"
+```
+
+Its empty state is `<p><br class="ProseMirror-trailingBreak"></p>` — recognise
+that, because it looks like "the text never arrived".
+
+**Per-character `send_keys` DOES register.** This was doubted and the input path
+was briefly replaced with CDP `Input.insertText` on the strength of one capture
+showing an empty editor. That was wrong: a second capture from the same run
+holds all 177 characters. **No CDP, no paste, no `execCommand` is needed** —
+and the human typing cadence is worth keeping, so do not trade it away without
+evidence that keystrokes are actually being ignored.
+
+### 6.2 TWO buttons read "Comment" — scope the submit to the composer
+
+A post page carries both:
+
+- the **action-bar** button, which only *focuses* the comment box, and
+- the **composer submit**, which actually posts.
+
+Neither carries an `aria-label`, both can be enabled, and their classes are
+hashed and nearly identical. **No attribute test separates them.**
+`//button[normalize-space(.)='Comment']` matches both and takes the first in
+document order — the action bar. That single line was the visible bug: comment
+typed, wrong button clicked, nothing posted, nothing raised.
+
+What separates them is structure. From the editor, the composer submit shares an
+ancestor **6 levels up**; the action-bar button not until **11** — and level 11
+is the post card, `role="listitem"`.
+
+> **Walk up from the editor, take the first ancestor containing a
+> submit-looking button, and stop before `role="listitem"`. Never match
+> page-wide.**
+
+There is no usable attribute hook in between: no `<form>`, and the only
+`data-testid` (`ui-core-tiptap-text-editor-wrapper`) wraps the editor *without*
+the submit. Everything else there is hashed classes.
+
+**Do not add a page-wide fallback.** One was added for the case where the walk
+finds nothing, and it resolved straight back to the action-bar button — the
+same bug in a new costume. Outside the composer there is nothing safe to click.
+
+### 6.3 Disabled submit + empty editor can mean SUCCESS
+
+LinkedIn disables the composer submit while the ProseMirror document is empty.
+So:
+
+- **enabling is the signal the text registered** — a better one than reading the
+  box back, and worth waiting for rather than filtering on; and
+- **after a successful post the box clears and the submit re-disables.**
+
+An empty editor beside a disabled submit therefore reads identically whether the
+comment never landed or just published. Do not infer failure from it. This cost
+a whole dispatch: the state was read as "text never registered" when the comment
+had in fact just posted.
+
+Check `is_enabled()` **and** `disabled`, `aria-disabled`, and the
+`artdeco-button--disabled` class. Selenium's `is_enabled()` reads only the
+`disabled` property, so a button disabled the other three ways looks clickable
+and silently does nothing.
+
+### 6.4 Verify under `-commentList`; the old selector is dead
+
+`div.comments-comment-item` **matches zero elements** on the current DOM. Both
+captures contain no class token with "comment" in it at all — the tiptap-era
+markup is hashed classes only.
+
+The live hook is a container whose `data-testid` **ends in `-commentList`** (the
+prefix is per-post), whose children are the rendered comments plus chrome.
+
+- Match on the **comment TEXT** inside that container.
+- **Poll** for a few seconds before concluding anything: a comment still
+  rendering is not a comment that failed, and reaching for a keyboard fallback
+  too early is how a slow render becomes a *second* comment.
+- Do **not** use that container's child count as a "thread grew" signal. It
+  counts the post header, the "Most relevant" control and other chrome, so
+  against a pre-submit snapshot it reads as huge growth and passes
+  unconditionally. It is not a comment count.
+
+### 6.5 A positive-proof verifier MUST have a test proving it can return True
+
+**This was the actual root cause, and it is the lesson most worth keeping.**
+
+The verifier was tightened to accept only positive proof — the comment visible
+in the thread. Correct. But the selector it looked under was dead, so it could
+**only ever return False**. The consequences compound:
+
+- every genuinely posted comment is reported as a failure;
+- the queue never drains, so the same posts are offered again;
+- the records say "not posted" about comments that are live, and a re-run
+  duplicates them; and
+- a "not posted yet" reading can trigger a fallback submit — a double post.
+
+A verifier that cannot say yes is worse than no verifier, because it looks like
+rigour. **Any check whose passing condition is "we found the thing" needs a test
+that feeds it a page where the thing IS present and asserts True** — plus the
+matching False case so it has not become a rubber stamp.
+
+### 6.6 Never comment twice: ask the thread, not your records
+
+Before typing, check whether the thread already carries a **self-authored**
+comment — LinkedIn marks your own with a `• You` byline — or the exact text
+about to be posted. If so, skip and record the URL as posted.
+
+This is the one guard that does not depend on our own state being right, and on
+2026-09-20 every other one was wrong simultaneously: the ledger said "not
+posted" about a comment that was live. Asking the thread survives a cleared
+store, a restored archive, a re-scrape, a second machine, and bugs not yet
+found. Be conservative in the safe direction — an *unreadable* thread should not
+block posting, or an unrelated DOM change silently stops the tool.
+
+### 6.7 Where the evidence lives
+
+Failures write to `data/<profile>/failures/`:
+
+- `failure_<reason>_<ts>.png` / `.html` — page state, and
+- `failure_<reason>_<ts>_submitdom.json` — every candidate submit and
+  comment-box control with its text, `aria-label`, disabled state and size,
+  PII-scrubbed.
+
+The reasons are distinct on purpose and want different fixes:
+`text_did_not_register` (nothing was ever clickable), and `comment_not_posted`
+(an enabled submit was clicked, the keyboard was tried, and the comment still
+did not appear).
