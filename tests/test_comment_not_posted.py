@@ -1081,3 +1081,181 @@ def test_a_skipped_thread_is_recorded_as_posted_not_failed(poster):
     skipped = poster.progress["skipped_already_commented"]
     assert skipped[0]["url"] == url
     assert "already on this thread" in skipped[0]["reason"]
+
+
+# ─── the like path: a real selector, and a bounded wait ──────────────────────
+#
+# All three previous LIKE_BUTTON_SELECTORS matched ZERO on the current DOM, and
+# each was run through a 20-second WebDriverWait - so every comment spent SIXTY
+# SECONDS discovering it could not like the post, then continued anyway. A third
+# of the run, buying nothing.
+#
+# The fixture mirrors the action bar in the 2026-09-20 captures, including the
+# reaction-menu decoys, hand-authored per fixtures/README rule 1.
+
+ACTION_BAR_HTML = """
+<div role="listitem">
+  <button type="button" aria-label="Reaction button state: Like">Like</button>
+  <button type="button" aria-label="Open reactions menu" aria-expanded="false"></button>
+  <button type="button" aria-label="Open reactions menu" aria-expanded="false"></button>
+  <button type="button">Comment</button>
+  <button type="button">Repost</button>
+  <button type="button">Send</button>
+</div>
+"""
+
+ALREADY_LIKED_HTML = """
+<div role="listitem">
+  <button type="button" aria-label="Reaction button state: Liked">Liked</button>
+  <button type="button" aria-label="Open reactions menu" aria-expanded="false"></button>
+</div>
+"""
+
+
+class ActionBarDriver:
+    """Serves a parsed action bar through the bits of the element API used."""
+
+    def __init__(self, html=""):
+        from linkedin_automation import dom_probe
+        self.dom_probe = dom_probe
+        self.root = dom_probe.parse_html(html) if html else None
+        self.lookups = 0
+
+    def find_elements(self, by, selector):
+        self.lookups += 1
+        if self.root is None:
+            return []
+        try:
+            return [_BarEl(n)
+                    for n in self.dom_probe.select_css(self.root, selector)]
+        except Exception:
+            return []
+
+
+class _BarEl:
+    """A node dressed as the WebElement surface the like path actually uses.
+
+    _ListEl (above) has no is_displayed/is_enabled, and find_like_button
+    swallows the AttributeError - so reusing it made every lookup silently
+    return nothing.
+    """
+
+    def __init__(self, node):
+        self.node = node
+
+    @property
+    def text(self):
+        return ' '.join((self.node.text() or '').split())
+
+    def get_attribute(self, name):
+        return self.node.attrs.get(name)
+
+    def is_displayed(self):
+        return True
+
+    def is_enabled(self):
+        return self.node.attrs.get('disabled') is None
+
+
+def test_the_new_selector_finds_the_like_button(poster):
+    """Derived from the capture, not guessed."""
+    poster.driver = ActionBarDriver(ACTION_BAR_HTML)
+    button = poster.find_like_button()
+    assert button is not None
+    assert button.get_attribute("aria-label") == "Reaction button state: Like"
+
+
+def test_the_reaction_menu_decoys_are_never_returned(poster):
+    """Six 'Open reactions menu' buttons sit in the same bar. Clicking one
+    opens a menu instead of liking, so a loose [aria-label*='Like'] would be
+    worse than the dead selector it replaced."""
+    poster.driver = ActionBarDriver(ACTION_BAR_HTML)
+    button = poster.find_like_button()
+    assert button.get_attribute("aria-label") != "Open reactions menu"
+
+
+def test_a_missing_like_button_returns_within_the_bound(poster):
+    """THE DURABLE HALF OF THE FIX.
+
+    The old path cost 60s to answer this. The next selector death must cost
+    seconds, whatever the selectors are.
+    """
+    import time as _t
+    poster.driver = ActionBarDriver("<div role='listitem'></div>")
+    poster.LIKE_WAIT_SECONDS = 0.5
+    poster.LIKE_POLL_SECONDS = 0.05
+
+    started = _t.time()
+    assert poster.find_like_button() is None
+    elapsed = _t.time() - started
+    assert elapsed < 2.0, "took %.1fs - the bound is not holding" % elapsed
+
+
+def test_the_wait_is_bounded_in_total_not_per_selector(poster):
+    """Three dead selectors must not cost three timeouts.
+
+    That multiplication is exactly what made it 60s rather than 20s.
+    """
+    import time as _t
+    poster.driver = ActionBarDriver("<div role='listitem'></div>")
+    assert len(poster.LIKE_BUTTON_SELECTORS) >= 3, "need several to prove it"
+    poster.LIKE_WAIT_SECONDS = 0.4
+    poster.LIKE_POLL_SECONDS = 0.05
+
+    started = _t.time()
+    poster.find_like_button()
+    elapsed = _t.time() - started
+    assert elapsed < len(poster.LIKE_BUTTON_SELECTORS) * 0.4, (
+        "%.2fs looks like a per-selector budget" % elapsed)
+
+
+def test_a_missing_like_degrades_to_skip_and_continue(poster):
+    """Liking is optional; failing to like must not stop the comment."""
+    poster.driver = ActionBarDriver("<div role='listitem'></div>")
+    poster.LIKE_WAIT_SECONDS = 0.2
+    poster.LIKE_POLL_SECONDS = 0.05
+    assert poster.like_post() is False          # reported, not raised
+
+
+def test_an_already_liked_post_is_recognised(poster):
+    """A different reaction state in the same aria-label family."""
+    poster.driver = ActionBarDriver(ALREADY_LIKED_HTML)
+    poster.LIKE_WAIT_SECONDS = 0.2
+    poster.LIKE_POLL_SECONDS = 0.05
+    assert poster.like_post() is True           # already liked, nothing to do
+
+
+def test_the_old_dead_selectors_are_kept_as_fallbacks(poster):
+    """MAINTENANCE step 4: new hooks first, old ones after.
+
+    Affordable only because the wait is now bounded in total.
+    """
+    assert poster.LIKE_BUTTON_SELECTORS[0] == \
+        "button[aria-label='Reaction button state: Like']"
+    assert any("aria-pressed='false'" in s for s in poster.LIKE_BUTTON_SELECTORS)
+
+
+# ─── the comment box is watched for, not slept through ───────────────────────
+
+def test_the_comment_input_is_found_by_polling(poster):
+    poster.driver = ActionBarDriver(
+        "<div role='textbox' contenteditable='true' class='tiptap'></div>")
+    assert poster.await_comment_input() is not None
+
+
+def test_a_missing_comment_input_returns_within_its_cap(poster):
+    import time as _t
+    poster.driver = ActionBarDriver("<div></div>")
+    poster.COMMENT_INPUT_WAIT_SECONDS = 0.4
+    poster.COMMENT_INPUT_POLL_SECONDS = 0.05
+    started = _t.time()
+    assert poster.await_comment_input() is None
+    assert _t.time() - started < 2.0
+
+
+def test_the_flat_three_second_comment_box_sleep_is_gone(poster):
+    """It cost three seconds whether the box took 200ms or never appeared."""
+    import inspect
+    src = inspect.getsource(cpm.LinkedInCommentPoster.open_comment_box)
+    assert "human_sleep(2.5, 3.5)" not in src
+    assert "await_comment_input" in src

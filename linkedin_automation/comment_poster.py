@@ -69,13 +69,40 @@ class LinkedInCommentPoster:
         "div[data-urn*='activity']",
     ]
 
+    # The post's Like control, read off the 2026-09-20 captures. It is a plain
+    # button carrying its state in the aria-label and NOTHING else - no
+    # aria-pressed, no data-testid, hashed classes:
+    #
+    #     <button type="button" aria-label="Reaction button state: Like">Like</button>
+    #
+    # Exactly one per page. Do NOT loosen this to `[aria-label*='Like']`: the
+    # same action bar carries six `aria-label="Open reactions menu"` buttons
+    # (the hover reaction pickers), and clicking one of those opens a menu
+    # instead of liking.
+    #
+    # The three selectors below it are the previous generation. All three match
+    # ZERO on the current DOM - they are kept as fallbacks per MAINTENANCE.md
+    # step 4, which is only affordable because the lookup is now bounded in
+    # TOTAL rather than per selector.
     LIKE_BUTTON_SELECTORS = [
+        "button[aria-label='Reaction button state: Like']",
         "button[aria-label*='Like'][aria-pressed='false']",
         "button.react-button__trigger:not(.react-button__trigger--active)",
         "button[data-control-name='like_toggle']",
     ]
 
+    # Already reacted. The same control reports a DIFFERENT state in its
+    # aria-label once a reaction is applied ("... : Liked", "... : Celebrate",
+    # and so on), so anything in that family which is not the plain "Like"
+    # state means the post has already been reacted to.
+    #
+    # No capture of a liked post exists yet, so this is inference from the
+    # unliked shape rather than an observation - it is a non-critical path
+    # (worst case we try to like an already-liked post and the click no-ops),
+    # and it is marked so nobody reads it as verified.
     LIKED_STATE_SELECTORS = [
+        "button[aria-label^='Reaction button state:']"
+        ":not([aria-label='Reaction button state: Like'])",
         "button[aria-label*='Like'][aria-pressed='true']",
         "button.react-button__trigger--active",
     ]
@@ -245,8 +272,10 @@ class LinkedInCommentPoster:
             self.logger.info(f"Navigating to post: {url}")
             self.driver.get(url)
 
-            # Wait for the page to fully load (variable, not a flat 3s)
-            hb.human_sleep(2.5, 4.0)
+            # A brief settle, NOT a page-load wait: the WebDriverWait below
+            # blocks on the post content actually being present, which is the
+            # real readiness signal. Sleeping 2.5-4s first only delayed asking.
+            hb.human_sleep(0.5, 1.0)
 
             # Wait for post content to be visible
             post_selectors = self.POST_DETAIL_SELECTORS
@@ -289,21 +318,40 @@ class LinkedInCommentPoster:
             self.logger.error(f"Navigation error: {e}")
             return False
     
+    #: TOTAL budget for finding the Like button, across every selector.
+    #:
+    #: This bound is the durable half of the fix. The old code ran each of
+    #: three selectors through a 20-SECOND WebDriverWait, so once they all went
+    #: stale every comment paid SIXTY SECONDS to discover it could not like the
+    #: post - a third of the run - and then continued anyway. Liking is
+    #: optional; waiting a minute to find out it failed is not.
+    #:
+    #: With the budget shared across selectors, the next selector death costs
+    #: seconds. Keeping stale selectors as fallbacks only stays affordable
+    #: because of this.
+    LIKE_WAIT_SECONDS = 3.0
+    LIKE_POLL_SECONDS = 0.25
+
+    def find_like_button(self, timeout=None):
+        """The first clickable Like control, or None. Bounded in TOTAL."""
+        deadline = time.time() + (self.LIKE_WAIT_SECONDS if timeout is None
+                                  else timeout)
+        while True:
+            for selector in self.LIKE_BUTTON_SELECTORS:
+                try:
+                    for el in self.driver.find_elements(By.CSS_SELECTOR, selector):
+                        if el.is_displayed() and el.is_enabled():
+                            return el
+                except Exception:
+                    continue
+            if time.time() >= deadline:
+                return None
+            time.sleep(self.LIKE_POLL_SECONDS)
+
     def like_post(self) -> bool:
         """Like the current post."""
         try:
-            # Find the like button - multiple possible selectors
-            like_selectors = self.LIKE_BUTTON_SELECTORS
-
-            like_button = None
-            for selector in like_selectors:
-                try:
-                    like_button = self.wait.until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                    )
-                    break
-                except Exception:
-                    continue
+            like_button = self.find_like_button()
 
             if not like_button:
                 # Check if already liked
@@ -366,26 +414,38 @@ class LinkedInCommentPoster:
         if comment_button:
             hb.scroll_to_element(self.driver, comment_button)
             hb.human_click(self.driver, comment_button)
-            hb.human_sleep(2.5, 3.5)  # Give time for comment box to fully load
             self.logger.info("Clicked comment button")
         else:
             self.logger.info("Comment button not found, trying to find comment box directly")
-        
-        # Find the comment input field
-        comment_input_selectors = self.COMMENT_INPUT_SELECTORS
 
-        comment_input = None
-        for selector in comment_input_selectors:
-            elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-            for elem in elements:
-                if elem.is_displayed():
-                    comment_input = elem
-                    self.logger.info(f"Found comment input with selector: {selector}")
-                    break
-            if comment_input:
-                break
-        
-        return comment_input
+        # Wait for the box by WATCHING for it, not by sleeping through the
+        # worst case. This used to be a flat 2.5-3.5s "give time for the
+        # comment box to fully load" followed by a single non-waiting lookup -
+        # so a box that appeared in 200ms still cost three seconds, and one
+        # that took four was missed anyway.
+        return self.await_comment_input()
+
+    #: Cap on waiting for the comment editor to mount.
+    COMMENT_INPUT_WAIT_SECONDS = 3.0
+    COMMENT_INPUT_POLL_SECONDS = 0.15
+
+    def await_comment_input(self, timeout=None):
+        """The comment editor once it is on screen, or None within the cap."""
+        deadline = time.time() + (self.COMMENT_INPUT_WAIT_SECONDS
+                                  if timeout is None else timeout)
+        while True:
+            for selector in self.COMMENT_INPUT_SELECTORS:
+                try:
+                    for elem in self.driver.find_elements(By.CSS_SELECTOR, selector):
+                        if elem.is_displayed():
+                            self.logger.info(
+                                "Found comment input with selector: %s", selector)
+                            return elem
+                except Exception:
+                    continue
+            if time.time() >= deadline:
+                return None
+            time.sleep(self.COMMENT_INPUT_POLL_SECONDS)
     
     def comment_thread_snapshot(self):
         """(count, texts) of the comments currently rendered on this post.
@@ -455,7 +515,10 @@ class LinkedInCommentPoster:
         comment silently and permanently.
         """
         try:
-            hb.human_sleep(1.5, 2.5)
+            # Short on purpose. verify_with_polling calls this repeatedly for
+            # up to VERIFY_TIMEOUT, so this pause only needs to let one render
+            # tick land - the waiting is the loop's job, not this call's.
+            hb.human_sleep(0.5, 1.0)
             after_count, after_texts = self.comment_thread_snapshot()
             needle = (comment_text or "").strip()[:50]
 
