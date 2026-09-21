@@ -155,6 +155,8 @@ def poster(monkeypatch, tmp_path):
     # test that reaches a disabled button would spend it, for no signal.
     poster.SUBMIT_ENABLE_TIMEOUT = 0.2
     poster.SUBMIT_ENABLE_POLL = 0.01
+    poster.VERIFY_TIMEOUT = 0.2
+    poster.VERIFY_POLL = 0.01
     return poster
 
 
@@ -393,11 +395,18 @@ class SubmitDriver:
     """A page whose submit button enables only once the input event fires."""
 
     def __init__(self, button, box=None, thread=None,
-                 enable_on_input=True):
+                 enable_on_input=True, accepts_input=None, has_cdp=True):
         self.button = button
-        self.box = box
+        self.box = box if box is not None else FakeElement("")
         self.thread = thread if thread is not None else []
-        self.enable_on_input = enable_on_input
+        # Whether the editor ACCEPTS inserted text. False models the 15:00
+        # capture: the insert does nothing, the document stays empty, and
+        # LinkedIn never enables the submit.
+        self.accepts_input = (enable_on_input if accepts_input is None
+                              else accepts_input)
+        self.cdp_calls = []
+        if not has_cdp:
+            del self.__class__.execute_cdp_cmd
         self.current_url = "https://www.linkedin.com/feed/update/x/"
         self.title = "A post"
         self.scripts = []
@@ -412,17 +421,28 @@ class SubmitDriver:
     def find_element(self, by, selector):
         return self.button
 
+    def execute_cdp_cmd(self, cmd, params):
+        """Chrome's input pipeline. The real one fires beforeinput/input."""
+        self.cdp_calls.append((cmd, params))
+        if cmd == "Input.insertText" and self.accepts_input:
+            self.box._text = params["text"]
+            self.button._enabled = True      # the editor registered the text
+        return {}
+
     def execute_script(self, script, *args):
         self.scripts.append(script)
-        if "dispatchEvent" in script and self.enable_on_input:
-            self.button._enabled = True     # React finally saw the text
-            return None
-        if "focus()" in script:
-            return None
         if "parentElement" in script:
             # The composer walk. This driver models a page where the button IS
             # inside the composer, so the walk finds it - enabled or not.
             return self.button
+        if "selectAll" in script:
+            self.box._text = ""
+            self.button._enabled = False
+            return None
+        if "insertText" in script and self.accepts_input:
+            self.box._text = args[1]
+            self.button._enabled = True
+            return None
         return None
 
     def save_screenshot(self, path):
@@ -439,6 +459,10 @@ class SubmitDriver:
         return "<html></html>"
 
 
+#: Kept so a test can delete execute_cdp_cmd off the class and restore it.
+_SUBMIT_DRIVER_CDP = SubmitDriver.execute_cdp_cmd
+
+
 def _wire(poster, driver, box):
     poster.driver = driver
     poster.open_comment_box = lambda: box
@@ -446,13 +470,15 @@ def _wire(poster, driver, box):
     poster.like_post = lambda: True
     poster.SUBMIT_ENABLE_TIMEOUT = 0.3
     poster.SUBMIT_ENABLE_POLL = 0.01
+    poster.VERIFY_TIMEOUT = 0.3
+    poster.VERIFY_POLL = 0.01
 
 
-def test_a_disabled_button_that_enables_after_the_input_event_gets_clicked(poster):
-    """The dominant failure mode, fixed: wait for enabled, then click."""
+def test_the_cdp_insert_lands_the_text_and_enables_the_submit(poster):
+    """The primary input path. The submit ENABLING is the proof it landed."""
     box = FakeElement("")
     button = FakeButton(enabled=False)
-    driver = SubmitDriver(button, box=box, enable_on_input=True)
+    driver = SubmitDriver(button, box=box, accepts_input=True)
 
     def on_click():
         driver.thread.append("me: a comment that posts")
@@ -462,55 +488,86 @@ def test_a_disabled_button_that_enables_after_the_input_event_gets_clicked(poste
 
     assert poster.post_comment("a comment that posts") is True
     assert button.clicks == 1
-    assert any("dispatchEvent" in s for s in driver.scripts)
+    assert driver.cdp_calls[0][0] == "Input.insertText"
+    assert driver.cdp_calls[0][1]["text"] == "a comment that posts"
 
 
-def test_a_button_that_never_enables_is_a_loud_captured_failure(poster, tmp_path):
-    """Not a skip, not COMMENTED, and the disabled button is NEVER clicked.
+def test_execcommand_rescues_a_driver_with_no_cdp(poster):
+    """Not every driver exposes CDP. The in-page insert is the fallback."""
+    box = FakeElement("")
+    button = FakeButton(enabled=False)
+    driver = SubmitDriver(button, box=box, accepts_input=True, has_cdp=False)
 
-    This is the 15:00 capture's shape: the composer submit stays disabled
-    because the typed text never registered. Clicking it would do nothing, and
-    clicking anything else would be the action bar.
+    def on_click():
+        driver.thread.append("me: landed via execCommand")
+
+    button.on_click = on_click
+    _wire(poster, driver, box)
+    try:
+        assert poster.post_comment("landed via execCommand") is True
+        assert any("insertText" in sc for sc in driver.scripts)
+    finally:
+        # `has_cdp=False` deletes the method off the CLASS, so put it back.
+        SubmitDriver.execute_cdp_cmd = _SUBMIT_DRIVER_CDP
+
+
+def test_text_that_never_registers_is_a_loud_captured_failure(poster, tmp_path):
+    """The 15:00 capture's shape: the insert does nothing, the document stays
+    empty, LinkedIn never enables the submit.
+
+    Nothing is clicked and nothing is posted, and the reason names the actual
+    problem - the TEXT, not the button.
     """
     box = FakeElement("")
     button = FakeButton(enabled=False)
-    driver = SubmitDriver(button, box=box, enable_on_input=False)
+    driver = SubmitDriver(button, box=box, accepts_input=False)
     _wire(poster, driver, box)
 
-    assert poster.post_comment("a comment that never posts") is False
+    assert poster.post_comment("a comment that never lands") is False
     assert button.clicks == 0, "a disabled button must never be clicked"
 
     captures = [f for f in os.listdir(tmp_path / "failures")
                 if f.endswith("_submitdom.json")]
     assert captures
     data = json.loads((tmp_path / "failures" / captures[0]).read_text(encoding="utf-8"))
-    assert data["reason"] == "comment_not_posted"
+    assert data["reason"] == "text_did_not_register"
 
 
-def test_a_disabled_submit_falls_through_to_the_keyboard(poster):
-    """The 15:00 scenario, end to end.
+def test_a_second_insert_is_refused_when_the_first_left_text_behind(poster):
+    """The double-post guard.
 
-    Composer submit disabled; the run must NOT click it, and must NOT reach for
-    the enabled action-bar button. It tries the keyboard instead.
+    If an insert left text in the editor without enabling the submit, running
+    another insert would post the comment twice - and a doubled comment cannot
+    be unposted. It stops instead.
     """
     box = FakeElement("")
     button = FakeButton(enabled=False)
-    driver = SubmitDriver(button, box=box, enable_on_input=False)
+    driver = SubmitDriver(button, box=box, accepts_input=False)
     _wire(poster, driver, box)
 
-    def on_ctrl_enter(*a):
-        driver.thread.append("me: rescued after a disabled submit")
+    # The insert lands text but the submit stays disabled, and clearing fails.
+    def stubborn_cdp(cmd, params):
+        box._text = params["text"]
+        return {}
 
-    box.send_keys = on_ctrl_enter
-    assert poster.post_comment("rescued after a disabled submit") is True
+    driver.execute_cdp_cmd = stubborn_cdp
+    driver.execute_script = lambda script, *a: (
+        driver.button if "parentElement" in script else None)
+
+    assert poster.post_comment("a comment that sticks") is False
     assert button.clicks == 0
+    assert driver.cdp_calls == [], "it must not have tried a second insert"
 
 
-def test_the_ctrl_enter_fallback_rescues_a_click_that_did_nothing(poster):
-    """An enabled button whose click is a no-op - then the keyboard works."""
+def test_the_keyboard_rescues_a_click_that_did_nothing(poster):
+    """Text landed, the submit enabled, the click was a no-op.
+
+    Only here does the keyboard fallback apply - AFTER the polling window, so
+    a slow render cannot turn into a second comment.
+    """
     box = FakeElement("")
-    button = FakeButton(enabled=True)          # enabled, but click does nothing
-    driver = SubmitDriver(button, box=box, enable_on_input=False)
+    button = FakeButton(enabled=True)
+    driver = SubmitDriver(button, box=box, accepts_input=True)
     _wire(poster, driver, box)
 
     def on_ctrl_enter(*a):
@@ -518,7 +575,7 @@ def test_the_ctrl_enter_fallback_rescues_a_click_that_did_nothing(poster):
 
     box.send_keys = on_ctrl_enter
     assert poster.post_comment("rescued by the keyboard") is True
-    assert button.clicks == 1                  # the click was tried first
+    assert button.clicks == 1          # the click was tried first
 
 
 def test_there_is_no_page_wide_submit_path_at_all(poster):
@@ -765,3 +822,114 @@ def test_ctrl_enter_focuses_the_box_first(poster):
     box = FakeElement("")
     poster.post_comment_ctrl_enter(box, "some text", (0, []))
     assert driver.focused is box
+
+
+# ─── the verifier must be ABLE to say yes ────────────────────────────────────
+#
+# Dispatch 1 made a thread match the only positive proof. Dispatch 4 then found
+# POSTED_COMMENT_SELECTOR ("div.comments-comment-item") matches ZERO times on
+# the current DOM - neither 2026-09-20 capture contains a single class token
+# with "comment" in it - which made verification unsatisfiable: every posted
+# comment would have been reported as a failure.
+#
+# The live hook is a data-testid ending in "-commentList". These fixtures are
+# hand-authored in that shape, per tests/fixtures/README rule 1 (never paste a
+# live DOM). The real capture was checked separately and behaves identically.
+
+COMMENT_LIST_HTML = """
+<div data-testid="AbC123-commentListXyz">
+  <div>Feed post by Someone Else</div>
+  <div>Most relevant</div>
+  <div>
+    Example Person  You
+    Example Person • You
+    AI Tech Lead — I work at the intersection of research and production.
+    now
+    How did you ensure real-time conversation accuracy? We were struggling with it too.
+  </div>
+</div>
+"""
+
+
+class ListDriver:
+    """Serves a parsed comment-list fixture through the element API."""
+
+    def __init__(self, html):
+        from linkedin_automation import dom_probe
+        self.dom_probe = dom_probe
+        self.root = dom_probe.parse_html(html)
+
+    def find_elements(self, by, selector):
+        if selector == cpm.LinkedInCommentPoster.POSTED_COMMENT_SELECTOR:
+            return []                       # the dead class selector
+        if "commentList" in selector:
+            return [_ListEl(n) for n in self.root.walk()
+                    if "commentList" in (n.attrs.get("data-testid") or "")]
+        return []
+
+
+class _ListEl:
+    def __init__(self, node):
+        self.node = node
+
+    @property
+    def text(self):
+        return " ".join((self.node.text() or "").split())
+
+    def find_elements(self, by, selector):
+        return [_ListEl(c) for c in self.node.children if hasattr(c, "tag")]
+
+
+def test_the_dead_class_selector_really_does_match_nothing(poster):
+    """The premise. If this ever starts matching again, the fallback is moot."""
+    poster.driver = ListDriver(COMMENT_LIST_HTML)
+    assert poster.driver.find_elements(
+        None, cpm.LinkedInCommentPoster.POSTED_COMMENT_SELECTOR) == []
+
+
+def test_the_verifier_returns_TRUE_for_a_comment_that_is_in_the_list(poster):
+    """The whole point: a verifier that can only ever say no is not a verifier.
+
+    Matched against the live commentList container, which is what the current
+    DOM actually serves.
+    """
+    poster.driver = ListDriver(COMMENT_LIST_HTML)
+    box = FakeElement("")
+    assert poster.verify_comment_posted(
+        box, "How did you ensure real-time conversation accuracy", (None, [])
+    ) is True
+
+
+def test_the_verifier_still_says_no_for_a_comment_that_is_not_there(poster):
+    """And it must not have become a rubber stamp in the process."""
+    poster.driver = ListDriver(COMMENT_LIST_HTML)
+    box = FakeElement("")
+    assert poster.verify_comment_posted(
+        box, "a comment nobody ever wrote on this post", (None, [])
+    ) is False
+
+
+def test_container_mode_reports_no_countable_thread(poster):
+    """count=None on purpose.
+
+    The container's children are comments PLUS chrome, so the number moves for
+    unrelated reasons. Against a pre-change snapshot of 0 it reads as enormous
+    growth and the "thread grew" branch would fire on every attempt - turning
+    "did it post?" into an unconditional yes.
+    """
+    poster.driver = ListDriver(COMMENT_LIST_HTML)
+    count, texts = poster.comment_thread_snapshot()
+    assert count is None
+    assert texts and "real-time conversation accuracy" in texts[0]
+
+
+def test_growth_alone_cannot_pass_in_container_mode(poster):
+    """The false positive this caught: an empty box plus a 'grown' thread.
+
+    With count=None the growth branch cannot fire at all, so an absent comment
+    stays absent however much the container churns.
+    """
+    poster.driver = ListDriver(COMMENT_LIST_HTML)
+    box = FakeElement("")                       # empty box, as after a submit
+    assert poster.verify_comment_posted(
+        box, "definitely not in this list", (0, [])) is False

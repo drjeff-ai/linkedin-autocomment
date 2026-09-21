@@ -423,15 +423,15 @@ class LinkedInCommentPoster:
         if not lists:
             return (None, [])
 
-        count = 0
-        texts = []
-        for container in lists:
-            try:
-                count += len(container.find_elements(By.XPATH, "./*"))
-            except Exception:
-                pass
-            texts.extend(_texts([container]))
-        return (count, texts)
+        # count=None DELIBERATELY. The container's children are the comments
+        # PLUS the post header, the "Most relevant" control and whatever else
+        # the list renders, so the number moves for reasons having nothing to
+        # do with our comment. Feeding it to the "the thread grew" branch
+        # against a pre-change snapshot of 0 reads as enormous growth and turns
+        # "did it post?" into an unconditional yes - a false positive, which
+        # loses the comment silently. None means "cannot count", leaving the
+        # text match as the only proof on offer.
+        return (None, _texts(lists))
 
     def verify_comment_posted(self, comment_input, comment_text, before=None):
         """Did the comment ACTUALLY land? Positive proof only.
@@ -795,6 +795,113 @@ class LinkedInCommentPoster:
             reason, len(comment_text or ""))
         return self.last_failure_evidence
 
+    # ─── Getting the text INTO the editor ────────────────────────────────────
+    #
+    # Per-character send_keys does not register in LinkedIn's tiptap/ProseMirror
+    # editor. Proved, not guessed: in the 2026-09-20 15:00 capture the editor is
+    # `<p><br class="ProseMirror-trailingBreak"></p>` - ProseMirror's canonical
+    # EMPTY document - while that run had just "typed" 177 characters into it,
+    # and the box carried ProseMirror-focused. The submit stayed disabled
+    # because the document was empty, so nothing could ever post.
+    #
+    # ProseMirror listens for beforeinput/input, not for synthetic key events.
+    # CDP's Input.insertText goes through the browser's own input pipeline and
+    # produces those events; execCommand("insertText") is the in-page
+    # equivalent, kept as a fallback for a driver with no CDP.
+    #
+    # THE TRADE, stated plainly: this inserts the whole comment at once, so the
+    # per-character cadence is gone on this path. A comment that lands beats a
+    # comment typed beautifully that never posts. HUMAN_TYPING switches the old
+    # path back on once posting is proven, and every other humanisation - the
+    # reading pause, the mouse approach, the pre-submit beat, the between-post
+    # delays - is untouched.
+    HUMAN_TYPING = False
+
+    #: How long to keep looking for the comment before trying anything else.
+    VERIFY_TIMEOUT = 8.0
+    VERIFY_POLL = 1.0
+
+    def clear_comment_box(self, comment_input):
+        """Empty the editor through its own input pipeline. True if now empty."""
+        try:
+            self.driver.execute_script(
+                "arguments[0].focus();"
+                "document.execCommand('selectAll', false, null);"
+                "document.execCommand('delete', false, null);", comment_input)
+        except Exception:
+            self.logger.debug("could not clear the editor", exc_info=True)
+        return self._comment_box_is_empty(comment_input)
+
+    def insert_via_cdp(self, comment_input, text):
+        """Insert through Chrome's input pipeline. Fires beforeinput/input."""
+        self.driver.execute_cdp_cmd("Input.insertText", {"text": text})
+
+    def insert_via_exec_command(self, comment_input, text):
+        """The in-page equivalent, for a driver with no CDP."""
+        self.driver.execute_script(
+            "arguments[0].focus();"
+            "document.execCommand('insertText', false, arguments[1]);",
+            comment_input, text)
+
+    def enter_comment_text(self, comment_input, comment_text):
+        """Get the text in AND confirm it registered. Returns (button, path).
+
+        Confirmation is the enable gate, not a read-back: LinkedIn enables the
+        composer submit once its editor has accepted the text, so an enabled
+        button is the editor's own word that the document is non-empty.
+
+        Each method is CONFIRMED before the next is considered, and between
+        attempts the box must be verifiably EMPTY. If an attempt left text
+        behind without enabling the button, inserting again would post the
+        comment twice over and a doubled comment cannot be unposted - so this
+        stops and lets the caller fail loud instead.
+        """
+        methods = [("cdp", self.insert_via_cdp),
+                   ("execCommand", self.insert_via_exec_command)]
+        if self.HUMAN_TYPING:
+            methods.insert(0, ("send_keys", lambda el, t: hb.type_like_human(
+                self.driver, el, t)))
+
+        for path, insert in methods:
+            self.focus_comment_box(comment_input)
+            try:
+                insert(comment_input, comment_text)
+            except Exception as exc:
+                self.logger.warning("input path %s failed: %s", path, exc)
+                continue
+
+            button, enabled = self.await_composer_submit(comment_input)
+            if enabled:
+                self.logger.info("Text landed  input_path=%s", path)
+                return button, path
+
+            self.logger.warning("input path %s did not enable the submit", path)
+            if not self.clear_comment_box(comment_input):
+                self.logger.error(
+                    "input path %s left text in the editor that did not enable "
+                    "the submit. NOT inserting again - a second insert would "
+                    "post the comment twice.", path)
+                return button, None
+
+        return None, None
+
+    def verify_with_polling(self, comment_input, comment_text, before,
+                            timeout=None):
+        """Verification, given time for the thread to render.
+
+        A comment can take a moment to appear. Checking once and moving on to
+        the keyboard fallback is how a slow render becomes a SECOND comment, so
+        the window is waited out before anything else is tried.
+        """
+        timeout = self.VERIFY_TIMEOUT if timeout is None else timeout
+        deadline = time.time() + timeout
+        while True:
+            if self.verify_comment_posted(comment_input, comment_text, before):
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(self.VERIFY_POLL)
+
     def post_comment(self, comment_text: str) -> bool:
         """Post a comment on the current post using all available methods."""
         try:
@@ -820,63 +927,42 @@ class LinkedInCommentPoster:
             # drift) via human_behavior_selenium, instead of dumping all at once.
             hb.human_click(self.driver, comment_input)
             hb.human_sleep(0.3, 0.7)
-            comment_input.clear()
-            self.logger.info("Cleared comment input field")
-            try:
-                hb.type_like_human(self.driver, comment_input, comment_text)
-            except Exception as e:
-                # Fall back to plain typing if the human-typing helper fails
-                # (e.g. mouse-move issues), so a comment is still entered.
-                self.logger.warning(f"Human typing failed ({e}); falling back to send_keys")
-                comment_input.send_keys(comment_text)
-            self.logger.info(f"Typed comment ({len(comment_text)} chars) with human-like timing")
-            # Variable pause to "review" between typing and submitting.
-            hb.human_sleep(1.0, 2.5)
-            
-            # The thread as it stands BEFORE any submit. Verification compares
-            # against this: without it, "the box changed" is the only signal,
-            # and a failed submit changes the box too.
+            self.clear_comment_box(comment_input)
+
+            # The thread BEFORE anything is entered.
             before = self.comment_thread_snapshot()
 
-            # STEP 1 - make sure the editor's framework state saw the text. The
-            # submit button stays disabled until it does, and a click on a
-            # disabled button is a silent no-op.
-            self.notify_editor_of_input(comment_input)
-
-            # STEP 2 - wait for an ENABLED submit control, then click THAT.
-            #
-            # This is the fix. The old primary path took
-            # SUBMIT_BUTTON_FALLBACK_SELECTORS[0] and clicked it immediately
-            # with no enabled check at all, so a button LinkedIn had not yet
-            # enabled was clicked, nothing happened, and nothing raised.
-            # STEP 2 - the composer's own submit, and wait for it to ENABLE.
-            # Scoped to the composer, never page-wide: a page-wide rule picks
-            # the action-bar "Comment", which only focuses the box.
-            button, enabled = self.await_composer_submit(comment_input)
-            if button is None:
-                self.capture_submit_failure(
-                    comment_text, before, "submit_button_not_found_in_composer")
+            # STEP 1 - get the text in, and confirm the editor registered it.
+            # The submit enabling IS that confirmation.
+            button, input_path = self.enter_comment_text(comment_input,
+                                                         comment_text)
+            if button is None or input_path is None:
+                self.capture_submit_failure(comment_text, before,
+                                            "text_did_not_register")
                 return False
+            self.logger.info("Entered comment (%d chars)  input_path=%s",
+                             len(comment_text), input_path)
 
-            if enabled:
-                try:
-                    self.logger.info("Clicking the composer submit: %r",
-                                     (button.text or "").strip() or "<no text>")
-                    hb.human_click(self.driver, button)
-                except Exception as exc:
-                    self.logger.warning("The submit click raised: %s", exc)
-                hb.human_sleep(2.5, 3.5)
+            # A beat to "review" between entering and submitting.
+            hb.human_sleep(1.0, 2.5)
 
-                if self.verify_comment_posted(comment_input, comment_text,
-                                              before):
-                    self.logger.info("Comment POSTED  path=scoped_button")
-                    return True
-            else:
-                self.logger.warning(
-                    "The composer submit stayed disabled; not clicking it. "
-                    "Falling through to the keyboard submit.")
+            # STEP 2 - the submit is already located AND enabled, which is what
+            # proved the text registered. Click it.
+            try:
+                self.logger.info("Clicking the composer submit: %r",
+                                 (button.text or "").strip() or "<no text>")
+                hb.human_click(self.driver, button)
+            except Exception as exc:
+                self.logger.warning("The submit click raised: %s", exc)
 
-            # STEP 3 - the keyboard, into the FOCUSED editor, once.
+            # STEP 3 - POLL before trying anything else. A comment still
+            # rendering is not a comment that failed, and reaching for the
+            # keyboard here is how a slow render becomes a SECOND comment.
+            if self.verify_with_polling(comment_input, comment_text, before):
+                self.logger.info("Comment POSTED  path=scoped_button")
+                return True
+
+            # STEP 4 - only now, the keyboard, into the FOCUSED editor, once.
             if self.post_comment_ctrl_enter(comment_input, comment_text, before):
                 self.logger.info("Comment POSTED  path=ctrl_enter")
                 return True
