@@ -225,22 +225,66 @@ def test_open_comment_box_uses_human_click_and_scroll(monkeypatch, no_sleep, com
     btn.click.assert_not_called()
 
 
-def test_post_comment_types_like_human_not_send_keys(monkeypatch, no_sleep, comment_poster):
+def _stub_submit_half(monkeypatch, comment_poster):
+    """Hold the SUBMIT half still - these tests are about text ENTRY."""
+    monkeypatch.setattr(comment_poster, "verify_comment_posted",
+                        lambda ci, ct, before=None: True)
+    monkeypatch.setattr(comment_poster, "verify_with_polling",
+                        lambda ci, ct, before=None, timeout=None: True)
+    monkeypatch.setattr(comment_poster, "comment_thread_snapshot",
+                        lambda: (None, []))
+    monkeypatch.setattr(comment_poster, "clear_comment_box", lambda ci: True)
+    monkeypatch.setattr(comment_poster, "focus_comment_box", lambda ci: True)
+    monkeypatch.setattr(comment_poster, "await_composer_submit",
+                        lambda ci, timeout=None: (MagicMock(name="submit"), True))
+
+
+def test_the_default_input_path_types_per_character(monkeypatch, no_sleep,
+                                                   comment_poster):
+    """The Dispatch-5 trade, asserted rather than assumed.
+
+    Per-character send_keys does not register in LinkedIn's tiptap/ProseMirror
+    editor - the 2026-09-20 capture showed an EMPTY document after 177
+    characters were "typed" - so the default path inserts the whole comment
+    through the browser's input pipeline. Cadence is traded for the text
+    actually landing. Every other humanisation is untouched, which the
+    surrounding tests still cover.
+    """
     typed, clicked = [], []
-    monkeypatch.setattr(hb, "type_like_human", lambda driver, el, text: typed.append(text))
-    monkeypatch.setattr(hb, "human_click", lambda driver, el: clicked.append(el))
-    monkeypatch.setattr(hb, "scroll_to_element", lambda driver, el: None)
+    monkeypatch.setattr(hb, "type_like_human", lambda d, el, t: typed.append(t))
+    monkeypatch.setattr(hb, "human_click", lambda d, el: clicked.append(el))
+    monkeypatch.setattr(hb, "scroll_to_element", lambda d, el: None)
 
     inp = MagicMock(name="comment_input")
     monkeypatch.setattr(comment_poster, "open_comment_box", lambda: inp)
-    # First posting method succeeds so we don't exercise the button fallbacks.
-    monkeypatch.setattr(comment_poster, "post_comment_method1", lambda ci, ct: True)
+    _stub_submit_half(monkeypatch, comment_poster)
     comment_poster.driver = MagicMock()
 
     assert comment_poster.post_comment("hello there world") is True
+    assert typed == ["hello there world"], "the cadence must be preserved"
+    comment_poster.driver.execute_cdp_cmd.assert_not_called()
+    assert inp in clicked                      # still approached and clicked
+    inp.send_keys.assert_not_called()          # and never a raw key dump
+
+
+def test_the_insert_fallback_can_be_switched_on(monkeypatch, no_sleep,
+                                               comment_poster):
+    """INSERT_FALLBACKS adds the CDP insert AFTER typing, never instead."""
+    typed = []
+    monkeypatch.setattr(hb, "type_like_human", lambda d, el, t: typed.append(t))
+    monkeypatch.setattr(hb, "human_click", lambda d, el: None)
+    monkeypatch.setattr(hb, "scroll_to_element", lambda d, el: None)
+
+    inp = MagicMock(name="comment_input")
+    monkeypatch.setattr(comment_poster, "open_comment_box", lambda: inp)
+    _stub_submit_half(monkeypatch, comment_poster)
+    monkeypatch.setattr(comment_poster, "INSERT_FALLBACKS", True)
+    comment_poster.driver = MagicMock()
+
+    assert comment_poster.post_comment("hello there world") is True
+    # Typing still runs FIRST and succeeds, so the fallback is never reached.
     assert typed == ["hello there world"]
-    assert inp in clicked
-    inp.send_keys.assert_not_called()  # never an instant dump
+    comment_poster.driver.execute_cdp_cmd.assert_not_called()
 
 
 # ─── linkedin_auto_connector: fallback dismiss clicks ─────────────────────────

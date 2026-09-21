@@ -53,7 +53,14 @@ def _comment(i):
 
 
 def test_one_failing_comment_does_not_abort_run(poster):
-    """6 comments, comment 3 raises during posting → posts 5, skips 1, no raise."""
+    """6 comments, comment 3 raises → posts 5, FAILS 1, no raise.
+
+    The resilience claim is unchanged: one bad comment must not stop the rest.
+    What changed is the BOOKKEEPING. A raised exception used to be counted as a
+    "skip", which is what let a run that published nothing read as a quiet
+    success. A skip is "we chose not to try"; this is "we tried and nothing
+    published", and the two must not share a counter.
+    """
     p, comments_dir = poster
     comments = [_comment(i) for i in range(1, 7)]
     txt = _write_txt(comments_dir, comments)
@@ -66,10 +73,14 @@ def test_one_failing_comment_does_not_abort_run(poster):
     p.post_single_comment = fake_post
 
     result = p.run(txt, post_count=10)
-    assert result == {"posted": 5, "skipped": 1, "total": 6}
+    assert result["posted"] == 5
+    assert result["failed"] == 1          # NOT skipped
+    assert result["skipped"] == 0
+    assert result["attempted"] == 6
+    assert result["total"] == 6
 
 
-def test_failed_post_returns_false_is_skipped(poster):
+def test_failed_post_returns_false_is_counted_as_a_failure(poster):
     p, comments_dir = poster
     comments = [_comment(i) for i in range(1, 4)]
     txt = _write_txt(comments_dir, comments)
@@ -81,7 +92,10 @@ def test_failed_post_returns_false_is_skipped(poster):
 
     result = p.run(txt, post_count=10)
     assert result["posted"] == 2
-    assert result["skipped"] == 1
+    # post_single_comment returning False means the comment was attempted and
+    # did not go out. That is a failure, and the summary must say so.
+    assert result["failed"] == 1
+    assert result["skipped"] == 0
 
 
 def test_post_count_limit_respected(poster):
@@ -94,7 +108,7 @@ def test_post_count_limit_respected(poster):
     assert result["posted"] == 2
 
 
-def test_skip_logs_reason(poster, caplog):
+def test_a_failing_comment_is_logged_loudly_with_its_reason(poster, caplog):
     p, comments_dir = poster
     comments = [_comment(1), _comment(2)]
     txt = _write_txt(comments_dir, comments)
@@ -107,7 +121,11 @@ def test_skip_logs_reason(poster, caplog):
     p.post_single_comment = fake_post
     with caplog.at_level("WARNING"):
         p.run(txt, post_count=10)
-    assert any("Skipping comment 2/2" in r.message for r in caplog.records)
+    # ERROR, not a warning about a "skip": a typed comment that never posted is
+    # the failure this whole module exists to make impossible to miss.
+    failures = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert any("2/2 FAILED to post" in r.getMessage() for r in failures)
+    assert any("boom reason" in r.getMessage() for r in failures)
 
 
 # ─── Dashboard job runner: distinct error mapping ─────────────────────────────
