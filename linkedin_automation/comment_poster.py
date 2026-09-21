@@ -797,25 +797,24 @@ class LinkedInCommentPoster:
 
     # ─── Getting the text INTO the editor ────────────────────────────────────
     #
-    # Per-character send_keys does not register in LinkedIn's tiptap/ProseMirror
-    # editor. Proved, not guessed: in the 2026-09-20 15:00 capture the editor is
-    # `<p><br class="ProseMirror-trailingBreak"></p>` - ProseMirror's canonical
-    # EMPTY document - while that run had just "typed" 177 characters into it,
-    # and the box carried ProseMirror-focused. The submit stayed disabled
-    # because the document was empty, so nothing could ever post.
+    # PER-CHARACTER send_keys IS THE DEFAULT, AND IT WORKS. An earlier reading
+    # of the 2026-09-20 15:00 capture concluded it did not - the editor was
+    # empty there - and swapped in a whole-comment CDP insert. That reading was
+    # wrong, and the 10:33 capture disproves it directly: the editor holds all
+    # 177 characters. The 15:00 editor was empty because the comment HAD JUST
+    # POSTED and the box cleared; the listed comment and the store's intended
+    # comment are the same 177-character string, and the byline reads
+    # "Jeff Wurfel - You" with an age of "now".
     #
-    # ProseMirror listens for beforeinput/input, not for synthetic key events.
-    # CDP's Input.insertText goes through the browser's own input pipeline and
-    # produces those events; execCommand("insertText") is the in-page
-    # equivalent, kept as a fallback for a driver with no CDP.
+    # So the cadence stays. Typing a comment at human speed is the point of
+    # this tool, and nothing was gained by dropping it.
     #
-    # THE TRADE, stated plainly: this inserts the whole comment at once, so the
-    # per-character cadence is gone on this path. A comment that lands beats a
-    # comment typed beautifully that never posts. HUMAN_TYPING switches the old
-    # path back on once posting is proven, and every other humanisation - the
-    # reading pause, the mouse approach, the pre-submit beat, the between-post
-    # delays - is untouched.
-    HUMAN_TYPING = False
+    # The insert paths remain, switched OFF, because they are a genuine
+    # fallback for an editor that really does ignore key events - and because
+    # the confirm-each-method loop below is worth keeping either way. Turning
+    # INSERT_FALLBACKS on adds them AFTER typing, never instead of it.
+    HUMAN_TYPING = True
+    INSERT_FALLBACKS = False
 
     #: How long to keep looking for the comment before trying anything else.
     VERIFY_TIMEOUT = 8.0
@@ -856,10 +855,15 @@ class LinkedInCommentPoster:
         comment twice over and a doubled comment cannot be unposted - so this
         stops and lets the caller fail loud instead.
         """
-        methods = [("cdp", self.insert_via_cdp),
-                   ("execCommand", self.insert_via_exec_command)]
+        methods = []
         if self.HUMAN_TYPING:
-            methods.insert(0, ("send_keys", lambda el, t: hb.type_like_human(
+            methods.append(("send_keys", lambda el, t: hb.type_like_human(
+                self.driver, el, t)))
+        if self.INSERT_FALLBACKS:
+            methods.append(("cdp", self.insert_via_cdp))
+            methods.append(("execCommand", self.insert_via_exec_command))
+        if not methods:                       # never leave no way to type
+            methods.append(("send_keys", lambda el, t: hb.type_like_human(
                 self.driver, el, t)))
 
         for path, insert in methods:
@@ -901,6 +905,54 @@ class LinkedInCommentPoster:
             if time.time() >= deadline:
                 return False
             time.sleep(self.VERIFY_POLL)
+
+    # ─── The double-post guard ───────────────────────────────────────────────
+    #
+    # THIS IS THE PROTECTION THAT DOES NOT DEPEND ON US BEING RIGHT.
+    #
+    # Every other safeguard here reasons from OUR records: the posted ledger,
+    # the store's status, the progress file. Today proved those can all be
+    # wrong at once - a dead verifier reported three posted comments as
+    # failures, so the ledger says "not posted" about a comment that is live on
+    # LinkedIn right now. Re-running any of them would comment twice, and a
+    # duplicate comment cannot be withdrawn.
+    #
+    # So this asks the THREAD instead. If a comment by us is already there, the
+    # work is done, whatever our files believe. That holds through a cleared
+    # store, a restored archive, a re-scrape, a second machine, or a bug we
+    # have not found yet.
+    #
+    # LinkedIn marks your own comments with a self byline - "Name • You" - in
+    # the comment list. That marker, or the exact intended text, is enough.
+
+    #: How LinkedIn labels your own comment in a thread.
+    SELF_COMMENT_MARKER = "• You"
+
+    def already_commented_here(self, comment_text=None):
+        """Is one of OUR comments already on this thread?
+
+        Returns ``(True, reason)`` when the thread should be left alone.
+
+        Deliberately conservative in the SAFE direction: when the thread cannot
+        be read at all this returns False, because refusing to ever post on an
+        unreadable page would silently stop the tool. The cost of that choice
+        is bounded by every other guard; the cost of the opposite choice is a
+        duplicate comment.
+        """
+        _, texts = self.comment_thread_snapshot()
+        blob = " ".join(texts or [])
+        if not blob:
+            return False, "thread not readable"
+
+        needle = " ".join((comment_text or "").split())[:80]
+        if needle and needle in " ".join(blob.split()):
+            return True, "this exact comment is already on the thread"
+
+        if self.SELF_COMMENT_MARKER and self.SELF_COMMENT_MARKER in blob:
+            return True, ("a comment of ours is already on this thread (%r)"
+                          % self.SELF_COMMENT_MARKER)
+
+        return False, "no comment of ours found on this thread"
 
     def post_comment(self, comment_text: str) -> bool:
         """Post a comment on the current post using all available methods."""
@@ -998,6 +1050,14 @@ class LinkedInCommentPoster:
         # (longer/considered comments imply a longer read of the post).
         hb.simulate_reading_for_text(self.driver, comment_text)
 
+        # BEFORE anything is typed: is our comment already here? Asking the
+        # thread beats trusting our own records, which today were wrong.
+        already, why = self.already_commented_here(comment_text)
+        if already:
+            self.logger.info("SKIPPING %s - %s", url, why)
+            self.mark_already_commented(url, why)
+            return True
+
         # Like the post
         if not self.like_post():
             self.logger.warning("Failed to like post, continuing anyway...")
@@ -1057,6 +1117,29 @@ class LinkedInCommentPoster:
                 "Nothing was posted: 0 of %d parsed (%d skipped, 0 attempted).",
                 total, skipped)
         return result
+
+    def mark_already_commented(self, url, reason):
+        """Record a thread we found already commented on, without posting.
+
+        Written to the posted ledger because that is exactly what it is: the
+        comment IS on LinkedIn. post_store reconciles COMMENTED from this file,
+        so the record leaves the queue and stops being offered - which is the
+        point, since re-offering it is how it would be posted twice.
+        """
+        posted = self.progress.setdefault("posted_comments", [])
+        if url not in posted:
+            posted.append(url)
+        self.progress.setdefault("skipped_already_commented", []).append({
+            "url": url,
+            "reason": reason,
+            "at": datetime.now().isoformat(),
+        })
+        try:
+            self.save_progress()
+        except Exception:
+            self.logger.debug("could not persist the skip record",
+                              exc_info=True)
+        return True
 
     def record_comment_failure(self, url, reason):
         """Record a post whose comment did NOT go out, loudly and durably.

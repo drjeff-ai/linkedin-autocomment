@@ -140,8 +140,14 @@ def poster(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cpm.hb, "human_click", _click)
     monkeypatch.setattr(cpm.hb, "scroll_to_element", lambda d, e: None)
-    monkeypatch.setattr(cpm.hb, "type_like_human",
-                        lambda d, el, text: setattr(el, "_text", text))
+    def _type(driver, el, text):
+        """Typing lands the text AND lets the page react, as it does live."""
+        el._text = text
+        hook = getattr(driver, "on_text_entered", None)
+        if hook:
+            hook(text)
+
+    monkeypatch.setattr(cpm.hb, "type_like_human", _type)
     monkeypatch.setattr(cpm.hb, "simulate_reading_for_text", lambda d, t: None)
     # The run loop waits 22-48s between posts and takes periodic breaks. Real
     # sleeps here would make this file the slowest in the suite for no signal.
@@ -421,6 +427,11 @@ class SubmitDriver:
     def find_element(self, by, selector):
         return self.button
 
+    def on_text_entered(self, text):
+        """LinkedIn enables the submit once its editor has the text."""
+        if self.accepts_input:
+            self.button._enabled = True
+
     def execute_cdp_cmd(self, cmd, params):
         """Chrome's input pipeline. The real one fires beforeinput/input."""
         self.cdp_calls.append((cmd, params))
@@ -474,8 +485,12 @@ def _wire(poster, driver, box):
     poster.VERIFY_POLL = 0.01
 
 
-def test_the_cdp_insert_lands_the_text_and_enables_the_submit(poster):
-    """The primary input path. The submit ENABLING is the proof it landed."""
+def test_typing_lands_the_text_and_enables_the_submit(poster):
+    """The DEFAULT path: per-character typing, exactly as before.
+
+    The 10:33 capture showed send_keys putting all 177 characters into the
+    editor, so the cadence stays. The submit ENABLING is the proof it landed.
+    """
     box = FakeElement("")
     button = FakeButton(enabled=False)
     driver = SubmitDriver(button, box=box, accepts_input=True)
@@ -488,27 +503,40 @@ def test_the_cdp_insert_lands_the_text_and_enables_the_submit(poster):
 
     assert poster.post_comment("a comment that posts") is True
     assert button.clicks == 1
-    assert driver.cdp_calls[0][0] == "Input.insertText"
-    assert driver.cdp_calls[0][1]["text"] == "a comment that posts"
+    assert box._text == "a comment that posts"
+    assert driver.cdp_calls == [], "the default path must not use CDP"
 
 
-def test_execcommand_rescues_a_driver_with_no_cdp(poster):
-    """Not every driver exposes CDP. The in-page insert is the fallback."""
+def test_the_insert_fallbacks_are_off_by_default(poster):
+    """They fixed nothing and cost the cadence, so they stay switched off."""
+    assert poster.HUMAN_TYPING is True
+    assert poster.INSERT_FALLBACKS is False
+
+
+def test_the_insert_fallbacks_run_AFTER_typing_when_enabled(poster):
+    """Switched on, they are an addition to typing and never a replacement."""
     box = FakeElement("")
     button = FakeButton(enabled=False)
-    driver = SubmitDriver(button, box=box, accepts_input=True, has_cdp=False)
+    # The editor ignores typed text, so typing cannot enable the submit...
+    driver = SubmitDriver(button, box=box, accepts_input=False)
+    _wire(poster, driver, box)
+    poster.INSERT_FALLBACKS = True
+
+    def cdp(cmd, params):
+        driver.cdp_calls.append((cmd, params))
+        box._text = params["text"]
+        button._enabled = True              # ...but the CDP insert does
+        return {}
+
+    driver.execute_cdp_cmd = cdp
+    driver.clear_hook = True
 
     def on_click():
-        driver.thread.append("me: landed via execCommand")
+        driver.thread.append("me: landed via the fallback")
 
     button.on_click = on_click
-    _wire(poster, driver, box)
-    try:
-        assert poster.post_comment("landed via execCommand") is True
-        assert any("insertText" in sc for sc in driver.scripts)
-    finally:
-        # `has_cdp=False` deletes the method off the CLASS, so put it back.
-        SubmitDriver.execute_cdp_cmd = _SUBMIT_DRIVER_CDP
+    assert poster.post_comment("landed via the fallback") is True
+    assert driver.cdp_calls, "the fallback should have been reached"
 
 
 def test_text_that_never_registers_is_a_loud_captured_failure(poster, tmp_path):
@@ -933,3 +961,123 @@ def test_growth_alone_cannot_pass_in_container_mode(poster):
     box = FakeElement("")                       # empty box, as after a submit
     assert poster.verify_comment_posted(
         box, "definitely not in this list", (0, [])) is False
+
+
+# ─── the double-post guard ───────────────────────────────────────────────────
+#
+# The protection that does not depend on our records being right. Today they
+# were not: a dead verifier reported three posted comments as failures, so the
+# ledger says "not posted" about a comment that is live on LinkedIn. Asking the
+# THREAD holds through a cleared store, a restored archive, a re-scrape, or a
+# bug we have not found yet.
+
+ALREADY_COMMENTED_HTML = """
+<div data-testid="AbC123-commentListXyz">
+  <div>Most relevant</div>
+  <div>
+    Example Person  You
+    Example Person • You
+    AI Tech Lead — I work at the intersection of research and production.
+    now
+    How did you ensure real-time conversation accuracy? We were struggling too.
+  </div>
+</div>
+"""
+
+SOMEONE_ELSE_COMMENTED_HTML = """
+<div data-testid="AbC123-commentListXyz">
+  <div>Most relevant</div>
+  <div>
+    Another Person • 2nd
+    Some other job title
+    3h
+    A thoughtful comment from somebody who is not us at all.
+  </div>
+</div>
+"""
+
+
+def test_a_thread_we_already_commented_on_is_detected(poster):
+    """The self byline is how LinkedIn marks your own comment."""
+    poster.driver = ListDriver(ALREADY_COMMENTED_HTML)
+    already, why = poster.already_commented_here("a completely different draft")
+    assert already is True
+    assert "already on this thread" in why
+
+
+def test_a_thread_with_only_other_peoples_comments_is_not_blocked(poster):
+    """The guard must not stop us commenting where we never have."""
+    poster.driver = ListDriver(SOMEONE_ELSE_COMMENTED_HTML)
+    already, why = poster.already_commented_here("our draft")
+    assert already is False
+    assert "no comment of ours" in why
+
+
+def test_the_exact_text_being_present_also_counts(poster):
+    """Even without the byline, our own words on the thread mean it is done."""
+    html = SOMEONE_ELSE_COMMENTED_HTML.replace(
+        "A thoughtful comment from somebody who is not us at all.",
+        "How did you ensure real-time conversation accuracy?")
+    poster.driver = ListDriver(html)
+    already, _ = poster.already_commented_here(
+        "How did you ensure real-time conversation accuracy?")
+    assert already is True
+
+
+def test_an_unreadable_thread_does_not_block_posting(poster):
+    """Conservative in the SAFE direction.
+
+    Refusing to post whenever the thread cannot be read would silently stop the
+    tool, and every other guard still applies. The opposite default would be a
+    duplicate comment, which is why the byline check exists at all.
+    """
+    class Blank:
+        def find_elements(self, by, selector):
+            return []
+
+    poster.driver = Blank()
+    already, why = poster.already_commented_here("our draft")
+    assert already is False
+    assert "not readable" in why
+
+
+def test_the_guard_skips_without_typing_or_clicking(poster, monkeypatch):
+    """End to end: nothing typed, nothing clicked, nothing posted."""
+    typed, clicked = [], []
+    monkeypatch.setattr(cpm.hb, "type_like_human",
+                        lambda d, el, t: typed.append(t))
+    monkeypatch.setattr(cpm.hb, "human_click", lambda d, el: clicked.append(el))
+
+    poster.driver = ListDriver(ALREADY_COMMENTED_HTML)
+    poster.open_comment_box = lambda: FakeElement("")
+    poster.navigate_to_post = lambda url: True
+    poster.like_post = lambda: True
+
+    url = "https://www.linkedin.com/x/already-commented"
+    assert poster.post_single_comment(
+        {"url": url, "comment": "a fresh draft", "preview": "p"}) is True
+    assert typed == [], "it typed into a thread it had already commented on"
+    assert clicked == [], "it clicked on a thread it should have skipped"
+
+
+def test_a_skipped_thread_is_recorded_as_posted_not_failed(poster):
+    """The comment IS on LinkedIn, so the ledger is where this belongs.
+
+    post_store reconciles COMMENTED from that file, so the record leaves the
+    queue and stops being offered - which is the point, since re-offering it is
+    how it gets posted twice.
+    """
+    poster.driver = ListDriver(ALREADY_COMMENTED_HTML)
+    poster.open_comment_box = lambda: FakeElement("")
+    poster.navigate_to_post = lambda url: True
+    poster.like_post = lambda: True
+
+    url = "https://www.linkedin.com/x/already-commented"
+    poster.post_single_comment({"url": url, "comment": "a fresh draft",
+                                "preview": "p"})
+
+    assert url in poster.progress["posted_comments"]
+    assert not poster.progress.get("failed_comments"), "a skip is not a failure"
+    skipped = poster.progress["skipped_already_commented"]
+    assert skipped[0]["url"] == url
+    assert "already on this thread" in skipped[0]["reason"]

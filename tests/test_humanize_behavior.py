@@ -239,8 +239,8 @@ def _stub_submit_half(monkeypatch, comment_poster):
                         lambda ci, timeout=None: (MagicMock(name="submit"), True))
 
 
-def test_the_default_input_path_inserts_instead_of_typing(monkeypatch, no_sleep,
-                                                          comment_poster):
+def test_the_default_input_path_types_per_character(monkeypatch, no_sleep,
+                                                   comment_poster):
     """The Dispatch-5 trade, asserted rather than assumed.
 
     Per-character send_keys does not register in LinkedIn's tiptap/ProseMirror
@@ -261,18 +261,15 @@ def test_the_default_input_path_inserts_instead_of_typing(monkeypatch, no_sleep,
     comment_poster.driver = MagicMock()
 
     assert comment_poster.post_comment("hello there world") is True
-    assert typed == [], "the default path must not go through per-char typing"
-    comment_poster.driver.execute_cdp_cmd.assert_called_once()
-    cmd, params = comment_poster.driver.execute_cdp_cmd.call_args[0]
-    assert cmd == "Input.insertText"
-    assert params["text"] == "hello there world"
+    assert typed == ["hello there world"], "the cadence must be preserved"
+    comment_poster.driver.execute_cdp_cmd.assert_not_called()
     assert inp in clicked                      # still approached and clicked
     inp.send_keys.assert_not_called()          # and never a raw key dump
 
 
-def test_human_typing_can_be_switched_back_on(monkeypatch, no_sleep,
-                                              comment_poster):
-    """HUMAN_TYPING is the way back once posting is proven."""
+def test_the_insert_fallback_can_be_switched_on(monkeypatch, no_sleep,
+                                               comment_poster):
+    """INSERT_FALLBACKS adds the CDP insert AFTER typing, never instead."""
     typed = []
     monkeypatch.setattr(hb, "type_like_human", lambda d, el, t: typed.append(t))
     monkeypatch.setattr(hb, "human_click", lambda d, el: None)
@@ -281,10 +278,11 @@ def test_human_typing_can_be_switched_back_on(monkeypatch, no_sleep,
     inp = MagicMock(name="comment_input")
     monkeypatch.setattr(comment_poster, "open_comment_box", lambda: inp)
     _stub_submit_half(monkeypatch, comment_poster)
-    monkeypatch.setattr(comment_poster, "HUMAN_TYPING", True)
+    monkeypatch.setattr(comment_poster, "INSERT_FALLBACKS", True)
     comment_poster.driver = MagicMock()
 
     assert comment_poster.post_comment("hello there world") is True
+    # Typing still runs FIRST and succeeds, so the fallback is never reached.
     assert typed == ["hello there world"]
     comment_poster.driver.execute_cdp_cmd.assert_not_called()
 
