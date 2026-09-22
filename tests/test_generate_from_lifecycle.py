@@ -88,7 +88,7 @@ def test_reconcile_downgrades_falsely_new_to_commented(env):
     _seed_store([_rec(1, NEW), _rec(2, NEW)])
     _write(env.comments / "posting_progress.json", {"posted_comments": [ACTIVITY.format(1)]})
     counts = post_store.reconcile("demo")
-    assert counts == {"NEW": 1, "GENERATED": 0, "COMMENTED": 1, "TRASH": 0}
+    assert counts == {"NEW": 1, "GENERATED": 0, "COMMENTED": 1, "TRASH": 0, "UNAVAILABLE": 0}
     assert PostStore("demo").get(ACTIVITY.format(1))["status"] == COMMENTED
 
 
@@ -99,7 +99,7 @@ def test_reconcile_downgrades_falsely_new_to_generated(env):
         {"post_url": ACTIVITY.format(2), "comment": "sharp take", "style": "warm",
          "word_count": 2}]})
     counts = post_store.reconcile("demo")
-    assert counts == {"NEW": 1, "GENERATED": 1, "COMMENTED": 0, "TRASH": 0}
+    assert counts == {"NEW": 1, "GENERATED": 1, "COMMENTED": 0, "TRASH": 0, "UNAVAILABLE": 0}
     gen = PostStore("demo").get(ACTIVITY.format(2))
     assert gen["status"] == GENERATED and gen["comment"] == "sharp take"
 
@@ -137,7 +137,7 @@ def test_reconcile_is_idempotent(env):
         {"post_url": ACTIVITY.format(2), "comment": "draft", "word_count": 1}]})
     first = post_store.reconcile("demo")
     second = post_store.reconcile("demo")
-    assert first == second == {"NEW": 0, "GENERATED": 1, "COMMENTED": 1, "TRASH": 0}
+    assert first == second == {"NEW": 0, "GENERATED": 1, "COMMENTED": 1, "TRASH": 0, "UNAVAILABLE": 0}
 
 
 def test_load_synced_store_reconciles_generated(env):

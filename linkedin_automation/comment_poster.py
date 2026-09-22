@@ -18,8 +18,6 @@ from typing import Dict, List, Optional
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
 from dotenv import load_dotenv
 import logging
 from . import profile_manager as pm
@@ -266,34 +264,201 @@ class LinkedInCommentPoster:
         
         return comments
     
+    #: Outcomes of a navigation attempt, reported on ``last_navigation``.
+    NAV_OK = "ok"                     #: the post is there
+    NAV_UNAVAILABLE = "unavailable"   #: the post is GONE - terminal
+    NAV_UNCLEAR = "unclear"           #: we do not know. Retryable, never terminal.
+
+    #: TOTAL budget for deciding whether the post is there, across every
+    #: selector and every signal.
+    #:
+    #: It used to be 6 selectors x a 20-second WebDriverWait = TWO MINUTES on a
+    #: deleted post, every run, forever, because nothing ever marked the post
+    #: gone. The budget is shared now, so a dead post costs seconds and that
+    #: cost does not grow when a selector is added.
+    NAV_DECIDE_SECONDS = 8.0
+    NAV_POLL_SECONDS = 0.25
+
+    #: Pages that mean "your session is the problem", NOT "the post is gone".
+    #: Being bounced to a login wall must never mark a post terminal - that
+    #: would burn the entire queue on one expired cookie.
+    NAV_AUTH_URL_MARKERS = ("/login", "/checkpoint", "/authwall", "/uas/",
+                            "/signup")
+
+    #: Explicit "this post is gone" markers.
+    #:
+    #: UNVERIFIED. No capture of a taken-down post exists yet, so these are
+    #: LinkedIn's documented empty-state shapes rather than anything observed
+    #: on this account - do not read them as confirmed the way the Like
+    #: selector is. They are only ever consulted when no post content was
+    #: found at all, which is what keeps a wrong guess here harmless: the
+    #: worst case is that a gone post falls through to the UNCLEAR path, which
+    #: is the safe side, and which is also what produces the capture that lets
+    #: these be replaced with observed ones.
+    NAV_UNAVAILABLE_SELECTORS = [
+        "[data-testid='unavailable-post']",
+        ".feed-shared-update-v2__removed",
+        ".artdeco-empty-state",
+    ]
+    NAV_UNAVAILABLE_TEXTS = (
+        "this post is no longer available",
+        "content is not available",
+        "page doesn't exist",
+        "post has been deleted",
+        "no longer exists",
+    )
+    #: Where that text is looked for. Never the whole page_source: that carries
+    #: script and JSON payloads which can contain anything at all.
+    NAV_TEXT_SCOPES = ("main", "[role='main']", ".artdeco-empty-state")
+
+    @staticmethod
+    def post_identity(url: str):
+        """The activity id inside a post URL, which survives normalisation.
+
+        LinkedIn rewrites post URLs freely - it drops query strings, swaps
+        /posts/ for /feed/update/, re-cases the slug. The activity id is the
+        one part that does not move, so it is what "are we still on the post
+        we asked for" gets decided on. Returns None when there is no id to key
+        on, and the redirect check then declines to fire at all.
+        """
+        m = re.search(r"activity[:\-](\d{6,})", url or "")
+        return m.group(1) if m else None
+
+    def navigated_away_from(self, url: str):
+        """Reason string if we were redirected off the post, else None."""
+        wanted = self.post_identity(url)
+        if not wanted:
+            return None
+        try:
+            current = self.driver.current_url or ""
+        except Exception:
+            return None
+        if wanted in current:
+            return None
+        low = current.lower()
+        if any(marker in low for marker in self.NAV_AUTH_URL_MARKERS):
+            return None          # a session problem, not a missing post
+        if not current or current == url:
+            return None
+        return "redirected to %s" % current
+
+    def unavailable_marker_on_page(self):
+        """Reason string if the page says the post is gone, else None."""
+        for selector in self.NAV_UNAVAILABLE_SELECTORS:
+            try:
+                for el in self.driver.find_elements(By.CSS_SELECTOR, selector):
+                    if el.is_displayed():
+                        return "unavailable marker: %s" % selector
+            except Exception:
+                continue
+        for scope in self.NAV_TEXT_SCOPES:
+            try:
+                for el in self.driver.find_elements(By.CSS_SELECTOR, scope):
+                    text = (el.text or "").strip().lower()
+                    if not text or len(text) > 2000:
+                        continue
+                    for phrase in self.NAV_UNAVAILABLE_TEXTS:
+                        if phrase in text:
+                            return "unavailable text: %r" % phrase
+            except Exception:
+                continue
+        return None
+
+    def post_content_present(self):
+        """True once any post-detail selector is on screen."""
+        for selector in self.POST_DETAIL_SELECTORS:
+            try:
+                if self.driver.find_elements(By.CSS_SELECTOR, selector):
+                    self.logger.info("Post loaded with selector: %s", selector)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def classify_navigation(self, url: str):
+        """Decide, within NAV_DECIDE_SECONDS, what happened to this post.
+
+        One shared budget polling three questions, rather than a chain of
+        per-selector waits. Order matters: the redirect check runs FIRST,
+        because a bounce to the feed puts perfectly real `div[role=listitem]`
+        elements on the page and those would otherwise read as "the post
+        loaded" - which is exactly how a gone post used to get all the way to
+        the composer.
+        """
+        deadline = time.time() + self.NAV_DECIDE_SECONDS
+        while True:
+            reason = self.navigated_away_from(url)
+            if reason:
+                return self.NAV_UNAVAILABLE, reason
+            if self.post_content_present():
+                return self.NAV_OK, None
+            reason = self.unavailable_marker_on_page()
+            if reason:
+                return self.NAV_UNAVAILABLE, reason
+            if time.time() >= deadline:
+                return self.NAV_UNCLEAR, "post content never loaded"
+            time.sleep(self.NAV_POLL_SECONDS)
+
+    def note_unclear_navigation(self, url: str):
+        """ONE diagnostic capture per run for posts we could not classify.
+
+        Per run, not per post: the point is to learn what a dead post actually
+        looks like, so NAV_UNAVAILABLE_SELECTORS can stop being guesses. The
+        first example teaches that; the next forty are disk.
+
+        Deliberately not capture_submit_state - nothing was typed and nothing
+        was lost here, so this must not land among the comment-not-posted
+        captures, where a real silent failure would then be buried in it.
+        """
+        if getattr(self, "_unclear_capture_written", False):
+            return None
+        self._unclear_capture_written = True
+        try:
+            from . import failure_capture
+            return failure_capture.capture_failure(
+                self.driver, "post_unclear", self.profile_name,
+                page_source=True)
+        except Exception:
+            self.logger.debug("could not capture the unclear page",
+                              exc_info=True)
+            return None
+
     def navigate_to_post(self, url: str) -> bool:
-        """Navigate to a LinkedIn post with improved waiting."""
+        """Navigate to a LinkedIn post with improved waiting.
+
+        Returns a bool, as its callers expect. The richer answer - whether a
+        failure means "gone" or "do not know" - is on ``last_navigation``,
+        because only one of those two may ever be acted on terminally.
+        """
+        self.last_navigation = {"url": url, "outcome": self.NAV_UNCLEAR,
+                                "reason": "navigation did not complete"}
         try:
             self.logger.info(f"Navigating to post: {url}")
             self.driver.get(url)
 
-            # A brief settle, NOT a page-load wait: the WebDriverWait below
-            # blocks on the post content actually being present, which is the
-            # real readiness signal. Sleeping 2.5-4s first only delayed asking.
+            # A brief settle, NOT a page-load wait: classify_navigation below
+            # polls for the real readiness signal. Sleeping 2.5-4s first only
+            # delayed asking.
             hb.human_sleep(0.5, 1.0)
 
-            # Wait for post content to be visible
-            post_selectors = self.POST_DETAIL_SELECTORS
+            outcome, reason = self.classify_navigation(url)
+            self.last_navigation = {"url": url, "outcome": outcome,
+                                    "reason": reason}
 
-            post_found = False
-            for selector in post_selectors:
-                try:
-                    self.wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
-                    post_found = True
-                    self.logger.info(f"Post loaded with selector: {selector}")
-                    break
-                except TimeoutException:
-                    continue
-            
-            if not post_found:
-                self.logger.error("Post content not found on page")
+            if outcome == self.NAV_UNAVAILABLE:
+                # Not an error. The tool did exactly the right thing and the
+                # post was not there; logging it at ERROR would train the
+                # reader to ignore the level real failures use.
+                self.logger.info("Post is gone from LinkedIn (%s)", reason)
                 return False
-            
+
+            if outcome == self.NAV_UNCLEAR:
+                self.logger.warning(
+                    "Post content not found on page (%s) - NOT marking it "
+                    "gone; it will be retried", reason)
+                self.note_unclear_navigation(url)
+                return False
+
             # Additional wait for dynamic content
             hb.human_sleep(1.5, 2.5)
 
@@ -306,16 +471,13 @@ class LinkedInCommentPoster:
             hb.human_scroll(self.driver, direction="up", pixels=random.randint(300, 600))
             hb.human_sleep(0.6, 1.2)
 
-            # Check if we're on the right page
-            if "feed/update" in self.driver.current_url or "posts" in self.driver.current_url:
-                self.logger.info("Successfully navigated to post")
-                return True
-            
-            self.logger.error("Failed to navigate to post - wrong URL")
-            return False
-            
+            self.logger.info("Successfully navigated to post")
+            return True
+
         except Exception as e:
             self.logger.error(f"Navigation error: {e}")
+            self.last_navigation = {"url": url, "outcome": self.NAV_UNCLEAR,
+                                    "reason": "navigation error: %s" % e}
             return False
     
     #: TOTAL budget for finding the Like button, across every selector.
@@ -1107,6 +1269,9 @@ class LinkedInCommentPoster:
         
         # Navigate to post
         if not self.navigate_to_post(url):
+            nav = getattr(self, "last_navigation", None) or {}
+            if nav.get("outcome") == self.NAV_UNAVAILABLE:
+                self.record_unavailable(url, nav.get("reason"))
             return False
 
         # Read the post before engaging, scaled to the comment we intend to leave
@@ -1150,7 +1315,8 @@ class LinkedInCommentPoster:
         return True
     
 
-    def _report_run(self, posted, failed, skipped, attempted, total):
+    def _report_run(self, posted, failed, skipped, attempted, total,
+                    unavailable=0):
         """The run summary. A batch that posted nothing must be unmistakable.
 
         The old line was `Done. Posted N, skipped M` at INFO with a tick, which
@@ -1158,7 +1324,16 @@ class LinkedInCommentPoster:
         that had been typed and lost.
         """
         result = {"posted": posted, "failed": failed, "skipped": skipped,
-                  "attempted": attempted, "total": total}
+                  "attempted": attempted, "total": total,
+                  "unavailable": unavailable}
+        if unavailable:
+            # Its own line, at INFO. Gone posts are not failures and must not
+            # inflate the failure count - but they are not invisible either: a
+            # run where everything turned out to be gone should be legible as
+            # exactly that, rather than as a quiet nothing-happened.
+            self.logger.info(
+                "%d post(s) were gone from LinkedIn and will not be retried.",
+                unavailable)
         if failed:
             self.logger.error("")
             self.logger.error("!" * 68)
@@ -1203,6 +1378,38 @@ class LinkedInCommentPoster:
             self.logger.debug("could not persist the skip record",
                               exc_info=True)
         return True
+
+    def record_unavailable(self, url, reason=None):
+        """Record a post that is GONE. Terminal, and deliberately not a failure.
+
+        Written to `unavailable_posts` in the same progress file that holds
+        `posted_comments`, and for the same reason: the poster is the only
+        thing that can observe this, so the poster writes it and the store
+        reconciles FROM it. Two systems each keeping their own opinion of
+        which posts still exist is how they drift.
+
+        Pointedly NOT `failed_comments`. A failure means a comment we meant to
+        leave did not go out and should be retried; this post cannot be
+        retried and there is nothing to fix. Mixing them would put permanent
+        noise in the one list that is supposed to demand attention.
+        """
+        entry = {
+            "url": url,
+            "reason": reason or "post not reachable",
+            "at": datetime.now().isoformat(),
+        }
+        known = self.progress.setdefault("unavailable_posts", [])
+        if not any((e.get("url") if isinstance(e, dict) else e) == url
+                   for e in known):
+            known.append(entry)
+        try:
+            self.save_progress()
+        except Exception:
+            self.logger.debug("could not persist the unavailable record",
+                              exc_info=True)
+        self.logger.info("Post is no longer on LinkedIn - skipping "
+                         "permanently (%s): %s", entry["reason"], url)
+        return entry
 
     def record_comment_failure(self, url, reason):
         """Record a post whose comment did NOT go out, loudly and durably.
@@ -1270,6 +1477,9 @@ class LinkedInCommentPoster:
             # Counting them together is how a run that posted nothing read as
             # a quiet success.
             failed = 0
+            # And a GONE post is neither. Nothing failed and nothing
+            # was skipped by choice - the post stopped existing.
+            unavailable = 0
             attempted = 0
             total = len(comments)
 
@@ -1315,6 +1525,18 @@ class LinkedInCommentPoster:
                     elif self.post_single_comment(comment):
                         attempted += 1
                         posted += 1
+                    elif (getattr(self, "last_navigation", None) or {}).get(
+                            "outcome") == self.NAV_UNAVAILABLE:
+                        # The post is gone. Counted apart from failed on
+                        # purpose: a failure is something to go and look at,
+                        # and a run of twelve deleted posts reporting twelve
+                        # failures would make the alarm meaningless.
+                        attempted += 1
+                        unavailable += 1
+                        self.logger.info(
+                            "%s post is gone from LinkedIn - skipped "
+                            "permanently", label)
+                        continue
                     else:
                         attempted += 1
                         failed += 1
@@ -1352,7 +1574,8 @@ class LinkedInCommentPoster:
                         posts_since_break = 0
                         break_threshold = hb.random_break_threshold()
 
-            return self._report_run(posted, failed, skipped, attempted, total)
+            return self._report_run(posted, failed, skipped, attempted,
+                                    total, unavailable=unavailable)
 
         finally:
             if self.driver:

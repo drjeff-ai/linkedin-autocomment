@@ -387,3 +387,84 @@ The reasons are distinct on purpose and want different fixes:
 `text_did_not_register` (nothing was ever clickable), and `comment_not_posted`
 (an enabled submit was clicked, the keyboard was tried, and the comment still
 did not appear).
+
+
+## 7. Posts that are GONE (deleted, taken down, made private)
+
+LinkedIn does not 404 a deleted post. It **redirects you to the feed**, which
+is why this was invisible for so long: `div[role='listitem']` is in
+`POST_DETAIL_SELECTORS` and the feed is full of them, so the navigation looked
+like it had succeeded.
+
+Before Dispatch 11, a gone post cost **two minutes** — six `POST_DETAIL_SELECTORS`
+each run through a 20-second `WebDriverWait` — and then returned a bare `False`
+that marked nothing. The record stayed `GENERATED`, so the same two minutes were
+spent again on the next run, and the one after that, forever.
+
+### 7.1 How it is decided
+
+`comment_poster.classify_navigation()` polls three questions inside one
+`NAV_DECIDE_SECONDS` (8s) budget, in this order:
+
+1. **Redirected off the post?** Keyed on the **activity id**, not the URL —
+   LinkedIn rewrites `/posts/<slug>-activity-<id>-xx` to `/feed/update/urn:li:activity:<id>`
+   freely, and comparing URLs would call every post gone. → `UNAVAILABLE`.
+2. **Post content present?** → `OK`.
+3. **An explicit "removed" marker?** → `UNAVAILABLE`.
+
+Anything else, including the content simply never loading, is `UNCLEAR`.
+
+### 7.2 UNCLEAR is not UNAVAILABLE, and that asymmetry is the whole design
+
+An `UNAVAILABLE` mark is **terminal and unreviewed** — the post leaves the queue
+and nothing ever looks at it again. A false positive therefore deletes a real
+post silently. So only a *positive* signal may mark one, exactly as with the
+comment verifier (§6.5).
+
+The specific case that makes this non-negotiable: **an expired session
+redirects every post to the auth wall.** Treating a redirect as "gone" without
+excluding `/login`, `/checkpoint`, `/authwall`, `/uas/` would terminally delete
+the entire queue in a single run, with no way afterwards to tell which posts
+were real. `NAV_AUTH_URL_MARKERS` exists for that one scenario.
+
+### 7.3 ⚠ `NAV_UNAVAILABLE_SELECTORS` / `NAV_UNAVAILABLE_TEXTS` are UNVERIFIED
+
+**No capture of a taken-down post exists yet.** Those markers are LinkedIn's
+documented empty-state shapes, not anything observed on this account — do not
+read them as confirmed the way the Like selector (§6) is.
+
+They are only consulted when **no post content was found at all**, which is what
+keeps a wrong guess harmless: the worst case is that a gone post falls through
+to `UNCLEAR`, which is the safe side.
+
+**To replace them with real ones:** the first `UNCLEAR` post of a run writes one
+`failure_post_unclear_*` capture to `data/<profile>/failures/` (once per run, not
+per post — forty unknown posts would otherwise be forty page dumps). Open its
+`.html`, find what the page actually says, and put the real selector at the top
+of `NAV_UNAVAILABLE_SELECTORS` per §4. Redirect detection carries the feature
+until then; the markers only matter for a post that renders a removed-notice
+*in place* rather than bouncing.
+
+### 7.4 Where the state lives
+
+The poster is the only thing that can observe a gone post, so it writes the fact
+and the store reconciles **from** it — the same one-writer/one-reader shape as
+`posted_comments` → `COMMENTED`:
+
+    posting_progress.json   unavailable_posts: [{url, reason, at}]   (poster writes)
+        ↓ post_store.reconcile() step 5
+    posts_db.json           status: UNAVAILABLE                      (store reads)
+
+Step 5 runs **before** the draft steps, because the comment file written before
+the post was deleted is still sitting on disk and would otherwise pull the record
+back to `GENERATED`.
+
+`UNAVAILABLE` is deliberately none of the three statuses it resembles:
+
+| not          | because                                                       |
+|--------------|---------------------------------------------------------------|
+| `TRASH`      | trash is "we judged this not worth commenting on", and its auto reasons are restorable so a re-scrape can let the post back in. Nothing here is reconsiderable. |
+| `FAILED`     | nothing failed. Counting it as a failure buries real failures — the count that means "a comment we wrote did not go out, go and look" — in permanent noise. |
+| `COMMENTED`  | obviously. `mark_unavailable` refuses to overwrite `COMMENTED`: that we commented stays true after the post comes down, and it is what the double-post guard reads. |
+
+It drops out of the run queue for free, because the queue is `by_status(GENERATED)`.
