@@ -22,7 +22,7 @@ Driven by `tests/test_selector_fixture_gate.py` via
 A fixture is a frozen snapshot of a shape that was once correct. Passing against
 it means *the code still matches what it was written for*; it says nothing about
 what LinkedIn serves today. **Neither check substitutes for the other.**
-See ARCHITECTURE.md §8.3.
+See docs/ARCHITECTURE.md §8.3.
 
 | File | Page | Expected result |
 |---|---|---|

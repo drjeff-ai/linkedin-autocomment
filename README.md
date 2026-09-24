@@ -60,7 +60,7 @@ uv run python -m linkedin_automation.dashboard
 The core code is a Python package (`linkedin_automation/`); standalone
 maintenance scripts live in `tools/`. Launch everything from the project root.
 For how the pieces fit together — and the rules a change must not break — read
-**[ARCHITECTURE.md](ARCHITECTURE.md)**.
+**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 ```
 linkedin-automation/
@@ -95,7 +95,12 @@ linkedin-automation/
 ├── .env                                # Your API keys (create from .env.example)
 ├── .env.example
 ├── .gitignore
-├── ARCHITECTURE.md                      # How it fits together + the lifecycle contract
+├── docs/
+│   ├── ARCHITECTURE.md                 # Pipeline, state model, data layout, rules
+│   ├── MAINTENANCE.md                  # Selector-repair runbook + live DOM facts
+│   ├── PRINCIPLES.md                   # How work is done on this repo
+│   ├── SCHEDULED_POSTING.md            # Buffer/CSV scheduled posting
+│   └── HANDOFF.md                      # Executor pointer: branches, next action
 ├── README.md / CONTRIBUTING.md / LICENSE
 └── data/                               # Auto-created at runtime (git-ignored)
     ├── profiles/
@@ -120,7 +125,7 @@ the project root, regardless of where you launch from.
 
 ### Post lifecycle (`posts_db.json`)
 
-> **See [ARCHITECTURE.md](ARCHITECTURE.md) §1** for the full contract — every
+> **See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §1** for the full contract — every
 > reader and its source, the reconciliation order, the load-bearing gotchas, and
 > the invariants. This section is the summary.
 

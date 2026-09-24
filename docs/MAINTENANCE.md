@@ -274,7 +274,9 @@ was briefly replaced with CDP `Input.insertText` on the strength of one capture
 showing an empty editor. That was wrong: a second capture from the same run
 holds all 177 characters. **No CDP, no paste, no `execCommand` is needed** —
 and the human typing cadence is worth keeping, so do not trade it away without
-evidence that keystrokes are actually being ignored.
+evidence that keystrokes are actually being ignored. (CDP and `execCommand`
+insert paths still exist behind `INSERT_FALLBACKS`, which is **off**; switched
+on, they run *after* typing, never instead of it.)
 
 ### 6.2 TWO buttons read "Comment" — scope the submit to the composer
 
@@ -387,3 +389,142 @@ The reasons are distinct on purpose and want different fixes:
 `text_did_not_register` (nothing was ever clickable), and `comment_not_posted`
 (an enabled submit was clicked, the keyboard was tried, and the comment still
 did not appear).
+
+### 6.8 The Like button — one exact selector, six decoys beside it
+
+The Like control is a plain button that carries its state in the `aria-label`
+and **nothing else** — no `aria-pressed`, no `data-testid`, hashed classes:
+
+```html
+<button type="button" aria-label="Reaction button state: Like">Like</button>
+```
+
+Exactly one per page. The selector is the exact label:
+
+```
+button[aria-label='Reaction button state: Like']
+```
+
+**Do not loosen it to `[aria-label*='Like']` or anything like it.** The same
+action bar carries **six** `aria-label="Open reactions menu"` buttons — the
+hover reaction pickers. Clicking one opens a menu instead of liking, and a
+loose match finds them. The six decoys all read `Open reactions menu`
+exactly; if a future capture shows more or fewer, re-derive rather than widen.
+
+The three selectors after it in `LIKE_BUTTON_SELECTORS`
+(`[aria-pressed='false']`, `.react-button__trigger`,
+`data-control-name='like_toggle'`) are the previous generation and match
+**zero** on the current DOM. They stay as fallbacks per §3 step 4, which is only
+affordable because the lookup is bounded in **total** (`LIKE_WAIT_SECONDS`,
+3s), not per selector. Before that, three dead selectors each waited out a
+20-second `WebDriverWait`, and every comment paid sixty seconds to learn it
+could not like.
+
+**Already liked.** A reacted post carries a different state in the same
+`aria-label` (`… : Liked`, `… : Celebrate`, …), so `LIKED_STATE_SELECTORS` is
+"any `Reaction button state:` label that is not the plain `Like`". **This is
+inferred from the unliked shape; no capture of a liked post exists.** It is safe
+to be wrong here: liking is non-critical, and a failed like logs a warning and
+the comment proceeds.
+
+
+## 7. Posts that are GONE (deleted, taken down, made private)
+
+LinkedIn does not 404 a deleted post. It **redirects you to the feed**, which
+is why this was invisible for so long: `div[role='listitem']` is in
+`POST_DETAIL_SELECTORS` and the feed is full of them, so the navigation looked
+like it had succeeded.
+
+A gone post used to cost **two minutes** — six `POST_DETAIL_SELECTORS` each run
+through a 20-second `WebDriverWait` — and then returned a bare `False` that
+marked nothing. The record stayed `GENERATED`, so the same two minutes were
+spent again on the next run, and the one after that, forever.
+
+### 7.1 How it is decided
+
+`comment_poster.classify_navigation()` polls three questions inside one shared
+`NAV_DECIDE_SECONDS` (8s) budget, every `NAV_POLL_SECONDS` (0.25s), in this
+order:
+
+1. **Redirected off the post?** (`navigated_away_from`) Keyed on the
+   **activity id** (`post_identity`: `activity[:-](\d{6,})`), not the URL —
+   LinkedIn rewrites `/posts/<slug>-activity-<id>-xx` to
+   `/feed/update/urn:li:activity:<id>` freely, and comparing URLs would call
+   every post gone. If the id is still in the current URL, we are on the post.
+   If the URL has no id to key on, the check declines to fire. → `UNAVAILABLE`.
+2. **Post content present?** (`post_content_present`) → `OK`.
+3. **An explicit "removed" marker?** (`unavailable_marker_on_page`) → `UNAVAILABLE`.
+
+When the budget runs out with none of these, the result is `UNCLEAR`.
+
+The redirect check runs **first** on purpose: a bounce to the feed puts real
+`div[role='listitem']` elements on the page, and checked second they would read
+as "the post loaded" — exactly how a gone post used to reach the composer.
+
+### 7.2 The auth-wall exclusion
+
+**An expired session redirects every post to a login wall.** Treating that
+redirect as "gone" would terminally mark the entire queue in a single run, with
+no way afterwards to tell which posts were real.
+
+So `navigated_away_from` returns *no* redirect when the current URL contains any
+of `NAV_AUTH_URL_MARKERS`:
+
+```
+/login   /checkpoint   /authwall   /uas/   /signup
+```
+
+Those posts fall through: no content loads, no removed-marker is found, and
+they come out `UNCLEAR`. If you ever see a whole run come back `UNCLEAR`, check
+the session before anything else.
+
+### 7.3 UNCLEAR is not UNAVAILABLE, and that asymmetry is the whole design
+
+| Outcome | Means | What happens to the record |
+|---|---|---|
+| `OK` | the post is there | the comment path continues |
+| `UNAVAILABLE` | a **positive** signal that the post is gone | written to `unavailable_posts`; reconciled to `UNAVAILABLE` — **terminal**, never offered again |
+| `UNCLEAR` | we do not know | nothing is written; stays `GENERATED`, retried next run |
+
+An `UNAVAILABLE` mark is **terminal and unreviewed** — the post leaves the queue
+and nothing ever looks at it again. A false positive therefore deletes a real
+post silently. So only a *positive* signal may mark one, exactly as with the
+comment verifier (§6.5). Everything weak — slow load, auth wall, a page shape
+we have not seen — is `UNCLEAR`, which costs one retry, not a post.
+
+### 7.4 ⚠ `NAV_UNAVAILABLE_SELECTORS` / `NAV_UNAVAILABLE_TEXTS` are UNVERIFIED
+
+**No capture of a taken-down post rendering a removed notice exists yet.** Those
+markers are LinkedIn's documented empty-state shapes, not anything observed on
+this account — do not read them as confirmed the way the Like selector (§6.8)
+is. Their text is only searched inside `NAV_TEXT_SCOPES` (`main`,
+`[role='main']`, `.artdeco-empty-state`), never the whole `page_source`, which
+carries script and JSON payloads that can contain anything.
+
+They are only consulted when **no post content was found**, which is what
+keeps a wrong guess harmless: the worst case is that a gone post falls through
+to `UNCLEAR`, which is the safe side.
+
+**To replace them with real ones:** the first `UNCLEAR` post of a run writes one
+`failure_post_unclear_*` capture to `data/<profile>/failures/` (once per run, not
+per post — forty unknown posts would otherwise be forty page dumps). Open its
+`.html`, find what the page actually says, and put the real selector at the top
+of `NAV_UNAVAILABLE_SELECTORS` per §3 step 4. Redirect detection carries the
+feature until then; the markers only matter for a post that renders a
+removed-notice *in place* rather than bouncing.
+
+### 7.5 Where the state lives
+
+The poster is the only thing that can observe a gone post, so it writes the fact
+and the store reconciles **from** it — the same one-writer/one-reader shape as
+`posted_comments` → `COMMENTED`:
+
+    posting_progress.json   unavailable_posts: [{url, reason, at}]   (poster writes)
+        ↓ post_store.reconcile() step 5
+    posts_db.json           status: UNAVAILABLE                      (store reads)
+
+Step 5 runs **before** the draft steps, because the comment file written before
+the post was deleted is still sitting on disk and would otherwise pull the record
+back to `GENERATED`. `mark_unavailable` refuses to overwrite `COMMENTED`. Why
+`UNAVAILABLE` is not `TRASH`, `FAILED` or `COMMENTED`: `docs/ARCHITECTURE.md`
+§1.2.
