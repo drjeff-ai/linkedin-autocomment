@@ -16,6 +16,7 @@ import traceback
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Dict, List, Optional
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
@@ -317,6 +318,10 @@ class LinkedInCommentPoster:
     NAV_OK = "ok"                     #: the post is there
     NAV_UNAVAILABLE = "unavailable"   #: the post is GONE - terminal
     NAV_UNCLEAR = "unclear"           #: we do not know. Retryable, never terminal.
+    #: The page did not finish loading within pm.PAGE_LOAD_TIMEOUT_SECONDS.
+    #: Retryable, never terminal: a slow load is not a taken-down post, and
+    #: UNAVAILABLE is terminal and unreviewed (MAINTENANCE §7.2).
+    NAV_TIMEOUT = "timeout"
 
     #: TOTAL budget for deciding whether the post is there, across every
     #: selector and every signal.
@@ -491,7 +496,25 @@ class LinkedInCommentPoster:
         try:
             self.logger.info(f"Navigating to post: {url}")
             with self._step("navigate"):
-                self.driver.get(url)
+                # ONE bounded attempt (pm.PAGE_LOAD_TIMEOUT_SECONDS, set on
+                # the driver), no retry loop. A timeout is its own outcome:
+                # retryable, loud, and never UNAVAILABLE - the post may be
+                # perfectly alive behind a slow network.
+                started = time.time()
+                try:
+                    self.driver.get(url)
+                except TimeoutException:
+                    elapsed = time.time() - started
+                    reason = ("page load timed out after %.1fs (limit %ss)"
+                              % (elapsed, pm.PAGE_LOAD_TIMEOUT_SECONDS))
+                    self.last_navigation = {
+                        "url": url, "outcome": self.NAV_TIMEOUT,
+                        "reason": reason, "elapsed": elapsed}
+                    self.logger.warning(
+                        "PAGE LOAD TIMEOUT post=%s %s - NOT marking it gone; "
+                        "it stays queued and will be retried: %s",
+                        self.post_identity(url) or "-", reason, url)
+                    return False
 
                 # A brief settle, NOT a page-load wait: classify_navigation
                 # below polls for the real readiness signal. Sleeping 2.5-4s
@@ -1505,6 +1528,9 @@ class LinkedInCommentPoster:
                 self._timing_outcome = "unavailable"
                 with self._step("progress_write"):
                     self.record_unavailable(url, nav.get("reason"))
+            elif nav.get("outcome") == self.NAV_TIMEOUT:
+                # Nothing recorded: the post stays queued for the next run.
+                self._timing_outcome = "navigation_timeout"
             elif str(nav.get("reason") or "").startswith("navigation error"):
                 self._timing_outcome = "navigation_error"
             else:
