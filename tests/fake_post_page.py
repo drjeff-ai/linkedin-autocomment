@@ -146,6 +146,14 @@ class FakePostPage:
         self.submit.enabled_when = lambda: bool(self.box._text.strip())
         self.comment_list = FakeElement(self, "", tag="div",
                                         attrs={"data-testid": "x-commentList"})
+        # The rest of the action bar. The Repost label carries a member slug
+        # and a long id on purpose: a like-miss capture must scrub both.
+        self.repost_button = FakeElement(
+            self, "Repost",
+            attrs={"aria-label": "Repost post by /in/some-member-slug "
+                                 "urn 123456789012345"})
+        self.send_button = FakeElement(self, "Send",
+                                       attrs={"aria-pressed": "false"})
 
     @property
     def on_post(self):
@@ -226,6 +234,12 @@ class FakePostPage:
     def execute_script(self, script, *args):
         if script == P._FIND_COMPOSER_SUBMIT_JS:
             return self.submit if self.composer_open else None
+        if script == getattr(P, "_LIKE_REGION_BUTTONS_JS", None):
+            bar = [self.comment_open_button, self.repost_button,
+                   self.send_button]
+            if self.current_url not in self.like_absent_urls:
+                bar.insert(0, self.like_button)
+            return {"region": "action_bar", "buttons": bar}
         if "getBoundingClientRect" in script:
             return {"x": 100, "y": 200, "width": 80, "height": 24}
         if "selectAll" in script:

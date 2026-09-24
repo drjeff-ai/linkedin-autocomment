@@ -24,7 +24,8 @@ import logging
 from . import profile_manager as pm
 from . import human_behavior as hb
 from . import run_log
-from .failure_capture import capture_failure, capture_submit_state
+from .failure_capture import (capture_failure, capture_like_state,
+                              capture_submit_state)
 
 load_dotenv()
 
@@ -589,21 +590,121 @@ class LinkedInCommentPoster:
                     if self.driver.find_elements(By.CSS_SELECTOR, selector):
                         self.logger.info("Post already liked")
                         return True
-                
-                self.logger.warning("Like button not found")
+
+                self.note_like_miss("like button not found")
                 return False
-            
+
             # Click like button with a natural mouse approach + click.
             hb.human_click(self.driver, like_button)
             hb.human_sleep(1.2, 2.4)
 
             self.logger.info("✅ Post liked successfully")
             return True
-            
+
         except Exception as e:
             self.logger.error(f"Error liking post: {e}")
+            self.note_like_miss("error: %s" % e)
             return False
-    
+
+    # ─── A Like miss is soft, but LOUD (Dispatch 15.2) ───────────────────────
+    #
+    # Liking is optional, so a miss never stops the comment. That does NOT
+    # make it quiet. The Like selector is the one that went dead silently
+    # before (MAINTENANCE §6.8), and a miss that only says "Like button not
+    # found" gives the next repair nothing to work from. On every miss:
+    #   * a WARN naming the post and every selector tried;
+    #   * the per-run counter the RUN summary reports;
+    #   * failure_like_miss_<ts>.png / .html, and _likedom.json listing the
+    #     buttons in the post's action bar region, so the new Like hook can be
+    #     read straight off the capture.
+
+    #: The labels an action-bar button carries. Used ONLY to locate the region
+    #: for the diagnostic capture - never to choose anything to click.
+    LIKE_REGION_ACTION_LABELS = ("Like", "Comment", "Repost", "Send")
+
+    _LIKE_REGION_BUTTONS_JS = """
+    const labels = arguments[0];
+    const stopRole = arguments[1];
+    function isAction(b) {
+      const t = (b.textContent || '').trim();
+      const a = b.getAttribute('aria-label') || '';
+      return labels.some(l => t === l || a.indexOf(l) !== -1);
+    }
+    // The action bar is the nearest container holding three or more
+    // action-looking buttons, climbing from any one of them and stopping at
+    // the post card.
+    const seeds = Array.from(document.querySelectorAll('button')).filter(isAction);
+    let region = null, how = 'page';
+    for (const seed of seeds) {
+      let node = seed.parentElement, hops = 0;
+      while (node && hops < 8) {
+        if (Array.from(node.querySelectorAll('button')).filter(isAction).length >= 3) {
+          region = node; how = 'action_bar'; break;
+        }
+        if (node.getAttribute && node.getAttribute('role') === stopRole) break;
+        node = node.parentElement; hops += 1;
+      }
+      if (region) break;
+    }
+    if (!region) {
+      region = document.querySelector('[role="' + stopRole + '"]');
+      how = region ? 'post_card' : 'page';
+    }
+    return {region: how,
+            buttons: Array.from((region || document).querySelectorAll('button')).slice(0, 80)};
+    """
+
+    def like_region_buttons(self):
+        """``(region, [button elements])`` around where the Like should be."""
+        try:
+            found = self.driver.execute_script(
+                self._LIKE_REGION_BUTTONS_JS,
+                list(self.LIKE_REGION_ACTION_LABELS), self.COMPOSER_STOP_ROLE)
+        except Exception as exc:
+            self.logger.debug("could not read the action bar region: %s", exc)
+            return "unreadable", []
+        if not isinstance(found, dict):
+            return "unreadable", []
+        return found.get("region") or "unknown", list(found.get("buttons") or [])
+
+    def note_like_miss(self, reason):
+        """Count, WARN and capture a Like miss. Never raises.
+
+        Called from inside like_post's try, so anything escaping here would
+        land in its except, count the miss twice and escape like_post.
+        """
+        self.like_misses = getattr(self, "like_misses", 0) + 1
+        try:
+            self._report_like_miss(reason)
+        except Exception:
+            self.logger.debug("like-miss report failed", exc_info=True)
+
+    def _report_like_miss(self, reason):
+        timing = getattr(self, "_timing", None)
+        post = timing.post_id if timing is not None else None
+        if post is None:
+            try:
+                post = self.post_identity(self.driver.current_url) or \
+                    self.driver.current_url
+            except Exception:
+                post = "-"
+        self.logger.warning(
+            "LIKE MISS post=%s reason=%s selectors_tried=%s - continuing to "
+            "the comment", post, reason, list(self.LIKE_BUTTON_SELECTORS))
+        try:
+            capture_failure(self.driver, "like_miss", self.profile_name,
+                            page_source=True)
+            region, buttons = self.like_region_buttons()
+            capture_like_state(
+                self.driver, "like_miss", self.profile_name, buttons,
+                region=region,
+                extra={"reason": reason, "post": post,
+                       "selectors_tried": list(self.LIKE_BUTTON_SELECTORS),
+                       "liked_state_selectors": list(
+                           self.LIKED_STATE_SELECTORS)})
+        except Exception:
+            self.logger.debug("like-miss capture failed", exc_info=True)
+
     def open_comment_box(self) -> Optional:
         """Open the comment box and return the input element."""
         self.logger.info("Opening comment box...")
@@ -1430,7 +1531,7 @@ class LinkedInCommentPoster:
         with self._step("like"):
             liked = self.like_post()
         if not liked:
-            self.like_misses = getattr(self, "like_misses", 0) + 1
+            # Already counted, WARNed and captured by note_like_miss.
             self.logger.warning("Failed to like post, continuing anyway...")
 
         with self._step("pre_compose_dwell"):
