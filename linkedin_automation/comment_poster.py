@@ -16,6 +16,7 @@ import traceback
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Dict, List, Optional
+from urllib.parse import unquote, urlparse
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -24,6 +25,7 @@ from dotenv import load_dotenv
 import logging
 from . import profile_manager as pm
 from . import human_behavior as hb
+from . import post_urn
 from . import run_log
 from .failure_capture import (capture_failure, capture_like_state,
                               capture_submit_state)
@@ -365,34 +367,103 @@ class LinkedInCommentPoster:
     #: script and JSON payloads which can contain anything at all.
     NAV_TEXT_SCOPES = ("main", "[role='main']", ".artdeco-empty-state")
 
-    @staticmethod
-    def post_identity(url: str):
-        """The activity id inside a post URL, which survives normalisation.
+    #: The URN types a post URL may be keyed on (Dispatch 15.3). Wider than
+    #: the scraper's LinkedInScraper.URN_TYPES by exactly groupPost: the
+    #: scraper does not record group-post URNs, but it does store their URLs,
+    #: and the poster has to be able to recognise the post it lands on.
+    POST_IDENTITY_TYPES = ("activity", "ugcPost", "share", "groupPost")
+
+    #: Shortest numeric segment believed as an id. Guards the slug form, where
+    #: words like "share-5-tips" sit in the same URL as the real id.
+    POST_IDENTITY_MIN_DIGITS = 6
+
+    @classmethod
+    def _identity_urn(cls, url):
+        return post_urn.find_post_urn(url or "", cls.POST_IDENTITY_TYPES,
+                                      min_digits=cls.POST_IDENTITY_MIN_DIGITS)
+
+    @classmethod
+    def post_identity(cls, url: str):
+        """The type-qualified post id in a URL (``activity:1010…``), or None.
 
         LinkedIn rewrites post URLs freely - it drops query strings, swaps
-        /posts/ for /feed/update/, re-cases the slug. The activity id is the
-        one part that does not move, so it is what "are we still on the post
-        we asked for" gets decided on. Returns None when there is no id to key
-        on, and the redirect check then declines to fire at all.
+        /posts/<slug>-activity-<id>-xx for /feed/update/urn:li:activity:<id>,
+        re-cases the slug. The post id is the one part that does not move, so
+        it is what "are we still on the post we asked for" gets decided on.
+        Qualified by type, because the same digits under two URN types are two
+        different posts. Returns None when there is no id to key on, and the
+        redirect check then declines to fire at all.
         """
-        m = re.search(r"activity[:\-](\d{6,})", url or "")
-        return m.group(1) if m else None
+        found = cls._identity_urn(url)
+        return found.qualified if found else None
+
+    @staticmethod
+    def _is_feed_url(url: str) -> bool:
+        """The home feed - where LinkedIn bounces a deleted post (MAINT. §7)."""
+        path = urlparse(url or "").path.rstrip("/")
+        return path in ("", "/feed")
+
+    @staticmethod
+    def _fully_decoded(url: str) -> str:
+        """Percent-decode until stable (bounded): %253A -> %3A -> ':'."""
+        out = url or ""
+        for _ in range(5):
+            nxt = unquote(out)
+            if nxt == out:
+                break
+            out = nxt
+        return out
 
     def navigated_away_from(self, url: str):
-        """Reason string if we were redirected off the post, else None."""
-        wanted = self.post_identity(url)
-        if not wanted:
+        """Reason string if we were redirected off the post, else None.
+
+        Decided on PARSED ids - the one we asked for against the one the
+        browser is on - never on the URL string. A substring test of a
+        qualified id against the URL would miss every slug-form URL and call
+        each of those posts gone.
+        """
+        wanted = self._identity_urn(self._fully_decoded(url))
+        if wanted is None:
             return None
         try:
             current = self.driver.current_url or ""
         except Exception:
             return None
-        if wanted in current:
+        if not current or current == url:
             return None
         low = current.lower()
         if any(marker in low for marker in self.NAV_AUTH_URL_MARKERS):
             return None          # a session problem, not a missing post
-        if not current or current == url:
+        # Parse the DECODED URL: LinkedIn can serve the very post we asked for
+        # at urn%3Ali%3Aactivity%3A<id>. Parsing it raw finds no id there and
+        # would call a live post gone (15.3 review, blocking).
+        decoded = self._fully_decoded(current)
+        # EVERY id in the landed URL, not just the first: a slug's opening
+        # words or a query parameter can carry another URN ahead of ours, and
+        # finding ours anywhere is the safe reading - UNAVAILABLE is terminal.
+        if any(u.qualified == wanted.qualified for u in post_urn.iter_post_urns(
+                decoded, self.POST_IDENTITY_TYPES,
+                min_digits=self.POST_IDENTITY_MIN_DIGITS)):
+            return None
+        landed = self._identity_urn(decoded)
+        if landed is None and wanted.type != "activity" \
+                and not self._is_feed_url(current):
+            # Newly identified types (ugcPost/share/groupPost, 15.3) have no
+            # track record of where LinkedIn serves them - a group post may
+            # live at /groups/<g>/posts/... with no URN. Only the observed
+            # gone-post signal, a bounce to the FEED, counts for them.
+            # activity keeps its pre-15.3 rule unchanged.
+            self.logger.info(
+                "Landed on %s (no post id) after asking for %s - not the "
+                "feed, so no opinion", current, wanted.qualified)
+            return None
+        if landed is not None and landed.type != wanted.type:
+            # A post URL of ANOTHER type: LinkedIn may normalise share/ugcPost
+            # to activity under a different number. That cannot be told apart
+            # from a redirect, and UNAVAILABLE is terminal, so: no opinion.
+            self.logger.info(
+                "Landed on %s after asking for %s - a different URN type, "
+                "not treated as a redirect", landed.qualified, wanted.qualified)
             return None
         return "redirected to %s" % current
 

@@ -29,6 +29,7 @@ import logging
 from . import profile_manager as pm
 from . import human_behavior as hb
 from . import post_store
+from . import post_urn
 from .failure_capture import capture_failure
 
 load_dotenv()
@@ -545,7 +546,30 @@ class LinkedInScraper:
     
     # LinkedIn posts are keyed by one of these URN types; any of them forms a
     # valid /feed/update/<urn>/ URL.
-    URN_RE = re.compile(r'urn:li:(?:activity|ugcPost|share):\d+')
+    #
+    # The SCRAPER's accepted set, and deliberately only these three. The
+    # grammar lives in post_urn (shared with the poster, which also accepts
+    # groupPost); widening this set changes which URNs the scraper records,
+    # and that is a separate decision (Dispatch 15.3 kept it unchanged).
+    URN_TYPES = ("activity", "ugcPost", "share")
+
+    @classmethod
+    def urn_in_text(cls, text: str) -> Optional[str]:
+        """First ``urn:li:<type>:<id>`` of an accepted type in DOM text."""
+        found = post_urn.find_post_urn(text, cls.URN_TYPES,
+                                       forms=(post_urn.URN_FORM,))
+        return found.urn if found else None
+
+    @classmethod
+    def urn_from_copied_link(cls, url: str) -> Optional[str]:
+        """The URN a copied post link carries in its slug (``-<type>-<id>``).
+
+        Slug form only, as it always was: a /feed/update/urn:li:... link
+        yields nothing here, and ``activity_urn`` is then left as is.
+        """
+        found = post_urn.find_post_urn(url, cls.URN_TYPES,
+                                       forms=(post_urn.SLUG_FORM,))
+        return found.urn if found else None
 
     def _extract_urn(self, element) -> Optional[str]:
         """Extract a post URN (activity, ugcPost, or share) from the element.
@@ -564,9 +588,9 @@ class LinkedInScraper:
         try:
             componentkey = element.get_attribute('componentkey')
             if componentkey:
-                match = self.URN_RE.search(componentkey)
-                if match:
-                    return match.group()
+                urn = self.urn_in_text(componentkey)
+                if urn:
+                    return urn
         except Exception:
             self.logger.debug("Failed to read componentkey for URN", exc_info=True)
 
@@ -575,9 +599,9 @@ class LinkedInScraper:
             try:
                 value = element.get_attribute(attr)
                 if value:
-                    match = self.URN_RE.search(value)
-                    if match:
-                        return match.group()
+                    urn = self.urn_in_text(value)
+                    if urn:
+                        return urn
             except Exception:
                 continue
 
@@ -586,18 +610,18 @@ class LinkedInScraper:
         try:
             for anchor in element.find_elements(By.CSS_SELECTOR, "a[href*='/feed/update/']"):
                 href = anchor.get_attribute('href') or ''
-                match = self.URN_RE.search(href)
-                if match:
-                    return match.group()
+                urn = self.urn_in_text(href)
+                if urn:
+                    return urn
         except Exception:
             self.logger.debug("Failed to scan anchors for URN", exc_info=True)
 
         # 4. fall back to scanning the element's inner HTML
         try:
             html = element.get_attribute('innerHTML') or ''
-            match = self.URN_RE.search(html)
-            if match:
-                return match.group()
+            urn = self.urn_in_text(html)
+            if urn:
+                return urn
         except Exception:
             self.logger.debug("Failed to extract URN from innerHTML", exc_info=True)
 
@@ -1370,9 +1394,9 @@ class LinkedInAIPostFinder:
                     clip_url = self.scraper.extract_url_via_clipboard(element)
                     if clip_url:
                         post.url = clip_url
-                        m = re.search(r'(activity|ugcPost|share)-(\d+)', clip_url)
-                        if m:
-                            post.activity_urn = f"urn:li:{m.group(1)}:{m.group(2)}"
+                        urn = LinkedInScraper.urn_from_copied_link(clip_url)
+                        if urn:
+                            post.activity_urn = urn
                         self.logger.info(f"  Resolved URL: {post.url}")
                     else:
                         self.logger.warning(
