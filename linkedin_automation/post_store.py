@@ -795,9 +795,10 @@ def reconcile(profile_name: str = None, store: PostStore = None,
     if changed:
         store.save()
         logger.info(
-            "reconcile(%s): commented=%d generated=%d recovered=%d demoted=%d "
-            "no_url=%d; counts now %s", profile_name, commented, generated,
-            recovered, demoted, trashed_no_url, store.counts())
+            "reconcile(%s): commented=%d unavailable=%d generated=%d "
+            "recovered=%d demoted=%d no_url=%d; counts now %s", profile_name,
+            commented, gone, generated, recovered, demoted, trashed_no_url,
+            store.counts())
     return store.counts()
 
 

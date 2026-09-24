@@ -13,6 +13,7 @@ import re
 import sys
 import random
 import traceback
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Dict, List, Optional
 from selenium.webdriver.common.by import By
@@ -22,6 +23,7 @@ from dotenv import load_dotenv
 import logging
 from . import profile_manager as pm
 from . import human_behavior as hb
+from . import run_log
 from .failure_capture import capture_failure, capture_submit_state
 
 load_dotenv()
@@ -186,7 +188,53 @@ class LinkedInCommentPoster:
         
         # Load progress
         self.progress = self.load_progress()
-    
+
+        # Timing (Dispatch 15.1). _timing is the comment in flight, if any;
+        # run_timing is the run in flight, if any. Both None outside run(),
+        # which keeps the primitives usable on their own (first_comment.py).
+        self._timing = None
+        self.run_timing = None
+        self.last_comment_timing = None
+        self.like_misses = 0
+
+    # ─── Timing (Dispatch 15.1) ──────────────────────────────────────────────
+
+    @contextmanager
+    def _step(self, name):
+        """Time a step of the comment in flight. A no-op outside one."""
+        # getattr: some callers build the poster without __init__.
+        timing = getattr(self, "_timing", None)
+        if timing is None:
+            yield
+            return
+        with timing.step(name):
+            yield
+
+    @contextmanager
+    def _run_step(self, name):
+        """Time a run-level step (setup, the wait between posts, a break)."""
+        timing = getattr(self, "run_timing", None)
+        if timing is None:
+            yield
+            return
+        with timing.step(name):
+            yield
+
+    def _poll_done(self, name, declared, started, outcome):
+        """Log a bounded poll's budget and its actual elapsed, separately.
+
+        Measured on time.time(), the clock the poll loops set their deadlines
+        on. Mixing in time.monotonic() let an exhausted poll read a hair UNDER
+        its budget on Windows, where the two clocks tick at different
+        resolutions - an overrun reported as no overrun.
+        """
+        actual = time.time() - started
+        timing = getattr(self, "_timing", None)
+        if timing is not None:
+            timing.poll(name, declared, actual, outcome)
+        else:
+            run_log.log_poll("-", name, declared, actual, outcome)
+
     def load_progress(self) -> Dict:
         """Load posting progress from file."""
         if os.path.exists(self.progress_file):
@@ -385,6 +433,13 @@ class LinkedInCommentPoster:
         loaded" - which is exactly how a gone post used to get all the way to
         the composer.
         """
+        started = time.time()
+        outcome, reason = self._classify_navigation_loop(url)
+        self._poll_done("classify_navigation", self.NAV_DECIDE_SECONDS,
+                        started, outcome)
+        return outcome, reason
+
+    def _classify_navigation_loop(self, url: str):
         deadline = time.time() + self.NAV_DECIDE_SECONDS
         while True:
             reason = self.navigated_away_from(url)
@@ -434,14 +489,16 @@ class LinkedInCommentPoster:
                                 "reason": "navigation did not complete"}
         try:
             self.logger.info(f"Navigating to post: {url}")
-            self.driver.get(url)
+            with self._step("navigate"):
+                self.driver.get(url)
 
-            # A brief settle, NOT a page-load wait: classify_navigation below
-            # polls for the real readiness signal. Sleeping 2.5-4s first only
-            # delayed asking.
-            hb.human_sleep(0.5, 1.0)
+                # A brief settle, NOT a page-load wait: classify_navigation
+                # below polls for the real readiness signal. Sleeping 2.5-4s
+                # first only delayed asking.
+                hb.human_sleep(0.5, 1.0)
 
-            outcome, reason = self.classify_navigation(url)
+            with self._step("classify_navigation"):
+                outcome, reason = self.classify_navigation(url)
             self.last_navigation = {"url": url, "outcome": outcome,
                                     "reason": reason}
 
@@ -459,17 +516,19 @@ class LinkedInCommentPoster:
                 self.note_unclear_navigation(url)
                 return False
 
-            # Additional wait for dynamic content
-            hb.human_sleep(1.5, 2.5)
+            with self._step("navigate_dwell"):
+                # Additional wait for dynamic content
+                hb.human_sleep(1.5, 2.5)
 
-            # Read the post like a human would before engaging, then a gentle
-            # scroll down to take it in and back up to the action bar (variable
-            # increments + drift instead of a uniform jump to the half-point).
-            hb.simulate_reading(self.driver)
-            hb.human_scroll(self.driver, direction="down", pixels=random.randint(300, 600))
-            hb.human_sleep(0.8, 1.6)
-            hb.human_scroll(self.driver, direction="up", pixels=random.randint(300, 600))
-            hb.human_sleep(0.6, 1.2)
+                # Read the post like a human would before engaging, then a
+                # gentle scroll down to take it in and back up to the action
+                # bar (variable increments + drift instead of a uniform jump
+                # to the half-point).
+                hb.simulate_reading(self.driver)
+                hb.human_scroll(self.driver, direction="down", pixels=random.randint(300, 600))
+                hb.human_sleep(0.8, 1.6)
+                hb.human_scroll(self.driver, direction="up", pixels=random.randint(300, 600))
+                hb.human_sleep(0.6, 1.2)
 
             self.logger.info("Successfully navigated to post")
             return True
@@ -496,8 +555,15 @@ class LinkedInCommentPoster:
 
     def find_like_button(self, timeout=None):
         """The first clickable Like control, or None. Bounded in TOTAL."""
-        deadline = time.time() + (self.LIKE_WAIT_SECONDS if timeout is None
-                                  else timeout)
+        declared = self.LIKE_WAIT_SECONDS if timeout is None else timeout
+        started = time.time()
+        found = self._find_like_button_loop(declared)
+        self._poll_done("find_like_button", declared, started,
+                        "found" if found is not None else "not_found")
+        return found
+
+    def _find_like_button_loop(self, timeout):
+        deadline = time.time() + timeout
         while True:
             for selector in self.LIKE_BUTTON_SELECTORS:
                 try:
@@ -593,8 +659,16 @@ class LinkedInCommentPoster:
 
     def await_comment_input(self, timeout=None):
         """The comment editor once it is on screen, or None within the cap."""
-        deadline = time.time() + (self.COMMENT_INPUT_WAIT_SECONDS
-                                  if timeout is None else timeout)
+        declared = (self.COMMENT_INPUT_WAIT_SECONDS if timeout is None
+                    else timeout)
+        started = time.time()
+        found = self._await_comment_input_loop(declared)
+        self._poll_done("await_comment_input", declared, started,
+                        "found" if found is not None else "not_found")
+        return found
+
+    def _await_comment_input_loop(self, timeout):
+        deadline = time.time() + timeout
         while True:
             for selector in self.COMMENT_INPUT_SELECTORS:
                 try:
@@ -925,6 +999,16 @@ class LinkedInCommentPoster:
         landed in ProseMirror, and a better signal than reading the box back.
         """
         timeout = self.SUBMIT_ENABLE_TIMEOUT if timeout is None else timeout
+        started = time.time()
+        button, enabled = self._await_composer_submit_loop(comment_input,
+                                                           timeout)
+        self._poll_done(
+            "await_composer_submit", timeout, started,
+            "enabled" if enabled else
+            ("never_enabled" if button is not None else "no_button"))
+        return button, enabled
+
+    def _await_composer_submit_loop(self, comment_input, timeout):
         deadline = time.time() + timeout
         button = None
         while True:
@@ -1092,20 +1176,24 @@ class LinkedInCommentPoster:
                 self.driver, el, t)))
 
         for path, insert in methods:
-            self.focus_comment_box(comment_input)
-            try:
-                insert(comment_input, comment_text)
-            except Exception as exc:
-                self.logger.warning("input path %s failed: %s", path, exc)
-                continue
+            with self._step("type"):
+                self.focus_comment_box(comment_input)
+                try:
+                    insert(comment_input, comment_text)
+                except Exception as exc:
+                    self.logger.warning("input path %s failed: %s", path, exc)
+                    continue
 
-            button, enabled = self.await_composer_submit(comment_input)
+            with self._step("await_submit_enabled"):
+                button, enabled = self.await_composer_submit(comment_input)
             if enabled:
                 self.logger.info("Text landed  input_path=%s", path)
                 return button, path
 
             self.logger.warning("input path %s did not enable the submit", path)
-            if not self.clear_comment_box(comment_input):
+            with self._step("clear_after_failed_input"):
+                cleared = self.clear_comment_box(comment_input)
+            if not cleared:
                 self.logger.error(
                     "input path %s left text in the editor that did not enable "
                     "the submit. NOT inserting again - a second insert would "
@@ -1123,6 +1211,15 @@ class LinkedInCommentPoster:
         the window is waited out before anything else is tried.
         """
         timeout = self.VERIFY_TIMEOUT if timeout is None else timeout
+        started = time.time()
+        ok = self._verify_with_polling_loop(comment_input, comment_text,
+                                            before, timeout)
+        self._poll_done("verify_with_polling", timeout, started,
+                        "verified" if ok else "not_verified")
+        return ok
+
+    def _verify_with_polling_loop(self, comment_input, comment_text, before,
+                                  timeout):
         deadline = time.time() + timeout
         while True:
             if self.verify_comment_posted(comment_input, comment_text, before):
@@ -1183,69 +1280,84 @@ class LinkedInCommentPoster:
         """Post a comment on the current post using all available methods."""
         try:
             # Open comment box
-            comment_input = self.open_comment_box()
-            
+            with self._step("open_composer"):
+                comment_input = self.open_comment_box()
+
             if not comment_input:
                 self.logger.error("Comment input field not found")
-                capture_failure(self.driver, "comment_box_not_found", self.profile_name)
+                with self._step("failure_capture"):
+                    capture_failure(self.driver, "comment_box_not_found", self.profile_name)
                 return False
-            
-            # Click to focus and type comment. Scroll the box into view with
-            # human-like smoothness, then a natural mouse approach + click to
-            # focus it (instead of a teleport click).
-            hb.scroll_to_element(self.driver, comment_input)
 
-            # Variable pause between reading the post and starting to type — a
-            # human composes for a beat before the first keystroke.
-            hb.human_sleep(0.8, 2.0)
+            with self._step("compose_prep"):
+                # Click to focus and type comment. Scroll the box into view
+                # with human-like smoothness, then a natural mouse approach +
+                # click to focus it (instead of a teleport click).
+                hb.scroll_to_element(self.driver, comment_input)
 
-            # Clear, then type character-by-character with human-like timing
-            # (random 40-120ms keystrokes + occasional thinking pauses + mouse
-            # drift) via human_behavior_selenium, instead of dumping all at once.
-            hb.human_click(self.driver, comment_input)
-            hb.human_sleep(0.3, 0.7)
-            self.clear_comment_box(comment_input)
+                # Variable pause between reading the post and starting to type
+                # — a human composes for a beat before the first keystroke.
+                hb.human_sleep(0.8, 2.0)
 
-            # The thread BEFORE anything is entered.
-            before = self.comment_thread_snapshot()
+                # Clear, then type character-by-character with human-like
+                # timing (random 40-120ms keystrokes + occasional thinking
+                # pauses + mouse drift) via human_behavior, instead of dumping
+                # all at once.
+                hb.human_click(self.driver, comment_input)
+                hb.human_sleep(0.3, 0.7)
+                self.clear_comment_box(comment_input)
+
+                # The thread BEFORE anything is entered.
+                before = self.comment_thread_snapshot()
 
             # STEP 1 - get the text in, and confirm the editor registered it.
-            # The submit enabling IS that confirmation.
+            # The submit enabling IS that confirmation. Timed inside, as
+            # "type" and "await_submit_enabled".
             button, input_path = self.enter_comment_text(comment_input,
                                                          comment_text)
             if button is None or input_path is None:
-                self.capture_submit_failure(comment_text, before,
-                                            "text_did_not_register")
+                with self._step("failure_capture"):
+                    self.capture_submit_failure(comment_text, before,
+                                                "text_did_not_register")
                 return False
             self.logger.info("Entered comment (%d chars)  input_path=%s",
                              len(comment_text), input_path)
 
-            # A beat to "review" between entering and submitting.
-            hb.human_sleep(1.0, 2.5)
+            with self._step("review_dwell"):
+                # A beat to "review" between entering and submitting.
+                hb.human_sleep(1.0, 2.5)
 
             # STEP 2 - the submit is already located AND enabled, which is what
             # proved the text registered. Click it.
-            try:
-                self.logger.info("Clicking the composer submit: %r",
-                                 (button.text or "").strip() or "<no text>")
-                hb.human_click(self.driver, button)
-            except Exception as exc:
-                self.logger.warning("The submit click raised: %s", exc)
+            with self._step("submit"):
+                try:
+                    self.logger.info("Clicking the composer submit: %r",
+                                     (button.text or "").strip() or "<no text>")
+                    hb.human_click(self.driver, button)
+                except Exception as exc:
+                    self.logger.warning("The submit click raised: %s", exc)
 
             # STEP 3 - POLL before trying anything else. A comment still
             # rendering is not a comment that failed, and reaching for the
             # keyboard here is how a slow render becomes a SECOND comment.
-            if self.verify_with_polling(comment_input, comment_text, before):
+            with self._step("verify"):
+                verified = self.verify_with_polling(comment_input,
+                                                    comment_text, before)
+            if verified:
                 self.logger.info("Comment POSTED  path=scoped_button")
                 return True
 
             # STEP 4 - only now, the keyboard, into the FOCUSED editor, once.
-            if self.post_comment_ctrl_enter(comment_input, comment_text, before):
+            with self._step("fallback_submit"):
+                fallback = self.post_comment_ctrl_enter(comment_input,
+                                                        comment_text, before)
+            if fallback:
                 self.logger.info("Comment POSTED  path=ctrl_enter")
                 return True
 
-            self.capture_submit_failure(comment_text, before,
-                                        "comment_not_posted")
+            with self._step("failure_capture"):
+                self.capture_submit_failure(comment_text, before,
+                                            "comment_not_posted")
             return False
             
         except Exception as e:
@@ -1262,55 +1374,92 @@ class LinkedInCommentPoster:
         if not force and url in self.progress.get('posted_comments', []):
             self.logger.info(f"Comment already posted for: {url}")
             return True
-        
+
+        # From here to the ledger write, every stretch of time is a named step
+        # (Dispatch 15.1): the COMMENT line compares their sum to the total, so
+        # time spent outside any step is visible instead of silently absorbed.
+        timing = run_log.CommentTiming(self.post_identity(url) or url)
+        self._timing = timing
+        self._timing_outcome = "error"
+        try:
+            return self._post_single_comment_timed(url, comment_text,
+                                                   comment_data)
+        finally:
+            self._timing = None
+            timing.finish(self._timing_outcome)
+            self.last_comment_timing = timing
+            if getattr(self, "run_timing", None) is not None:
+                self.run_timing.add_comment(timing)
+
+    def _post_single_comment_timed(self, url, comment_text, comment_data):
         self.logger.info(f"\n{'='*60}")
         self.logger.info(f"Processing comment for post: {comment_data['preview'][:80]}...")
         self.logger.info(f"Comment: {comment_text[:100]}...")
-        
-        # Navigate to post
+
+        # Navigate to post. Timed inside, as "navigate",
+        # "classify_navigation" and "navigate_dwell".
         if not self.navigate_to_post(url):
             nav = getattr(self, "last_navigation", None) or {}
             if nav.get("outcome") == self.NAV_UNAVAILABLE:
-                self.record_unavailable(url, nav.get("reason"))
+                self._timing_outcome = "unavailable"
+                with self._step("progress_write"):
+                    self.record_unavailable(url, nav.get("reason"))
+            elif str(nav.get("reason") or "").startswith("navigation error"):
+                self._timing_outcome = "navigation_error"
+            else:
+                self._timing_outcome = "navigation_unclear"
             return False
 
-        # Read the post before engaging, scaled to the comment we intend to leave
-        # (longer/considered comments imply a longer read of the post).
-        hb.simulate_reading_for_text(self.driver, comment_text)
+        with self._step("read_dwell"):
+            # Read the post before engaging, scaled to the comment we intend
+            # to leave (longer/considered comments imply a longer read).
+            hb.simulate_reading_for_text(self.driver, comment_text)
 
         # BEFORE anything is typed: is our comment already here? Asking the
         # thread beats trusting our own records, which today were wrong.
-        already, why = self.already_commented_here(comment_text)
+        with self._step("thread_check"):
+            already, why = self.already_commented_here(comment_text)
         if already:
             self.logger.info("SKIPPING %s - %s", url, why)
-            self.mark_already_commented(url, why)
+            self._timing_outcome = "already_commented"
+            with self._step("progress_write"):
+                self.mark_already_commented(url, why)
             return True
 
         # Like the post
-        if not self.like_post():
+        with self._step("like"):
+            liked = self.like_post()
+        if not liked:
+            self.like_misses = getattr(self, "like_misses", 0) + 1
             self.logger.warning("Failed to like post, continuing anyway...")
 
-        # Variable pause between liking and opening the comment box.
-        hb.human_sleep(0.8, 2.2)
+        with self._step("pre_compose_dwell"):
+            # Variable pause between liking and opening the comment box.
+            hb.human_sleep(0.8, 2.2)
 
         # Post the comment. A False here means NOT POSTED - it must never
         # reach the ledger below, which is what post_store reconciles COMMENTED
         # from. Marking an unposted comment done loses it permanently: the URL
         # is skipped on every future run.
         if not self.post_comment(comment_text):
-            self.record_comment_failure(url, "comment_not_posted")
+            self._timing_outcome = "failed"
+            with self._step("progress_write"):
+                self.record_comment_failure(url, "comment_not_posted")
             return False
 
         # Mark as completed - reached ONLY when the comment was verified in the
         # thread.
-        self.progress['posted_comments'].append(url)
-        self.progress['last_posted'] = datetime.now().isoformat()
-        self.save_progress()
-        
+        with self._step("progress_write"):
+            self.progress['posted_comments'].append(url)
+            self.progress['last_posted'] = datetime.now().isoformat()
+            self.save_progress()
+        self._timing_outcome = "posted"
+
         self.logger.info("✅ Successfully engaged with post!")
 
-        # Wait before next action (variable, not a flat 5s)
-        hb.human_sleep(4.0, 7.0)
+        with self._step("post_dwell"):
+            # Wait before next action (variable, not a flat 5s)
+            hb.human_sleep(4.0, 7.0)
 
         return True
     
@@ -1444,19 +1593,45 @@ class LinkedInCommentPoster:
         return entry
 
     def run(self, comments_file: str, post_count: int = 1, manual_mode: bool = False):
-        """Run the comment posting process."""
+        """Run the comment posting process, with a file log of where time went.
+
+        Opens ``logs/run_<profile>_<ts>.log`` for the length of the run and
+        closes it with a RUN summary line, however the run ends (Dispatch 15.1).
+        """
+        handler, self.run_log_path = run_log.open_run_log(
+            self.profile_name or "default")
+        self.run_timing = run_log.RunTiming(self.profile_name)
+        self.like_misses = 0
+        self.last_run_result = None
+        try:
+            return self._run(comments_file, post_count, manual_mode)
+        finally:
+            r = self.last_run_result or {}
+            try:
+                self.run_timing.summary(
+                    attempted=r.get("attempted", 0), posted=r.get("posted", 0),
+                    skipped=r.get("skipped", 0), failed=r.get("failed", 0),
+                    unavailable=r.get("unavailable", 0),
+                    like_misses=self.like_misses)
+            finally:
+                self.run_timing = None
+                run_log.close_run_log(handler)
+
+    def _run(self, comments_file: str, post_count: int = 1, manual_mode: bool = False):
         # Parse comments
         comments = self.parse_comments_file(comments_file)
-        
+
         if not comments:
             self.logger.error("No comments found in file")
             return
-        
+
         self.logger.info(f"Found {len(comments)} comments to post")
-        
+
         # Setup and login
-        self.setup_driver()
-        if not self.login():
+        with self._run_step("setup"):
+            self.setup_driver()
+            logged_in = self.login()
+        if not logged_in:
             if self.driver:
                 self.driver.quit()
             raise pm.LoginRequiredError(
@@ -1563,24 +1738,29 @@ class LinkedInCommentPoster:
                 if posted < post_count and i < total - 1:
                     wait_time = hb.random_delay(22.0, 48.0)
                     self.logger.info(f"Waiting {wait_time:.0f}s before next post...")
-                    time.sleep(wait_time)
+                    with self._run_step("interpost_wait"):
+                        time.sleep(wait_time)
 
                     # Longer break after a re-rolled number of comments.
                     posts_since_break += 1
                     if posts_since_break >= break_threshold:
                         self.logger.info(
                             f"Taking a natural break after {posts_since_break} comments...")
-                        hb.take_break(self.driver)
+                        with self._run_step("break"):
+                            hb.take_break(self.driver)
                         posts_since_break = 0
                         break_threshold = hb.random_break_threshold()
 
-            return self._report_run(posted, failed, skipped, attempted,
-                                    total, unavailable=unavailable)
+            self.last_run_result = self._report_run(
+                posted, failed, skipped, attempted, total,
+                unavailable=unavailable)
+            return self.last_run_result
 
         finally:
             if self.driver:
                 if not manual_mode:
-                    self.driver.quit()
+                    with self._run_step("teardown"):
+                        self.driver.quit()
                     self.logger.info("Browser closed")
                 else:
                     self.logger.info("Browser left open for manual inspection")
