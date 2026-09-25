@@ -218,24 +218,66 @@ reader, no competing record.
 
 ### 1.6 Reconciliation
 
-`post_store.reconcile()`, run by `load_synced_store()` on **every** store read
-(all pipeline endpoints and the scheduler). Steps, in **execution** order —
-the numbering is historical, the order is load-bearing:
+_Verified against the code: `post_store.reconcile()` and the store methods it
+calls, at `edae1dd`, 2026-09-25._
 
-1. `posted_comments` URLs → `COMMENTED` (never over `UNAVAILABLE`)
-2. **step 5:** `unavailable_posts` URLs → `UNAVAILABLE` (never over `COMMENTED`).
-   Runs before the draft steps because the comment file written before the post
-   was deleted is still on disk and would otherwise pull the record back to
-   `GENERATED`.
-3. **step 2:** `NEW` with a draft on disk → `GENERATED` (drafts collected from
-   `archived/` + `comments_*` + `ready_*`; later sources win)
-4. **step 3:** `GENERATED` with a missing draft → recover from disk, else demote
-   to `NEW`
-5. **step 4:** still-`NEW` with no URL → `TRASH(no_url)`
+**Who runs it.** `post_store.reconcile()` runs inside `load_synced_store()`, which
+the dashboard's read endpoints and the scheduler's `post_comments` job use. The
+`tools/reconcile_bins.py` diagnostic calls it directly. It runs for the LinkedIn
+store only: another platform's store is reconciled only if its caller injects
+a `reconciler=`. The store **writers** (`post_finder`, `comment_generator`, and
+the dashboard's per-post mutation endpoints) open `PostStore` directly and do
+**not** reconcile. Their changes are picked up by the next reconciling read.
 
-Idempotent and conservative: the draft and `no_url` steps only touch records
-still in `NEW`, so manual TRASH is never resurrected and terminal records are
-never downgraded.
+**The steps, in execution order.** The docstring numbers them 1–5, but the code
+runs them **1 → 5 → 2 → 3 → 4**, and that order is load-bearing:
+
+1. **step 1: posted ledger → `COMMENTED`** (`sync_with_progress`). Every URL in
+   `posting_progress.json` `posted_comments` marks its record `COMMENTED` and
+   clears `trash_reason`, **whatever its status**, except a record that is
+   already `COMMENTED` or is `UNAVAILABLE`. URLs are compared *normalised*
+   (query and fragment stripped, trailing slash removed, lowercased).
+2. **step 5: gone posts → `UNAVAILABLE`** (`mark_unavailable`). Every entry in
+   `posting_progress.json` `unavailable_posts` marks its record `UNAVAILABLE`,
+   with `unavailable_reason` and `unavailable_at`, from **any** status except
+   `COMMENTED`, including `TRASH`. The URL is matched exactly (store key or
+   URL), not normalised. It runs before the draft steps because the comment
+   file written before the post was deleted is still on disk, and step 2 would
+   otherwise pull the record back to `GENERATED`.
+3. **step 2: `NEW` with a draft on disk → `GENERATED`** (`mark_generated`).
+   Drafts come from `_collect_drafts`: `archived/*.json`, then `comments_*.json`,
+   then `ready_*.json`, and a later source overwrites an earlier one for the
+   same URL. **Only records currently `NEW`** are touched.
+4. **step 3: `GENERATED` without a draft → recover or demote**
+   (`recover_or_demote_generated`). A `GENERATED` record whose `comment` is
+   empty gets its draft re-attached from the same collection, and stays
+   `GENERATED`. If no draft exists it is demoted to `NEW`, with the comment,
+   metadata and `generated_at` cleared, so it regenerates.
+5. **step 4: `NEW` without a URL → `TRASH(no_url)`** (`trash_urlless_new`).
+   Last, so anything the earlier steps moved out of `NEW` is never trashed.
+
+**What that guarantees, and what it doesn't.**
+- **Statuses** are idempotent: a second run moves no record to a different
+  status.
+- The second run is **not a no-op** while `unavailable_posts` has any entry.
+  Step 5 re-asserts an already-`UNAVAILABLE` record: it re-stamps
+  `unavailable_at` and `updated_at`, counts it again in `stats["unavailable"]`,
+  and that count makes the store save. So a store with any gone post is
+  rewritten on every reconciling read. Every other step does count only real
+  changes.
+- The store is saved only when some step reports a change. Per-step counts come
+  back in `stats`: `commented`, `unavailable`, `generated_from_files`,
+  `recovered_drafts`, `demoted_generated`, `trashed_no_url`.
+- Steps 2 and 4 touch only `NEW`, and step 3 only draftless `GENERATED`, so
+  none of them resurrects a trashed post or downgrades `COMMENTED` or
+  `UNAVAILABLE`.
+- The two ledger steps are **not** restricted that way, on purpose. A post
+  that is on the posted ledger is `COMMENTED` even if it was trashed. A post
+  the poster found gone is `UNAVAILABLE` even if it was trashed.
+- `COMMENTED` and `UNAVAILABLE` never overwrite each other. Step 1 skips an
+  `UNAVAILABLE` record and step 5 skips a `COMMENTED` one, so whichever a record
+  reached first is kept. A URL on both ledgers that reaches its first reconcile
+  still unmarked ends up `COMMENTED`, because step 1 runs first.
 
 Reconcile is a **repair** mechanism for the store-writing stages and the
 **primary** path for the poster's outcomes. If it is routinely changing
