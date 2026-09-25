@@ -222,7 +222,7 @@ _Verified against the code: `post_store.reconcile()` and the store methods it
 calls, at `edae1dd`, 2026-09-25._
 
 **Who runs it.** `post_store.reconcile()` runs inside `load_synced_store()`, which
-the dashboard's read endpoints and the scheduler's `post_comments` job use. The
+the dashboard's read and bulk-action endpoints (generate, save, post) and the scheduler's `post_comments` job use. The
 `tools/reconcile_bins.py` diagnostic calls it directly. It runs for the LinkedIn
 store only: another platform's store is reconciled only if its caller injects
 a `reconciler=`. The store **writers** (`post_finder`, `comment_generator`, and
