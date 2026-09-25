@@ -467,7 +467,7 @@ def check_registry(count_fn: Callable[[str], int], registry: Dict = None) -> Dic
     :class:`dom_probe.UnsupportedSelector`, which is deliberately allowed to
     propagate: it means the offline engine could not read the selector at all,
     and silently scoring that 0 would manufacture the false all-clear this whole
-    module exists to prevent (ARCHITECTURE.md §8.2). "I cannot check this" has to
+    module exists to prevent (docs/ARCHITECTURE.md §8.2). "I cannot check this" has to
     stay louder than "I checked this and found nothing".
     """
     registry = registry if registry is not None else SELECTOR_REGISTRY
