@@ -252,7 +252,7 @@ def _post_comments_job(job_id, profile_name, comments_file, count):
 # read only to *enrich* store records with display metadata (likes/quality) that
 # the trimmed record doesn't keep. The pre-store merge/dedupe/filter helpers that
 # used to build those lists (merge_posts, merge_comments, _pipeline_comment_urls,
-# _posted_urls, _post_score) are gone — see ARCHITECTURE.md "Post lifecycle".
+# _posted_urls, _post_score) are gone — see docs/ARCHITECTURE.md §1 "Post lifecycle".
 
 MERGE_WINDOW_DAYS = 7    # only read scrape files touched in the last week
 

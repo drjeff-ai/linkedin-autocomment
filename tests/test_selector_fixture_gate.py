@@ -7,7 +7,7 @@ catches "someone edited a selector and broke the match", deterministically, in
 CI, in milliseconds. It does **not** prove the selectors still match today's
 live LinkedIn; only the live check (`--post-url` / the feed run) catches
 "LinkedIn changed its DOM". Both failures are real and the two checks are not
-substitutes. See ARCHITECTURE.md §8.3.
+substitutes. See docs/ARCHITECTURE.md §8.3.
 
 Every fixture is hand-authored synthetic markup. No live LinkedIn data.
 """

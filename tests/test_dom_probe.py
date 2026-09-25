@@ -5,7 +5,7 @@ LinkedIn session. It is a deliberate SUBSET of CSS and XPath, so the property
 that matters most is not breadth: it is that anything outside the subset raises
 instead of quietly counting zero. A selector watchdog that answers "0 matches"
 when it means "I did not understand this" reports a clean bill of health for
-something it never tested — the exact failure ARCHITECTURE.md §8.2 records.
+something it never tested — the exact failure docs/ARCHITECTURE.md §8.2 records.
 
 Adopted from the student fork (see .dev/AUDIT_fork_remainder.md), adapted to our
 one-argument ``count(selector)`` contract: the CSS/XPath split is read off the

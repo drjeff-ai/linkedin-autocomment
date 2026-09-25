@@ -139,6 +139,8 @@ scattered across files:
 
 ```
 NEW ──generate──▶ GENERATED ──post──▶ COMMENTED
+ │                    │  │
+ │                    │  └──post gone from LinkedIn──▶ UNAVAILABLE (terminal)
  │                    │
  └────reject──────────┴──────▶ TRASH (ad | job_card | low_quality | no_url |
                                       evaluator_rejected | manual)
@@ -169,6 +171,14 @@ for the counts.** Files on disk are derived output, never state.
 - A post the comment **evaluator** turns down becomes `TRASH(evaluator_rejected)`.
   Without that transition it stayed `NEW` and was re-sent to the LLM — and
   re-billed — on every run. It is restorable like any trashed post.
+- A post that is **gone from LinkedIn** (deleted, taken down, made private)
+  becomes `UNAVAILABLE`. Only the poster can observe that, so it records the URL
+  under `unavailable_posts` in `posting_progress.json` and the store reconciles
+  from there. It is terminal and leaves the posting queue for good, is never set
+  over `COMMENTED`, and is not a failure: the run counts it separately. It is set
+  only on a positive signal (a redirect off the post, or an explicit removed
+  notice). A page that never loads, a login wall, or a page-load timeout stays
+  queued and is retried. See [docs/MAINTENANCE.md](docs/MAINTENANCE.md) §7.
 - **Every tab reads this store, so bin counts and tab contents always agree.**
   Review Posts lists the `NEW` bin (across every scrape, not just the latest
   file); Review Comments lists the `GENERATED` bin with each draft; the Post step
@@ -184,7 +194,9 @@ for the counts.** Files on disk are derived output, never state.
   `uv run python -m linkedin_automation.comment_generator <file> --profile <name>`.
 - `posting_progress.json` stays the authoritative record of what was actually
   posted; the store *reconciles* on every read (`reconcile`): a `NEW` post whose
-  URL was already posted becomes `COMMENTED`, a `NEW` post that already has a
+  URL was already posted becomes `COMMENTED`, a post the poster found gone becomes
+  `UNAVAILABLE` (before the draft steps, so a leftover draft cannot revive it), a
+  `NEW` post that already has a
   draft in a `comments_*`/`ready_*` file becomes `GENERATED`, a `GENERATED` post
   whose draft went missing has it recovered from a comment file (or is demoted to
   `NEW` to regenerate), and any post still `NEW` with no URL becomes

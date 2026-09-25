@@ -13,7 +13,7 @@ it catches a regression where someone edits a selector and breaks the match, and
 it catches it deterministically, in CI, in milliseconds. It does **not** prove
 the selector still matches **today's live LinkedIn**: only the live check
 (`--post-url` / the feed run) can tell you LinkedIn changed its DOM. The two
-failures are different and both checks are needed. See ARCHITECTURE.md §8.3.
+failures are different and both checks are needed. See docs/ARCHITECTURE.md §8.3.
 
 Deliberately a SUBSET of CSS and XPath, not a general engine.
 
@@ -21,7 +21,7 @@ The whole point of a selector watchdog is that it never reports a clean result
 for something it did not actually test. A permissive engine that quietly returns
 0 for a selector it failed to understand would produce exactly the false
 all-clear this project already lived through (the posting path reported HEALTHY
-while every post-detail selector was dead — see ARCHITECTURE.md §8.2). So every
+while every post-detail selector was dead — see docs/ARCHITECTURE.md §8.2). So every
 construct outside the supported grammar raises :class:`UnsupportedSelector`. A
 loud "I cannot check this" is a usable result. A silent zero is not.
 

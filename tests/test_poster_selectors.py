@@ -7,7 +7,7 @@ the same blind spot that let the login form's `[id="username"]` rot unnoticed,
 and the same one that let the comment path break for a month in July.
 
 Nothing here touches a browser. The live half of the gate is a human publishing a
-real post; see ARCHITECTURE.md §8.3.
+real post; see docs/ARCHITECTURE.md §8.3.
 """
 
 import io
