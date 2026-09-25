@@ -180,7 +180,7 @@ def test_reconcile_generated_recovery_is_idempotent(env):
         {"post_url": ACTIVITY.format(1), "comment": "d", "word_count": 1}]})
     first = post_store.reconcile("demo")
     second = post_store.reconcile("demo")
-    assert first == second == {"NEW": 0, "GENERATED": 1, "COMMENTED": 0, "TRASH": 0}
+    assert first == second == {"NEW": 0, "GENERATED": 1, "COMMENTED": 0, "TRASH": 0, "UNAVAILABLE": 0}
 
 
 # ─── The two views coexist (save/archive workflow intact) ─────────────────────

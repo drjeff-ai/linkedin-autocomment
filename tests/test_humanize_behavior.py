@@ -188,8 +188,11 @@ def test_like_post_uses_human_click(monkeypatch, no_sleep, comment_poster):
     monkeypatch.setattr(hb, "human_click", lambda driver, el: clicked.append(el))
     like_btn = MagicMock(name="like_btn")
     comment_poster.driver = MagicMock()
-    comment_poster.wait = MagicMock()
-    comment_poster.wait.until.return_value = like_btn
+    # The button is located by find_like_button now (a bounded poll over
+    # find_elements), not by self.wait. This test is about the CLICK being
+    # humanised, so the lookup is stubbed rather than modelled.
+    monkeypatch.setattr(comment_poster, "find_like_button",
+                        lambda timeout=None: like_btn)
 
     assert comment_poster.like_post() is True
     assert like_btn in clicked

@@ -150,8 +150,8 @@ def test_lifecycle_transitions_are_isolated_per_platform(data_root):
     li_counts = post_store.PostStore(PROFILE, platform=post_store.LINKEDIN).counts()
     x_counts = post_store.PostStore(PROFILE, platform=post_store.X).counts()
 
-    assert li_counts == {"NEW": 1, "GENERATED": 0, "COMMENTED": 0, "TRASH": 0}
-    assert x_counts == {"NEW": 0, "GENERATED": 1, "COMMENTED": 0, "TRASH": 1}
+    assert li_counts == {"NEW": 1, "GENERATED": 0, "COMMENTED": 0, "TRASH": 0, "UNAVAILABLE": 0}
+    assert x_counts == {"NEW": 0, "GENERATED": 1, "COMMENTED": 0, "TRASH": 1, "UNAVAILABLE": 0}
 
 
 def test_the_same_url_in_both_stores_stays_two_independent_records(data_root):

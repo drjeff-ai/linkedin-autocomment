@@ -65,6 +65,18 @@ def _isolate_data_root(tmp_path, monkeypatch):
     monkeypatch.setattr(pm, "DATA_ROOT", str(tmp_path / "data"))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_run_logs(tmp_path, monkeypatch):
+    """Keep the poster's per-run file log out of the real ``logs/`` directory.
+
+    ``LinkedInCommentPoster.run`` opens ``logs/run_<profile>_<ts>.log`` under
+    PROJECT_ROOT (Dispatch 15.1). Any test that drives ``run`` would otherwise
+    litter the working tree with log files.
+    """
+    from linkedin_automation import run_log
+    monkeypatch.setattr(run_log, "logs_dir", lambda: str(tmp_path / "logs"))
+
+
 @pytest.fixture
 def make_comment():
     """Factory for generator-style comment dicts (post_* keys)."""

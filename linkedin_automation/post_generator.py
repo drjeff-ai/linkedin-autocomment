@@ -466,6 +466,10 @@ Length: {length_instruction}"""
             driver = webdriver.Chrome(service=service, options=options)
 
             try:
+                # The same bound as every LinkedIn driver (pm). A stalled
+                # article page raises TimeoutException into the except below.
+                if HAS_PM:
+                    driver.set_page_load_timeout(pm.PAGE_LOAD_TIMEOUT_SECONDS)
                 driver.get(url)
                 # Let JS render. Headless article fetch (not LinkedIn), but jitter
                 # the wait anyway rather than a flat 3s.

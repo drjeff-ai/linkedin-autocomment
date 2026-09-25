@@ -80,6 +80,7 @@ def main():
     print(f"    GENERATED draft recovered from file:   {stats.get('recovered_drafts', 0)}")
     print(f"    GENERATED -> NEW (draft unrecoverable): {stats.get('demoted_generated', 0)}")
     print(f"    NEW -> TRASH (no_url):                 {stats.get('trashed_no_url', 0)}")
+    print(f"    -> UNAVAILABLE (gone from LinkedIn):   {stats.get('unavailable', 0)}")
     if args.backfill_evaluator_rejected:
         print(f"    NEW -> TRASH (evaluator_rejected):     {len(backfilled)}"
               f"{'  [preview only]' if args.dry_run else ''}")

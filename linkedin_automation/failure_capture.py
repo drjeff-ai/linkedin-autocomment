@@ -232,3 +232,64 @@ def capture_submit_state(driver, label, profile_name=None, extra=None,
         return None
     logger.error("Submit-state evidence written: %s", path)
     return path
+
+
+def capture_like_state(driver, label, profile_name=None, buttons=(),
+                       region=None, extra=None):
+    """The Like-miss counterpart of :func:`capture_submit_state`.
+
+    Writes ``failure_<label>_<ts>_likedom.json`` beside the screenshot: every
+    button in the post's action-bar region with its text, aria-label,
+    aria-pressed, disabled state and size, PII-scrubbed at the write boundary.
+    The shape matches ``_submitdom.json`` - a context dict with ``label``,
+    ``timestamp``, ``url``, ``title``, the caller's ``extra``, and a list of
+    per-element entries - so both captures read the same way.
+
+    ``buttons`` are the elements the caller located (it owns the "where is
+    the action bar" question). Returns the path, or None. Never raises.
+    """
+    entries = []
+    for el in buttons or ():
+        try:
+            entries.append({
+                "kind": "action_bar_button",
+                "selector": "region:%s" % (region or "unknown"),
+                "tag": el.tag_name,
+                "text": (el.text or "")[:120],
+                "aria_label": el.get_attribute("aria-label"),
+                "aria_pressed": el.get_attribute("aria-pressed"),
+                "disabled": el.get_attribute("disabled"),
+                "aria_disabled": el.get_attribute("aria-disabled"),
+                "class": (el.get_attribute("class") or "")[:200],
+                "displayed": el.is_displayed(),
+                "enabled": el.is_enabled(),
+                "size": el.size,
+            })
+        except Exception:
+            entries.append({"kind": "action_bar_button",
+                            "error": "element went stale while reading"})
+
+    context = dict(extra or {})
+    context["label"] = label
+    context["timestamp"] = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for key, getter in (("url", lambda: driver.current_url),
+                        ("title", lambda: driver.title)):
+        try:
+            context[key] = getter()
+        except Exception:
+            context[key] = None
+    context["action_bar_region"] = region
+    context["action_bar_buttons"] = entries
+
+    try:
+        out_dir = pm.get_data_dir(profile_name, "failures")
+        path = os.path.join(
+            out_dir, "failure_%s_%s_likedom.json"
+            % (_safe_label(label), context["timestamp"]))
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(scrub_pii(context), f, indent=2, ensure_ascii=False)
+    except Exception:
+        logger.debug("capture_like_state: write failed", exc_info=True)
+        return None
+    logger.warning("Like-miss evidence written: %s", path)
+    return path

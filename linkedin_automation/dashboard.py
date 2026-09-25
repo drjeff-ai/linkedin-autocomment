@@ -476,7 +476,7 @@ def save_posts(profile_name):
     return jsonify({"ok": True, "file": curated_file, "count": len(posts)})
 
 
-# ─── API: Post lifecycle (NEW / GENERATED / COMMENTED / TRASH) ────────────────
+# ─── API: Post lifecycle (NEW / GENERATED / COMMENTED / TRASH / UNAVAILABLE) ──
 
 def _lifecycle_record_view(rec):
     """Trim a store record to the fields the dashboard UI needs."""
@@ -502,7 +502,8 @@ def posts_lifecycle(profile_name):
 
     Migrates the store from legacy files on first use and reconciles COMMENTED
     from posting_progress.json, so the four bins are always consistent with the
-    authoritative posted ledger. Optional ``?status=NEW|GENERATED|COMMENTED|TRASH``
+    authoritative posted ledger. Optional
+    ``?status=NEW|GENERATED|COMMENTED|TRASH|UNAVAILABLE``
     returns just that bin; otherwise all posts are returned grouped under
     ``posts`` keyed by status.
     """

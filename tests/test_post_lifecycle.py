@@ -174,7 +174,7 @@ def test_counts_and_by_status(store):
     store.mark_generated(k, "x")
     store.upsert_scraped(_post(16), status=TRASH, reason=post_store.REASON_AD)
     counts = store.counts()
-    assert counts == {"NEW": 2, "GENERATED": 1, "COMMENTED": 0, "TRASH": 1}
+    assert counts == {"NEW": 2, "GENERATED": 1, "COMMENTED": 0, "TRASH": 1, "UNAVAILABLE": 0}
     # NEW sorted by score desc.
     new_urls = [r["url"] for r in store.by_status(NEW)]
     assert new_urls == [ACTIVITY.format(14), ACTIVITY.format(13)]
@@ -237,7 +237,7 @@ def test_migration_classifies_from_legacy_files(env):
            {"posted_comments": [ACTIVITY.format(1)]})
 
     counts = post_store.migrate_from_legacy("demo")
-    assert counts == {"NEW": 0, "GENERATED": 1, "COMMENTED": 1, "TRASH": 1}
+    assert counts == {"NEW": 0, "GENERATED": 1, "COMMENTED": 1, "TRASH": 1, "UNAVAILABLE": 0}
 
     store = PostStore("demo")
     assert store.get(ACTIVITY.format(1))["status"] == COMMENTED
@@ -253,7 +253,7 @@ def test_migration_is_idempotent(env):
            {"posted_comments": [ACTIVITY.format(1)]})
     first = post_store.migrate_from_legacy("demo")
     second = post_store.migrate_from_legacy("demo")
-    assert first == second == {"NEW": 0, "GENERATED": 0, "COMMENTED": 1, "TRASH": 0}
+    assert first == second == {"NEW": 0, "GENERATED": 0, "COMMENTED": 1, "TRASH": 0, "UNAVAILABLE": 0}
 
 
 def test_load_synced_store_migrates_and_reconciles(env):
@@ -379,7 +379,7 @@ def test_finder_update_post_store_maps_quality_and_trash(env):
     finder._update_post_store()
 
     store = PostStore("demo")
-    assert store.counts() == {"NEW": 1, "GENERATED": 0, "COMMENTED": 0, "TRASH": 2}
+    assert store.counts() == {"NEW": 1, "GENERATED": 0, "COMMENTED": 0, "TRASH": 2, "UNAVAILABLE": 0}
     assert store.get(ACTIVITY.format(1))["status"] == NEW
     assert store.get(ACTIVITY.format(2))["trash_reason"] == "low_quality"
     # The ad (no URL) is hash-keyed and trashed as "ad".

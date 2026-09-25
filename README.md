@@ -80,6 +80,8 @@ linkedin-automation/
 │   ├── post_store.py                   # Central per-profile post lifecycle store
 │   ├── scheduler.py                    # Randomized twice-daily auto-post engine
 │   ├── failure_capture.py              # Screenshots + DOM sidecars on browser errors
+│   ├── run_log.py                      # Per-run file log + per-step timing for the poster
+│   ├── post_urn.py                     # One grammar for LinkedIn post URNs (scraper + poster)
 │   └── selector_health.py              # Detects when LinkedIn's DOM breaks selectors
 ├── tools/                              # standalone maintenance / diagnostic scripts
 │   ├── login_check.py                  # Check/establish a profile's LinkedIn session
@@ -102,6 +104,8 @@ linkedin-automation/
 │   ├── SCHEDULED_POSTING.md            # Buffer/CSV scheduled posting
 │   └── HANDOFF.md                      # Executor pointer: branches, next action
 ├── README.md / CONTRIBUTING.md / LICENSE
+├── logs/                               # run_<profile>_<ts>.log per comment-posting run (git-ignored):
+│                                       #   STEP/POLL/COMMENT/RUN timing lines, file only
 └── data/                               # Auto-created at runtime (git-ignored)
     ├── profiles/
     │   ├── profiles.json               # Encrypted credentials

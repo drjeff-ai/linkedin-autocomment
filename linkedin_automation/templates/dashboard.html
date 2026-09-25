@@ -1064,6 +1064,7 @@ header {
     .lc-generated .lc-dot { background:#f0b95d; }
     .lc-commented .lc-dot { background:#5dd39e; }
     .lc-trash .lc-dot { background:#c96d6d; }
+    .lc-gone .lc-dot { background:#7d8590; }
     .trash-reason { display:inline-block; font-size:0.68rem; font-family:var(--mono);
       padding:0.1rem 0.45rem; border-radius:4px; background:var(--surface-2);
       color:var(--text-dim); border:1px solid var(--border); }
@@ -1080,6 +1081,9 @@ header {
     </div>
     <div class="lc-chip lc-trash" title="Rejected, filtered ads/jobs, or low quality" onclick="showLifecycle('TRASH')">
       <span class="lc-dot"></span>Trash <b id="lcTrash">0</b>
+    </div>
+    <div class="lc-chip lc-gone" title="Deleted or taken down on LinkedIn - nothing to do" onclick="showLifecycle('UNAVAILABLE')">
+      <span class="lc-dot"></span>Gone <b id="lcUnavailable">0</b>
     </div>
   </div>
 
@@ -1868,12 +1872,14 @@ async function loadLifecycle() {
 
 function updateLifecycleChips() {
   const c = lifecycleCounts || {};
-  const total = (c.NEW || 0) + (c.GENERATED || 0) + (c.COMMENTED || 0) + (c.TRASH || 0);
+  const total = (c.NEW || 0) + (c.GENERATED || 0) + (c.COMMENTED || 0) +
+                (c.TRASH || 0) + (c.UNAVAILABLE || 0);
   document.getElementById('lifecycleBar').style.display = total > 0 ? 'flex' : 'none';
   document.getElementById('lcNew').textContent = c.NEW || 0;
   document.getElementById('lcGenerated').textContent = c.GENERATED || 0;
   document.getElementById('lcCommented').textContent = c.COMMENTED || 0;
   document.getElementById('lcTrash').textContent = c.TRASH || 0;
+  document.getElementById('lcUnavailable').textContent = c.UNAVAILABLE || 0;
 }
 
 // The New chip, like its three siblings, does a fresh store read. It used to
@@ -1895,12 +1901,14 @@ async function showLifecycle(status) {
   if (!currentProfile) return;
   activatePanel('panel-lifecycle');
   const list = document.getElementById('lifecycleList');
-  const TITLES = { TRASH: 'Trash', COMMENTED: 'Commented', GENERATED: 'Generated', NEW: 'New' };
+  const TITLES = { TRASH: 'Trash', COMMENTED: 'Commented', GENERATED: 'Generated',
+                   NEW: 'New', UNAVAILABLE: 'Gone' };
   const SUBTITLES = {
     TRASH: 'Posts that were filtered or rejected, and why — restore any wrongly filtered',
     COMMENTED: 'Posts you have already commented on',
     GENERATED: 'Posts with a drafted comment awaiting posting (from the lifecycle store)',
-    NEW: 'Scraped posts not acted on yet'
+    NEW: 'Scraped posts not acted on yet',
+    UNAVAILABLE: 'Posts that are no longer on LinkedIn — deleted or taken down. Nothing to do; they are never retried'
   };
   document.getElementById('lifecycleTitle').textContent = TITLES[status] || status;
   document.getElementById('lifecycleSubtitle').textContent = SUBTITLES[status] || '';
@@ -1922,7 +1930,8 @@ function renderLifecycle(status, posts) {
     const emptyMsg = {
       TRASH: 'No filtered or rejected posts.',
       GENERATED: 'No drafted comments awaiting posting.',
-      COMMENTED: 'No commented posts yet.'
+      COMMENTED: 'No commented posts yet.',
+      UNAVAILABLE: 'No posts have gone missing from LinkedIn.'
     }[status] || 'Nothing here yet.';
     list.innerHTML = `<div class="empty"><div class="empty-icon">◇</div><h3>Nothing here</h3>` +
       `<p>${emptyMsg}</p></div>`;

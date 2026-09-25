@@ -43,6 +43,15 @@ EXIT_ERROR = 1
 EXIT_LOGIN_REQUIRED = 2
 
 
+# ─── Page-load bound ──────────────────────────────────────────────────────────
+#: The longest any single navigation (driver.get) may block, in seconds. Set on
+#: every driver this project builds. Without it Selenium's default applies -
+#: 300 seconds - and one stalled page silently eats five minutes of a run.
+#: A navigation that hits this raises TimeoutException; callers treat that as
+#: "do not know, retry later", never as "the post is gone".
+PAGE_LOAD_TIMEOUT_SECONDS = 30
+
+
 class LoginRequiredError(RuntimeError):
     """Raised when a LinkedIn session could not be established.
 
@@ -463,8 +472,9 @@ def create_driver(profile_name: str = None, headless: bool = False) -> Tuple[web
     
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
+    driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT_SECONDS)
     driver.maximize_window()
-    
+
     # Anti-detection JS
     driver.execute_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"

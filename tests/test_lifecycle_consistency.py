@@ -370,11 +370,11 @@ def test_new_chip_reads_the_server_like_every_other_chip(client_source):
     postsData cache — the reason the tab showed nothing while the chip said 49."""
     chips = re.findall(r'class="lc-chip lc-(\w+)"[^>]*onclick="([^"]+)"', client_source)
     handlers = dict(chips)
-    assert set(handlers) == {"new", "generated", "commented", "trash"}
+    assert set(handlers) == {"new", "generated", "commented", "trash", "gone"}
     assert handlers["new"] == "showNewPosts()", (
         "the New chip must do a fresh store read, not render the client cache"
     )
-    for status in ("generated", "commented", "trash"):
+    for status in ("generated", "commented", "trash", "gone"):
         assert handlers[status].startswith("showLifecycle(")
 
 

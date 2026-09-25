@@ -109,7 +109,7 @@ def test_reconcile_trashes_urlless_new(env):
     store.save()
 
     counts = post_store.reconcile("demo")
-    assert counts == {"NEW": 1, "GENERATED": 0, "COMMENTED": 0, "TRASH": 1}
+    assert counts == {"NEW": 1, "GENERATED": 0, "COMMENTED": 0, "TRASH": 1, "UNAVAILABLE": 0}
     assert PostStore("demo").get("hash:2")["trash_reason"] == REASON_NO_URL
 
 
@@ -129,7 +129,7 @@ def test_reconcile_urlless_idempotent(env):
     store.save()
     first = post_store.reconcile("demo")
     second = post_store.reconcile("demo")
-    assert first == second == {"NEW": 0, "GENERATED": 0, "COMMENTED": 0, "TRASH": 1}
+    assert first == second == {"NEW": 0, "GENERATED": 0, "COMMENTED": 0, "TRASH": 1, "UNAVAILABLE": 0}
 
 
 def test_restore_then_reconcile_retrashes_urlless(env):

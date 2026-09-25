@@ -45,8 +45,18 @@ NEW = "NEW"
 GENERATED = "GENERATED"
 COMMENTED = "COMMENTED"
 TRASH = "TRASH"
+# The post is GONE from LinkedIn - deleted, taken down, or made private. A
+# TERMINAL state, and deliberately not TRASH: trash means "we judged this not
+# worth commenting on", and its auto reasons are restorable so a re-scrape can
+# let the post back in. Neither is true here. There is nothing to reconsider
+# and nothing to re-scrape; the post does not exist.
+#
+# Also not FAILED: nothing failed. The tool did exactly the right thing and the
+# post was not there. Counting it as a failure buries real failures in noise
+# and makes a clean run look broken.
+UNAVAILABLE = "UNAVAILABLE"
 
-STATUSES = (NEW, GENERATED, COMMENTED, TRASH)
+STATUSES = (NEW, GENERATED, COMMENTED, TRASH, UNAVAILABLE)
 
 # ─── Platforms ────────────────────────────────────────────────────────────────
 
@@ -77,7 +87,7 @@ AUTO_REASONS = (REASON_AD, REASON_JOB, REASON_LOW_QUALITY, REASON_NO_URL,
 
 # Rank used so re-scrape / migration never downgrade a post we've acted on. A
 # higher rank "wins". Manual trash is handled separately (it is sticky).
-_RANK = {TRASH: 0, NEW: 1, GENERATED: 2, COMMENTED: 3}
+_RANK = {TRASH: 0, NEW: 1, GENERATED: 2, COMMENTED: 3, UNAVAILABLE: 4}
 
 # 2 adds ``reviewed_at`` — when the user last approved a GENERATED draft in the
 # Review Comments step. Records written by v1 lack the field; ``_load`` backfills
@@ -231,7 +241,11 @@ class PostStore:
             existing.update(fields)
             existing["key"] = key
             # Protect acted-on / user-decided records from a re-scrape.
-            if existing.get("status") in (COMMENTED, GENERATED) or self._is_manual_trash(existing):
+            # UNAVAILABLE is in here because it is TERMINAL: the post is gone,
+            # so a stale scrape file mentioning it must not put it back in the
+            # queue to be tried (and to burn the navigation timeout) again.
+            if existing.get("status") in (COMMENTED, GENERATED, UNAVAILABLE) \
+                    or self._is_manual_trash(existing):
                 if save:
                     self.save()
                 return key
@@ -294,6 +308,27 @@ class PostStore:
         # for the same post had been — otherwise a regenerated comment would skip
         # the Review step silently.
         rec["reviewed_at"] = None
+        rec["updated_at"] = _now()
+        if save:
+            self.save()
+        return True
+
+    def mark_unavailable(self, key_or_url: str, reason: str = None,
+                         save: bool = False) -> bool:
+        """The post is gone from LinkedIn. Terminal.
+
+        Never applied over COMMENTED: that we commented is history, and it
+        stays true after the post comes down. Everything else moves, including
+        TRASH - a removed post is removed whatever we previously thought of it.
+        """
+        rec = self._resolve(key_or_url)
+        if rec is None:
+            return False
+        if rec.get("status") == COMMENTED:
+            return False
+        rec["status"] = UNAVAILABLE
+        rec["unavailable_reason"] = reason or "post not reachable"
+        rec["unavailable_at"] = _now()
         rec["updated_at"] = _now()
         if save:
             self.save()
@@ -446,7 +481,10 @@ class PostStore:
         changed = 0
         for rec in self.posts.values():
             url = (rec.get("url") or "").strip()
-            if url and self._match_url(url) in posted and rec.get("status") != COMMENTED:
+            # UNAVAILABLE is excluded as well as already-COMMENTED: a gone
+            # post has no business being resurrected by a stale ledger entry.
+            if (url and self._match_url(url) in posted
+                    and rec.get("status") not in (COMMENTED, UNAVAILABLE)):
                 rec["status"] = COMMENTED
                 rec["trash_reason"] = None
                 rec["commented_at"] = rec.get("commented_at") or _now()
@@ -678,6 +716,10 @@ def reconcile(profile_name: str = None, store: PostStore = None,
          (status/draft got separated) has its draft *recovered* from a comment
          file if one exists, else is *demoted* back to NEW so it regenerates.
       4. **no_url** — any post still NEW with no URL is not actionable → TRASH.
+      5. **UNAVAILABLE** — any post the poster found GONE from LinkedIn
+         (recorded in ``posting_progress.json`` under ``unavailable_posts``).
+         Terminal, like COMMENTED: reconciled FROM the poster's record rather
+         than kept as a competing one, so the two cannot diverge.
 
     Idempotent and conservative: steps 2 and 4 only touch records still NEW, so a
     manually-trashed post is never resurrected and COMMENTED/GENERATED are never
@@ -698,6 +740,26 @@ def reconcile(profile_name: str = None, store: PostStore = None,
         posted = (_read_json(progress_file) or {}).get("posted_comments", []) or []
     commented = store.sync_with_progress(posted)
     changed += commented
+
+    # 5 (run here, before the draft steps, so a gone post is never revived into
+    # GENERATED by a draft that is still sitting on disk for it).
+    #
+    # The poster writes the URL here when a post turns out to be gone; the
+    # store reconciles from that, exactly as COMMENTED is reconciled from
+    # posted_comments. One writer, one reader, no competing record.
+    unavailable_entries = []
+    if os.path.exists(progress_file):
+        unavailable_entries = (_read_json(progress_file) or {}).get(
+            "unavailable_posts", []) or []
+    gone = 0
+    for entry in unavailable_entries:
+        url = entry.get("url") if isinstance(entry, dict) else entry
+        reason = (entry.get("reason") if isinstance(entry, dict)
+                  else "post not reachable")
+        if url and store.mark_unavailable(url, reason=reason):
+            gone += 1
+    stats["unavailable"] = gone
+    changed += gone
 
     # Draft lookup shared by steps 2 and 3.
     drafts = _collect_drafts(pm.get_comments_dir(profile_name))
@@ -733,9 +795,10 @@ def reconcile(profile_name: str = None, store: PostStore = None,
     if changed:
         store.save()
         logger.info(
-            "reconcile(%s): commented=%d generated=%d recovered=%d demoted=%d "
-            "no_url=%d; counts now %s", profile_name, commented, generated,
-            recovered, demoted, trashed_no_url, store.counts())
+            "reconcile(%s): commented=%d unavailable=%d generated=%d "
+            "recovered=%d demoted=%d no_url=%d; counts now %s", profile_name,
+            commented, gone, generated, recovered, demoted, trashed_no_url,
+            store.counts())
     return store.counts()
 
 
