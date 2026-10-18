@@ -18,11 +18,15 @@ around that one fact:
   defense, but a comment can land on LinkedIn while ``post_comment()``'s own
   verifier reports False (a false-negative, MAINTENANCE §6.5) — leaving no
   ledger entry at all. So before ever calling ``post_comment()``, this also
-  asks the thread itself via the main engagement path's own
-  ``already_commented_here()`` (MAINTENANCE §6.6, reused rather than
-  reimplemented): a positive finding records the ledger entry and skips the
-  post, exactly the "ask the thread, not our records" guard the main path
-  already relies on.
+  asks the thread itself via ``first_comment_already_present()``
+  (MAINTENANCE §6.6's dated correction): a positive finding — our link/text
+  found inside a REAL rendered comment entry, never the post card or the
+  author byline — records the ledger entry and skips the post. This is
+  deliberately NOT the main engagement path's ``already_commented_here()``:
+  that check's "'• You'" marker means "we already commented" on someone
+  else's post, but means only "this post is ours" here, since this path's
+  post is always our own. Reusing it (Dispatch 31) produced a confirmed live
+  false positive before this correction.
 
 It composes ``LinkedInCommentPoster``'s primitives rather than calling
 ``post_single_comment``, for two reasons: that method always likes the post, and
@@ -160,13 +164,21 @@ def post_first_comment(permalink, comment_link, poster=None, ledger=None,
             return _result(FAILED, permalink, comment_link,
                            "could not open the published post at %s" % permalink)
 
-        # BEFORE typing: is this comment already on the thread? The same
-        # §6.6 guard the main engagement path uses (ask the thread, not our
-        # own records) - a retry after a false-negative verify must not
-        # double-comment on our own post. Conservative in the safe
-        # direction: an unreadable thread returns False and posting
-        # proceeds (comment_poster.already_commented_here's own contract).
-        already, why = poster.already_commented_here(comment_link)
+        # BEFORE typing: is this comment already on the thread? NOT
+        # already_commented_here() - MEASURED 2026-10-18 (Dispatch 32,
+        # MAINTENANCE §6.6's dated correction): that check's "• You" marker
+        # means "we left a comment here" on someone else's post, but "this
+        # post is ours" on our own - and this path's post is always ours, so
+        # the marker alone is present before any comment exists. Reusing it
+        # (Dispatch 31) produced a confirmed false positive on a real post
+        # (urn:li:share:0000000000000000000 stands in for it here, per
+        # PRINCIPLES §10 - no real identifiers in committed source): row
+        # marked COMMENTED, ledger written, zero actual comments.
+        # first_comment_already_present() requires the link/text to be found
+        # INSIDE a real rendered comment entry, never the post card or the
+        # author byline. Conservative in the same safe direction as §6.6: an
+        # unreadable thread returns False and posting proceeds.
+        already, why = poster.first_comment_already_present(comment_link)
         if already:
             logger.info("First comment already on %s - %s", permalink, why)
             ledger.record(permalink, comment_link)

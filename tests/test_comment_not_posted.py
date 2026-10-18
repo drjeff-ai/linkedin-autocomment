@@ -1328,6 +1328,99 @@ def test_the_measured_liked_label_is_in_the_state_list_not_the_target_list(poste
         poster.LIKE_BUTTON_SELECTORS
 
 
+# ─── the first-comment duplicate guard (Dispatch 32) ────────────────────────
+#
+# MEASURED 2026-10-17 on a real post (urn:li:share:0000000000000000000 stands
+# in for it here, and the author byline/post text below are fabricated test
+# data - per PRINCIPLES §10, no real identifiers or member content in
+# committed source): Dispatch 31 reused already_commented_here() on the
+# first-comment path (which always targets OUR OWN post). Its '• You' marker
+# means "we commented here" on someone else's post, but "this post is ours"
+# on our own - present from the moment the post exists, before any comment is
+# posted. A live run produced a confirmed false positive: a post with ZERO
+# comments read as already-commented, from the author byline alone - row
+# marked COMMENTED, ledger written, nothing actually posted.
+#
+# first_comment_already_present() replaces that call on the first-comment
+# path only (MAINTENANCE §6.6's dated correction). Positive proof requires
+# the link/text to be found INSIDE a real comment entry
+# (div[id^='replaceableComment_'], MEASURED 2026-10-18 against a post dev has
+# genuinely commented on before and the zero-comment post that exposed the
+# bug) - never the post card, never the author byline.
+
+OWN_POST_NO_COMMENTS_HTML = """
+<div role="listitem">
+  <span>Jamie Lee</span>
+  <span> • You</span>
+  <p>A fabricated test post body</p>
+</div>
+"""
+
+OWN_POST_WITH_FIRST_COMMENT_HTML = """
+<div role="listitem">
+  <span>Jamie Lee</span>
+  <span> • You</span>
+  <p>A fabricated test post body</p>
+  <div id="replaceableComment_urn:li:comment:(activity:111,222)">
+    <span>Jamie Lee</span>
+    <span> • You</span>
+    <p>https://example.com/our-first-comment-link</p>
+  </div>
+</div>
+"""
+
+
+def test_first_comment_already_present_is_true_when_the_link_is_in_a_real_comment_entry(
+        poster):
+    """The matching True case (§6.5)."""
+    poster.driver = ActionBarDriver(OWN_POST_WITH_FIRST_COMMENT_HTML)
+    found, why = poster.first_comment_already_present(
+        "https://example.com/our-first-comment-link")
+    assert found is True
+    assert "comment entry" in why
+
+
+def test_first_comment_already_present_is_false_on_a_zero_comment_post(poster):
+    """The matching False case (§6.5) - and exactly the page shape that
+    produced Dispatch 31's false positive, now correctly reading as
+    not-found."""
+    poster.driver = ActionBarDriver(OWN_POST_NO_COMMENTS_HTML)
+    found, why = poster.first_comment_already_present(
+        "https://example.com/our-first-comment-link")
+    assert found is False
+
+
+def test_the_post_cards_own_text_is_never_mistaken_for_a_comment(poster):
+    """The '• You' byline and the post's own body sit OUTSIDE any
+    div[id^='replaceableComment_'] entry - searching for text that genuinely
+    IS on the page, but not inside a comment entry, must still be False, even
+    when the SAME page also carries a real comment entry elsewhere. This is
+    the precise scoping Dispatch 31 lacked: a selector that only ever matches
+    real comment entries cannot be fooled by post-card text no matter what
+    else is on the page."""
+    poster.driver = ActionBarDriver(OWN_POST_WITH_FIRST_COMMENT_HTML)
+    found, why = poster.first_comment_already_present("A fabricated test post body")
+    assert found is False
+
+
+def test_an_unreadable_page_returns_false_not_true(poster):
+    """§6.6's conservative direction, reused here: inability to read the
+    page must never read as a positive duplicate finding."""
+    class Broken:
+        def find_elements(self, by, selector):
+            raise RuntimeError("DOM not ready")
+    poster.driver = Broken()
+    found, why = poster.first_comment_already_present(
+        "https://example.com/our-first-comment-link")
+    assert found is False
+
+
+def test_an_empty_needle_is_never_a_match(poster):
+    poster.driver = ActionBarDriver(OWN_POST_WITH_FIRST_COMMENT_HTML)
+    found, why = poster.first_comment_already_present("")
+    assert found is False
+
+
 # ─── the comment box is watched for, not slept through ───────────────────────
 
 def test_the_comment_input_is_found_by_polling(poster):

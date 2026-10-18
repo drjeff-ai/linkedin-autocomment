@@ -376,6 +376,31 @@ store, a restored archive, a re-scrape, a second machine, and bugs not yet
 found. Be conservative in the safe direction — an *unreadable* thread should not
 block posting, or an unrelated DOM change silently stops the tool.
 
+**DATED CORRECTION, 2026-10-18 (Dispatch 32).** `'• You'` identifies our
+**authorship** of the post, not our **comment** on it — so it is evidence only
+where the post is not ours, which is the only case this section was ever
+written for (the main engagement path scrapes someone else's feed and never
+targets our own posts). Dispatch 31 moved this same check
+(`already_commented_here()`) onto the first-comment path
+(`first_comment.py`), where the post being checked is **always ours**. There
+`'• You'` is present from the moment the post exists, before any comment is
+posted, so the guard returned a guaranteed false positive. MEASURED
+2026-10-17 on a real post (`urn:li:share:0000000000000000000` stands in for
+it here, per PRINCIPLES §10 — no real identifiers in committed docs): the
+row was marked `COMMENTED`, the ledger gained an entry, and the post had
+zero actual comments.
+
+**A guard moved to a new path must have its premise re-checked there.** The
+fix (Dispatch 32) is not a wider check on this method — it is a different
+method, `first_comment_already_present()`, used only on the first-comment
+path, which never reads `'• You'` at all. It requires POSITIVE proof: the
+comment link/text found inside a real rendered comment entry
+(`div[id^='replaceableComment_']`, MEASURED 2026-10-18 — matches exactly one
+element per real comment, and zero on a comment-free post), never the post
+card and never the author byline. Same conservative direction as this
+section's own rule: an unreadable thread returns "not found" and posting
+proceeds.
+
 ### 6.7 Where the evidence lives
 
 Failures write to `data/<profile>/failures/`:
