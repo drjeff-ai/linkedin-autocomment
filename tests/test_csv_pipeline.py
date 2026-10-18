@@ -71,19 +71,19 @@ class FakeBuffer:
 
 
 class FakePoster:
-    def __init__(self, comment_ok=True, already_commented=False):
+    def __init__(self, comment_ok=True, comment_present=False):
         self.comment_ok = comment_ok
-        self.already_commented = already_commented
+        self.comment_present = comment_present
         self.comments = []
         self.driver = None
 
     def navigate_to_post(self, url):
         return True
 
-    def already_commented_here(self, comment_text=None):
-        if self.already_commented:
-            return True, "already on this thread"
-        return False, "no comment of ours found on this thread"
+    def first_comment_already_present(self, needle):
+        if self.comment_present:
+            return True, "found inside a rendered comment entry"
+        return False, "not found in any rendered comment entry"
 
     def post_comment(self, text):
         self.comments.append(text)
@@ -323,7 +323,7 @@ def test_a_thread_already_carrying_our_comment_reaches_commented(state,
     monkeypatch.setattr(cp.bc, "get_post", fake.get_post)
     monkeypatch.setattr(cp, "verify_identity", lambda *a, **k: (True, "ok"))
     cp.schedule_pass([make_row()], "chan", state, now=NOW)
-    poster = FakePoster(already_commented=True)
+    poster = FakePoster(comment_present=True)
     out = cp.comment_pass(state, poster=poster, ledger=ledger)
     assert out[0]["status"] == cp.COMMENTED
     assert poster.comments == [], "post_comment must not be called"
@@ -347,7 +347,7 @@ def test_a_comment_failed_retry_whose_comment_actually_landed_is_not_doubled(
     cp.comment_pass(state, poster=FakePoster(comment_ok=False), ledger=ledger)
     assert not ledger.already_posted(PERMALINK)
 
-    retry_poster = FakePoster(already_commented=True)
+    retry_poster = FakePoster(comment_present=True)
     out = cp.comment_pass(state, poster=retry_poster, ledger=ledger)
     assert out[0]["status"] == cp.COMMENTED
     assert retry_poster.comments == [], "must not double-comment"

@@ -202,6 +202,62 @@ class LinkedInCommentPoster:
     # only; the text match against the list is the real proof.
     POSTED_COMMENT_CONTAINER_SELECTOR = "[data-testid*='commentList']"
 
+    # MEASURED 2026-10-18 (Dispatch 32). A REAL per-comment entry, scoped to
+    # exclude both the post card and POSTED_COMMENT_CONTAINER_SELECTOR's whole
+    # feed-update wrapper (post card + comments together - see that
+    # constant's own comment). Each ``div[id^='replaceableComment_']`` is one
+    # rendered comment's own subtree: on a post with N comments this matches
+    # exactly N elements, each one's .text is JUST that comment (author,
+    # byline, body) - never the post's own card. On a post with ZERO
+    # comments this matches ZERO elements. Confirmed live on both a post
+    # dev has genuinely commented on before (12 matches, including dev's own
+    # prior comment, correctly distinct from the post author's own byline)
+    # and the zero-comment post that exposed Dispatch 31's false positive (0
+    # matches). Used only by first_comment_already_present() below - the main
+    # engagement path's already_commented_here() is unchanged (MAINTENANCE
+    # §6.6's dated correction: that path's "• You" check is sound there
+    # because it never targets our own post).
+    FIRST_COMMENT_ENTRY_SELECTOR = "div[id^='replaceableComment_']"
+
+    def first_comment_already_present(self, needle):
+        """Is ``needle`` (our first-comment link/text) already inside a REAL
+        rendered comment entry on this post?
+
+        Returns ``(True, reason)`` only on POSITIVE proof: the text found
+        inside an actual comment entry - never the post card, never the
+        author byline. Unlike already_commented_here(), there is no
+        "'• You' means we already commented" shortcut here: on this path the
+        post is always OURS, so our own authorship byline reads "• You"
+        before any comment exists, which is exactly the false positive
+        measured 2026-10-17 on a real post (urn:li:share:0000000000000000000
+        stands in for it here, per PRINCIPLES §10): row marked COMMENTED,
+        ledger written, zero actual comments.
+
+        Conservative in the SAFE direction, same as §6.6: ZERO matches on
+        FIRST_COMMENT_ENTRY_SELECTOR always means "not found, proceed with
+        posting" - whether that's because the post genuinely has no comments
+        yet, or because the selector could not read an unfamiliar DOM shape.
+        Both cases must behave the same way: a false "not found" costs one
+        harmless post attempt; a false "found" silently and permanently
+        loses our first comment.
+        """
+        needle = " ".join((needle or "").split())
+        if not needle:
+            return False, "nothing to search for"
+        try:
+            entries = self.driver.find_elements(
+                By.CSS_SELECTOR, self.FIRST_COMMENT_ENTRY_SELECTOR)
+        except Exception:
+            return False, "comment entries not readable"
+        for el in entries:
+            try:
+                text = " ".join((el.text or "").split())
+            except Exception:
+                continue
+            if needle and needle in text:
+                return True, "found inside a rendered comment entry"
+        return False, "not found in any rendered comment entry"
+
     def __init__(self, profile_name=None, allow_production=False):
         self.profile_name = profile_name
         self.profile = None  # Set during setup_driver
