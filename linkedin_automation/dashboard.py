@@ -27,6 +27,8 @@ from . import profile_manager as pm
 from . import post_store
 from . import scheduler as scheduler_mod
 from . import post_drain as post_drain_mod
+from . import first_comment_drain as first_comment_drain_mod
+from . import first_comment as fc
 from . import buffer_client
 from . import csv_pipeline
 
@@ -2148,6 +2150,138 @@ def drain_run_now(profile_name):
     return jsonify({"ok": True, "result": result})
 
 
+# --- First-comment drain (places first comments on our own PUBLISHED rows) --
+#
+# A THIRD background feeder, and the odd one out: post_drain and the scheduler
+# above both call Buffer only or route through run_job's existing categories.
+# This one drives a REAL BROWSER (first_comment.py -> comment_poster.py), so
+# it is gated by can_start_browser_task - the SAME lock the comment poster and
+# the scheduler's post job use - never can_start_scheduling_task, which guards
+# a completely different collision (two schedule_pass calls, not two browser
+# sessions).
+
+def _first_comment_drain_job(job_id, profile_name):
+    """Run the first-comment CLI as a subprocess - mirrors _post_comments_job
+    and _scrape_job: a browser-driving action gets its own process, never an
+    in-process call from the Flask thread.
+    """
+    try:
+        resolved = pm.resolve_scheduled(profile_name, pm.SCHEDULED_DEFAULT_PLATFORM)
+    except pm.ScheduledConfigError as exc:
+        log_job(job_id, "REFUSED: %s" % exc)
+        raise RuntimeError(str(exc))
+
+    expect_identity = resolved.get("identity_slug")
+    if not expect_identity:
+        msg = ("no identity_slug configured for profile %r - refusing to run "
+              "the first-comment pass" % profile_name)
+        log_job(job_id, "REFUSED: %s" % msg)
+        raise RuntimeError(msg)
+
+    log_job(job_id, "Running the first-comment pass for %s" % profile_name)
+    cmd = [
+        sys.executable, "-m", "tools.run_scheduled_posts", "comment",
+        "--profile", profile_name,
+        "--expect-identity", expect_identity,
+        # See _scrape_job: the dashboard is always an authorized caller.
+        "--allow-production",
+    ]
+    returncode, _ = run_subprocess(job_id, cmd)
+
+    if returncode == pm.EXIT_LOGIN_REQUIRED:
+        raise pm.LoginRequiredError(
+            "Login required. Run: python tools/login_check.py --profile %s"
+            % profile_name)
+    # 1 means some row went COMMENT_FAILED - csv_pipeline.comment_pass already
+    # recorded that on the row and moved on (the soft-failure contract this
+    # drain exists to preserve). Only an exit code OUTSIDE {0, 1} - a refusal
+    # (identity/production guard) or a crash - is a job failure.
+    if returncode not in (0, 1):
+        raise RuntimeError("comment pass exited with code %d" % returncode)
+
+    log_job(job_id, "Finished the first-comment pass")
+    return {"returncode": returncode}
+
+
+def _first_comment_drain_submit(profile_name):
+    """Start the first-comment pass unless the browser lock is held."""
+    if not can_start_browser_task(profile_name):
+        logger.info("FirstCommentDrain: browser busy for %s, pass not submitted",
+                    profile_name)
+        return None
+    job_id = f"first_comment_drain_{profile_name}_{int(time.time())}"
+    run_job(job_id, _first_comment_drain_job, profile_name,
+            profile=profile_name, task_type="browser",
+            category=first_comment_drain_mod.JOB_CATEGORY)
+    return job_id
+
+
+def _first_comment_drain_state_fn(profile_name):
+    return csv_pipeline.PipelineState(profile_name=profile_name)
+
+
+def _first_comment_drain_ledger_fn(profile_name):
+    return fc.FirstCommentLedger(profile_name=profile_name)
+
+
+first_comment_drain_engine = first_comment_drain_mod.FirstCommentDrain(
+    state_fn=_first_comment_drain_state_fn,
+    ledger_fn=_first_comment_drain_ledger_fn,
+    browser_available=can_start_browser_task,
+    submit_comment_pass=_first_comment_drain_submit,
+    list_profiles=lambda: list(pm.list_profiles().get("profiles", {}).keys()),
+)
+
+
+@app.route('/api/first-comment-drain/<profile_name>/status', methods=['GET'])
+def first_comment_drain_status(profile_name):
+    """GET - first-comment-drain state: on/off, interval/delay/jitter, how
+    many PUBLISHED rows are waiting on their first comment, last/next check."""
+    return jsonify(first_comment_drain_engine.status(profile_name))
+
+
+@app.route('/api/first-comment-drain/<profile_name>/toggle', methods=['POST'])
+def first_comment_drain_toggle(profile_name):
+    """POST - turn the first-comment drain on or off. Body: ``{"enabled": bool}``."""
+    body = request.json or {}
+    enabled = body.get("enabled")
+    if enabled is None:
+        return jsonify({"error": "enabled (bool) is required"}), 400
+    if enabled:
+        # Switching on a feeder that cannot possibly run would show a green
+        # light and do nothing at all - same guard the post drain's toggle
+        # applies for its own Buffer channel requirement.
+        try:
+            resolved = pm.resolve_scheduled(profile_name, pm.SCHEDULED_DEFAULT_PLATFORM)
+        except pm.ScheduledConfigError as exc:
+            return jsonify({"error": str(exc)}), 400
+        if not resolved.get("identity_slug"):
+            return jsonify({"error": "No identity_slug configured for this "
+                                     "profile. Set scheduled_posting."
+                                     "identity_slug before enabling the "
+                                     "first-comment drain."}), 400
+    drain = first_comment_drain_engine.toggle(profile_name, bool(enabled))
+    return jsonify({"ok": True, "drain": drain})
+
+
+@app.route('/api/first-comment-drain/<profile_name>/config', methods=['POST'])
+def first_comment_drain_config_route(profile_name):
+    """POST - deep-merge a partial config (interval/delay/jitter minutes)."""
+    body = request.json
+    if not isinstance(body, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
+    drain = first_comment_drain_engine.update_config(profile_name, body)
+    return jsonify({"ok": True, "drain": drain})
+
+
+@app.route('/api/first-comment-drain/<profile_name>/run-now', methods=['POST'])
+def first_comment_drain_run_now(profile_name):
+    """POST - run one first-comment-drain check immediately, ignoring the
+    interval (the delay still applies - this does not bypass it)."""
+    result = first_comment_drain_engine.run_now(profile_name)
+    return jsonify({"ok": True, "result": result})
+
+
 @app.route('/api/scheduler/<profile_name>/status', methods=['GET'])
 def scheduler_status(profile_name):
     """GET — scheduler state: master flag, per-job windows with today's rolled
@@ -2217,4 +2351,5 @@ if __name__ == '__main__':
     if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         scheduler_engine.start()
         drain_engine.start()
+        first_comment_drain_engine.start()
     app.run(debug=True, port=6500)

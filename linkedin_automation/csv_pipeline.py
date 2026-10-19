@@ -671,6 +671,39 @@ def held_rows(state):
     return [dict(v.get("row") or {}) for _k, v in waiting]
 
 
+def rows_awaiting_first_comment(state, ledger):
+    """(key, entry) pairs for PUBLISHED rows whose first comment is still owed.
+
+    A row qualifies when it is PUBLISHED, carries a first_comment_link, has a
+    permalink (should always be true once PUBLISHED - see comment_pass), and
+    that permalink is not yet in the FirstCommentLedger. These are exactly the
+    conditions comment_pass itself checks before calling post_first_comment,
+    exposed here so the first-comment drain (first_comment_drain.py) can ask
+    "is there anything waiting on its first comment" without driving a browser
+    or calling Buffer - the same cheap-test-first shape post_drain.py uses for
+    "nothing held".
+
+    Returns full state entries, not just the source row (unlike held_rows/
+    pending_rows), because the caller needs ``updated_at`` to judge how long a
+    row has been PUBLISHED - the first-comment drain's delay is measured from
+    it.
+    """
+    out = []
+    for key, entry in state.rows.items():
+        if entry.get("status") != PUBLISHED:
+            continue
+        link = (entry.get("first_comment_link") or "").strip()
+        if not link:
+            continue
+        permalink = entry.get("permalink")
+        if not permalink:
+            continue
+        if ledger.already_posted(permalink):
+            continue
+        out.append((key, entry))
+    return out
+
+
 def delete_row(state, key):
     """Remove a row from OUR queue. Returns the removed entry, or None.
 
