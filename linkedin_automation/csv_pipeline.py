@@ -671,26 +671,56 @@ def held_rows(state):
     return [dict(v.get("row") or {}) for _k, v in waiting]
 
 
-def rows_awaiting_first_comment(state, ledger):
-    """(key, entry) pairs for PUBLISHED rows whose first comment is still owed.
+#: Statuses a row can be in and still be owed a first comment. Matches
+#: comment_pass's own retry set MINUS SCHEDULED: a SCHEDULED row normally
+#: has no permalink yet (comment_pass still has to poll Buffer for one), so
+#: it can usually never pass the permalink check below anyway - keeping it
+#: out of this set makes that the common case explicit. It is not the ONLY
+#: thing excluding a permalink-less row, though: comment_pass's identity-
+#: guard failure path marks EVERY pending row COMMENT_FAILED in one sweep
+#: (see comment_pass), including a still-permalink-less SCHEDULED one - for
+#: that row, it really is the permalink check below doing the excluding,
+#: this status filter alone would have let it through.
+FIRST_COMMENT_OWED_STATES = (PUBLISHED, COMMENT_FAILED)
 
-    A row qualifies when it is PUBLISHED, carries a first_comment_link, has a
-    permalink (should always be true once PUBLISHED - see comment_pass), and
-    that permalink is not yet in the FirstCommentLedger. These are exactly the
-    conditions comment_pass itself checks before calling post_first_comment,
-    exposed here so the first-comment drain (first_comment_drain.py) can ask
-    "is there anything waiting on its first comment" without driving a browser
-    or calling Buffer - the same cheap-test-first shape post_drain.py uses for
+
+def rows_awaiting_first_comment(state, ledger):
+    """(key, entry) pairs for rows whose first comment is still owed.
+
+    A row qualifies when its status is PUBLISHED or COMMENT_FAILED, it
+    carries a first_comment_link, has a permalink, and that permalink is not
+    yet in the FirstCommentLedger. The permalink check is what actually
+    excludes a still-SCHEDULED row that an identity-guard failure marked
+    COMMENT_FAILED before it ever got a permalink (see
+    FIRST_COMMENT_OWED_STATES and comment_pass) - the status filter alone
+    would let it through. These are exactly the conditions comment_pass
+    itself checks before calling post_first_comment, exposed here so the
+    first-comment drain (first_comment_drain.py) can ask "is there anything
+    waiting on its first comment" without driving a browser or calling
+    Buffer - the same cheap-test-first shape post_drain.py uses for
     "nothing held".
 
+    COMMENT_FAILED is included so a row that failed once (a transient login
+    problem, an identity-guard refusal, a thread the verifier could not
+    read) is retried by the drain rather than stranded until someone runs
+    the CLI by hand - comment_pass itself already retries COMMENT_FAILED
+    rows on its own next sweep, and the drain disagreeing with that would
+    silently narrow what gets cleared automatically. The FirstCommentLedger
+    - not the status - remains the only thing that can ever say "this one is
+    truly done": a COMMENT_FAILED row with a ledger entry already (it posted,
+    then failed on a LATER call for an unrelated reason, or the ledger write
+    and the status write raced) is excluded exactly like a PUBLISHED one
+    would be, never double-commented just because its status still reads
+    COMMENT_FAILED.
+
     Returns full state entries, not just the source row (unlike held_rows/
-    pending_rows), because the caller needs ``updated_at`` to judge how long a
-    row has been PUBLISHED - the first-comment drain's delay is measured from
-    it.
+    pending_rows), because the caller needs ``updated_at`` to judge how long
+    a row has been eligible - the first-comment drain's delay is measured
+    from it.
     """
     out = []
     for key, entry in state.rows.items():
-        if entry.get("status") != PUBLISHED:
+        if entry.get("status") not in FIRST_COMMENT_OWED_STATES:
             continue
         link = (entry.get("first_comment_link") or "").strip()
         if not link:

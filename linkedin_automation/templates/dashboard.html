@@ -1632,9 +1632,9 @@ header {
           <div class="panel-title">📝 First-comment drain
             <span class="feeder-badge">Background feeder &middot; drives the browser</span></div>
           <div class="panel-subtitle">Places the first comment on our OWN <strong>Published</strong>
-            rows once their delay has elapsed. Opens a real browser, so it takes the SAME browser
-            lock as the comment poster and the Comment sweeper &mdash; it will not run while either
-            is active.</div>
+            rows (and retries one that failed once) once their delay has elapsed. Opens a real
+            browser, so it takes the SAME browser lock as the comment poster and the Comment
+            sweeper &mdash; it will not run while either is active.</div>
           <div class="feeder-other">Not the Post drain &mdash; that one only calls Buffer's API and
             feeds Held rows. Not the Comment sweeper either &mdash; that one engages with OTHER
             people's posts; this one only ever comments on a post WE just published, exactly once.

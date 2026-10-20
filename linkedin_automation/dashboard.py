@@ -2150,7 +2150,8 @@ def drain_run_now(profile_name):
     return jsonify({"ok": True, "result": result})
 
 
-# --- First-comment drain (places first comments on our own PUBLISHED rows) --
+# --- First-comment drain (places first comments on our own published rows,
+# including a row retried after a prior COMMENT_FAILED) -----------------------
 #
 # A THIRD background feeder, and the odd one out: post_drain and the scheduler
 # above both call Buffer only or route through run_job's existing categories.
@@ -2236,7 +2237,8 @@ first_comment_drain_engine = first_comment_drain_mod.FirstCommentDrain(
 @app.route('/api/first-comment-drain/<profile_name>/status', methods=['GET'])
 def first_comment_drain_status(profile_name):
     """GET - first-comment-drain state: on/off, interval/delay/jitter, how
-    many PUBLISHED rows are waiting on their first comment, last/next check."""
+    many rows (PUBLISHED or retrying after COMMENT_FAILED) are waiting on
+    their first comment, last/next check."""
     return jsonify(first_comment_drain_engine.status(profile_name))
 
 

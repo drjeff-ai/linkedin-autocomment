@@ -1,5 +1,5 @@
-"""Background feeder that places first comments on PUBLISHED rows once their
-delay has elapsed.
+"""Background feeder that places first comments on PUBLISHED or COMMENT_FAILED
+rows once their delay has elapsed.
 
 Proven 2026-10-18: ``comment_pass`` (``tools/run_scheduled_posts.py comment``)
 places a real first comment on a real published row. It was CLI-only -
@@ -16,11 +16,16 @@ browser session being shared).
 
 Default OFF for every profile, including ``dev`` - this is a new live-posting
 surface and nobody gets it on for free. A configurable delay, plus jitter,
-holds off commenting on a row for a few minutes after it was first observed
-PUBLISHED (``updated_at`` at that point, since ``comment_pass`` never touches
-a row's ``updated_at`` again once it has a permalink and nothing else has
-changed it) - mirroring the scheduler's own reasoning that un-jittered,
-immediate automated activity looks mechanical.
+holds off commenting on a row for a few minutes after it was last observed
+eligible (``updated_at`` at that point) - mirroring the scheduler's own
+reasoning that un-jittered, immediate automated activity looks mechanical.
+For a row that has never failed, that timestamp is the moment it was first
+observed PUBLISHED, and ``comment_pass`` never touches it again while
+nothing else changes the row. For a row that already failed once and is
+being retried (see below), it is instead the moment of that failure -
+``PipelineState.update`` re-stamps ``updated_at`` on every call, including
+the one that sets ``status=COMMENT_FAILED`` - so a retry waits out the same
+delay+jitter again rather than being attempted again immediately.
 
 A failure is a soft failure: ``comment_pass`` already records a row that could
 not be commented as ``COMMENT_FAILED`` and moves on (``csv_pipeline.py``) -
@@ -28,6 +33,14 @@ this module adds no new failure handling on top of that. The drain's own job
 only raises for something ``comment_pass`` itself cannot recover from (login
 required, a declared-production refusal, an unexpected exit code); a normal
 run that left some rows ``COMMENT_FAILED`` is still a successful drain tick.
+``COMMENT_FAILED`` is not terminal here: ``rows_awaiting_first_comment``
+(``csv_pipeline.py``) re-offers it on the next check, same as ``comment_pass``
+itself already retries it on its own next sweep - a row that failed once
+(a transient login problem, an identity-guard refusal) is retried
+automatically rather than stranded until someone runs the CLI by hand. The
+``FirstCommentLedger`` remains the only true duplicate guard: a
+``COMMENT_FAILED`` row already carrying a ledger entry is excluded exactly
+like a ``PUBLISHED`` one would be.
 
 Everything external is injected (clock, rng, profile list, config, the
 row-eligibility reads, the browser-lock check, the executor), so the whole
@@ -82,7 +95,7 @@ DEFAULT_FIRST_COMMENT_DRAIN = {
 
 # What a check actually resolved to.
 ACTION_RAN = "ran"                            # the comment pass was submitted
-ACTION_NOTHING_WAITING = "nothing_waiting"    # no PUBLISHED row is owed a first comment
+ACTION_NOTHING_WAITING = "nothing_waiting"    # no row is owed a first comment
 ACTION_WAITING_ON_DELAY = "waiting_on_delay"  # row(s) exist, none have cleared delay+jitter
 ACTION_BUSY = "busy"                          # a browser task is already running
 ACTION_ERROR = "error"                        # reading eligible rows blew up

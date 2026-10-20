@@ -118,7 +118,10 @@ def test_a_row_already_in_the_ledger_is_not_picked_up(tmp_path):
     assert out == []
 
 
-def test_a_non_published_row_is_not_picked_up(tmp_path):
+def test_a_row_in_a_non_owed_status_is_not_picked_up(tmp_path):
+    """SCHEDULED (no permalink yet, by definition) and COMMENTED (already
+    done) are the two statuses that must never be offered. COMMENT_FAILED is
+    its own pair of tests below - it IS owed, unlike these two."""
     state = _make_state(tmp_path, [
         ("a", {"status": cp.SCHEDULED, "first_comment_link": "https://example.com/x",
                "permalink": "https://www.linkedin.com/feed/update/urn:li:activity:1/"},
@@ -126,8 +129,45 @@ def test_a_non_published_row_is_not_picked_up(tmp_path):
         ("b", {"status": cp.COMMENTED, "first_comment_link": "https://example.com/x",
                "permalink": "https://www.linkedin.com/feed/update/urn:li:activity:2/"},
          "2026-10-19T08:00:00+00:00"),
-        ("c", {"status": cp.COMMENT_FAILED, "first_comment_link": "https://example.com/x",
-               "permalink": "https://www.linkedin.com/feed/update/urn:li:activity:3/"},
+    ])
+    out = cp.rows_awaiting_first_comment(state, FakeLedger())
+    assert out == []
+
+
+def test_a_comment_failed_row_with_a_link_and_no_ledger_entry_is_offered(tmp_path):
+    """The gate: a row that failed once must be retried, not stranded until
+    someone runs the CLI by hand - comment_pass's own retry set already
+    includes COMMENT_FAILED, and the drain must agree."""
+    state = _make_state(tmp_path, [
+        ("a", {"status": cp.COMMENT_FAILED, "first_comment_link": "https://example.com/x",
+               "permalink": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+               "errors": ["could not log in"]},
+         "2026-10-19T08:00:00+00:00"),
+    ])
+    out = cp.rows_awaiting_first_comment(state, FakeLedger())
+    assert [k for k, _ in out] == ["a"]
+
+
+def test_a_comment_failed_row_with_a_ledger_entry_is_not_offered(tmp_path):
+    """The gate's other half: the ledger - not the status - is the only true
+    duplicate guard. A COMMENT_FAILED row that actually posted (e.g. the
+    status write and the ledger write raced, or it failed again later for an
+    unrelated reason after a successful post) must never be double-commented
+    just because its status still reads COMMENT_FAILED."""
+    permalink = "https://www.linkedin.com/feed/update/urn:li:activity:1/"
+    state = _make_state(tmp_path, [
+        ("a", {"status": cp.COMMENT_FAILED, "first_comment_link": "https://example.com/x",
+               "permalink": permalink, "errors": ["could not log in"]},
+         "2026-10-19T08:00:00+00:00"),
+    ])
+    out = cp.rows_awaiting_first_comment(state, FakeLedger(posted=[permalink]))
+    assert out == []
+
+
+def test_a_comment_failed_row_with_no_link_is_not_offered(tmp_path):
+    state = _make_state(tmp_path, [
+        ("a", {"status": cp.COMMENT_FAILED, "first_comment_link": "",
+               "permalink": "https://www.linkedin.com/feed/update/urn:li:activity:1/"},
          "2026-10-19T08:00:00+00:00"),
     ])
     out = cp.rows_awaiting_first_comment(state, FakeLedger())
@@ -162,9 +202,12 @@ def test_picks_the_right_subset_out_of_a_mixed_queue(tmp_path):
         ("still_scheduled", {"status": cp.SCHEDULED, "first_comment_link": "https://example.com/4",
                              "permalink": "https://www.linkedin.com/feed/update/urn:li:activity:4/"},
          "2026-10-19T08:00:00+00:00"),
+        ("retrying", {"status": cp.COMMENT_FAILED, "first_comment_link": "https://example.com/5",
+                     "permalink": "https://www.linkedin.com/feed/update/urn:li:activity:5/"},
+         "2026-10-19T08:00:00+00:00"),
     ])
     out = cp.rows_awaiting_first_comment(state, FakeLedger(posted=[permalink_b]))
-    assert [k for k, _ in out] == ["eligible"]
+    assert sorted(k for k, _ in out) == ["eligible", "retrying"]
 
 
 # ─── the engine harness ────────────────────────────────────────────────────────
@@ -318,6 +361,17 @@ def test_multiple_rows_some_ready_some_not():
     ]
     h.drain.tick()
     assert h.submitted == ["p"], "one ready row is enough to trigger the pass"
+
+
+def test_a_ready_comment_failed_row_is_picked_up_at_the_engine_level_too():
+    """Not just the pure csv_pipeline filter - the engine's own tick/run_now
+    path must act on a retried row the same way it acts on a fresh PUBLISHED
+    one."""
+    h = Harness(delay=0, jitter=0)
+    old = h.clock.now - timedelta(minutes=10)
+    h.rows = [("retrying", _row(status=cp.COMMENT_FAILED, updated_at=old.isoformat()))]
+    h.drain.tick()
+    assert h.submitted == ["p"]
 
 
 def test_result_action_distinguishes_nothing_waiting_from_waiting_on_delay():
