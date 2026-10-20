@@ -181,6 +181,12 @@
       "enabled": false,
       "interval_minutes": 30
     },
+    "first_comment_drain": {
+      "enabled": false,
+      "interval_minutes": 15,
+      "delay_minutes": 5,
+      "jitter_minutes": 3
+    },
     "platforms": {
       "x": {
         "buffer_api_key_env": "BUFFER_API_KEY_X",

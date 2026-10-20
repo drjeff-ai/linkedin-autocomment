@@ -208,6 +208,7 @@ header {
 .feeder { border-left: 3px solid var(--feeder-accent); padding-left: 0.9rem; }
 .feeder-comment { --feeder-accent: #c4a6ff; }
 .feeder-drain   { --feeder-accent: #4dd6b0; }
+.feeder-first-comment-drain { --feeder-accent: #ffb86b; }
 .feeder-badge {
   display: inline-block; margin-left: 0.5rem; padding: 0.1rem 0.5rem;
   border-radius: 10px; font-size: 0.68rem; font-weight: 600;
@@ -1625,6 +1626,50 @@ header {
       <div id="drainRuns" style="margin-top:0.7rem"></div>
     </div>
 
+    <div class="schp-card feeder feeder-first-comment-drain" id="schpFirstCommentDrainCard">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">📝 First-comment drain
+            <span class="feeder-badge">Background feeder &middot; drives the browser</span></div>
+          <div class="panel-subtitle">Places the first comment on our OWN <strong>Published</strong>
+            rows (and retries one that failed once) once their delay has elapsed. Opens a real
+            browser, so it takes the SAME browser lock as the comment poster and the Comment
+            sweeper &mdash; it will not run while either is active.</div>
+          <div class="feeder-other">Not the Post drain &mdash; that one only calls Buffer's API and
+            feeds Held rows. Not the Comment sweeper either &mdash; that one engages with OTHER
+            people's posts; this one only ever comments on a post WE just published, exactly once.
+            Off by default for every profile.</div>
+        </div>
+        <div style="text-align:right">
+          <label class="feeder-switch">
+            <input type="checkbox" id="fcDrainEnabled" onchange="fcDrainToggle(this.checked)">
+            <strong>First-comment drain</strong>
+          </label>
+          <div id="fcDrainRunning" class="trash-reason" style="margin-top:0.4rem">status unknown</div>
+        </div>
+      </div>
+      <div class="feeder-status" id="fcDrainStatus">Loading…</div>
+      <div style="display:flex;gap:0.6rem;align-items:flex-end;flex-wrap:wrap;margin-top:0.6rem">
+        <div class="form-group" style="margin:0;max-width:130px">
+          <label>Check every (min)</label>
+          <input type="number" id="fcDrainInterval" min="1" step="1" value="15">
+        </div>
+        <div class="form-group" style="margin:0;max-width:130px">
+          <label>Delay (min)</label>
+          <input type="number" id="fcDrainDelay" min="0" step="1" value="5">
+        </div>
+        <div class="form-group" style="margin:0;max-width:130px">
+          <label>Jitter (min)</label>
+          <input type="number" id="fcDrainJitter" min="0" step="1" value="3">
+        </div>
+        <button class="btn" onclick="fcDrainSaveConfig()">Save</button>
+        <button class="btn" onclick="fcDrainRunNow()">Check now</button>
+        <button class="btn" onclick="loadFirstCommentDrain()">Refresh</button>
+      </div>
+      <div id="fcDrainResult" style="margin-top:0.6rem"></div>
+      <div id="fcDrainRuns" style="margin-top:0.7rem"></div>
+    </div>
+
     <div class="schp-card">
       <div class="panel-header">
         <div>
@@ -2831,6 +2876,7 @@ function switchMode(mode) {
   if (mode === 'scheduled') {
     loadScheduledQueue();
     loadDrain(true);
+    loadFirstCommentDrain();
   }
 }
 
@@ -3692,6 +3738,144 @@ async function drainRunNow() {
     out.innerHTML = `<div style="font-size:0.82rem">${esc(fn(r))}</div>`;
     // A feed runs as a background job; give it a moment, then re-read.
     setTimeout(() => { loadDrain(true); loadScheduledQueue(); }, 2500);
+  } catch (e) {
+    out.innerHTML = `<div class="error-box">${esc(String(e))}</div>`;
+  }
+}
+
+// --- First-comment drain (feeder 3 of 3: drives the browser, our own posts)-
+//
+// Deliberately separate from loadDrain() above and loadScheduler() below -
+// same reasoning as the comment at loadDrain(): one status line must never
+// describe the wrong feeder, and this one shares a lock with the Comment
+// sweeper but is a distinct switch with distinct config (delay + jitter have
+// no analogue on the Post drain).
+
+const FC_DRAIN_ACTION_TEXT = {
+  ran:              r => `ran the first-comment pass (${r.ready} of ${r.waiting} ready)`,
+  nothing_waiting:  () => 'nothing published is waiting on its first comment',
+  waiting_on_delay: r => `${r.waiting} row(s) waiting, none have cleared the delay yet`,
+  busy:             () => 'skipped: a browser task was already running',
+  error:            r => `error: ${r.note || 'unknown'}`,
+};
+
+async function loadFirstCommentDrain() {
+  if (!currentProfile) return;
+  try {
+    const res = await fetch(`/api/first-comment-drain/${currentProfile}/status`);
+    const d = await res.json();
+
+    document.getElementById('fcDrainEnabled').checked = !!d.enabled;
+    document.getElementById('fcDrainInterval').value = d.interval_minutes ?? 15;
+    document.getElementById('fcDrainDelay').value = d.delay_minutes ?? 5;
+    document.getElementById('fcDrainJitter').value = d.jitter_minutes ?? 3;
+    document.getElementById('fcDrainRunning').textContent =
+      (d.running ? '● thread running' : '○ thread stopped') +
+      (d.enabled ? '' : ' · switched off');
+
+    const bits = [];
+    bits.push(`<b>${d.waiting_count}</b> waiting on a first comment`);
+    if (d.enabled) {
+      bits.push(`last checked ${fmtWhen(d.last_check_at)}`);
+      bits.push(`next ${fmtWhen(d.next_check_at)}`);
+      if (d.last_run_at) bits.push(`last ran ${fmtWhen(d.last_run_at)}`);
+    } else {
+      bits.push('switched off — published rows keep waiting until you turn this on');
+    }
+    document.getElementById('fcDrainStatus').innerHTML = bits.join(' &middot; ');
+
+    renderFirstCommentDrainRuns(d.recent_runs || []);
+  } catch (e) {
+    console.error('First-comment drain load error:', e);
+    document.getElementById('fcDrainStatus').textContent =
+      'Could not read the first-comment-drain status.';
+  }
+}
+
+function renderFirstCommentDrainRuns(runs) {
+  const el = document.getElementById('fcDrainRuns');
+  if (!runs.length) {
+    el.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem">' +
+                   'No first-comment-drain activity yet.</div>';
+    return;
+  }
+  el.innerHTML = '<div style="font-size:0.75rem;color:var(--text-dim);' +
+    'margin-bottom:0.3rem">Recent checks</div>' +
+    runs.slice(0, 10).map(r => {
+      const fn = FC_DRAIN_ACTION_TEXT[r.action] || (x => x.action);
+      const ran = r.action === 'ran';
+      return `<div style="font-size:0.8rem;padding:0.25rem 0;border-bottom:` +
+        `1px solid rgba(255,255,255,0.05)">` +
+        `<span style="color:${ran ? '#ffb86b' : 'var(--text-dim)'}">` +
+        `${ran ? '▲' : '·'}</span> ` +
+        `<span style="color:var(--text-dim)">${fmtWhen(r.at)}</span> — ` +
+        `${esc(fn(r))}${r.manual ? ' <em>(manual)</em>' : ''}</div>`;
+    }).join('');
+}
+
+async function fcDrainToggle(enabled) {
+  if (!currentProfile) return;
+  const out = document.getElementById('fcDrainResult');
+  try {
+    const res = await fetch(`/api/first-comment-drain/${currentProfile}/toggle`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: enabled}),
+    });
+    const d = await res.json();
+    if (!res.ok) {
+      // Put the switch back: it did NOT take effect.
+      document.getElementById('fcDrainEnabled').checked = !enabled;
+      out.innerHTML = `<div class="error-box">${esc(d.error || 'Toggle failed.')}</div>`;
+      return;
+    }
+    out.innerHTML = '';
+    loadFirstCommentDrain();
+  } catch (e) {
+    document.getElementById('fcDrainEnabled').checked = !enabled;
+    out.innerHTML = `<div class="error-box">${esc(String(e))}</div>`;
+  }
+}
+
+async function fcDrainSaveConfig() {
+  if (!currentProfile) return;
+  const interval = parseInt(document.getElementById('fcDrainInterval').value, 10);
+  const delay = parseInt(document.getElementById('fcDrainDelay').value, 10);
+  const jitter = parseInt(document.getElementById('fcDrainJitter').value, 10);
+  const out = document.getElementById('fcDrainResult');
+  if (!interval || interval < 1) {
+    out.innerHTML = '<div class="error-box">Interval must be at least 1 minute.</div>';
+    return;
+  }
+  if (isNaN(delay) || delay < 0 || isNaN(jitter) || jitter < 0) {
+    out.innerHTML = '<div class="error-box">Delay and jitter must be 0 or more minutes.</div>';
+    return;
+  }
+  try {
+    await fetch(`/api/first-comment-drain/${currentProfile}/config`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({interval_minutes: interval, delay_minutes: delay,
+                            jitter_minutes: jitter}),
+    });
+    out.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem">Saved.</div>';
+    loadFirstCommentDrain();
+  } catch (e) {
+    out.innerHTML = `<div class="error-box">${esc(String(e))}</div>`;
+  }
+}
+
+async function fcDrainRunNow() {
+  if (!currentProfile) return;
+  const out = document.getElementById('fcDrainResult');
+  out.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem">Checking…</div>';
+  try {
+    const res = await fetch(`/api/first-comment-drain/${currentProfile}/run-now`,
+                            {method: 'POST'});
+    const d = await res.json();
+    const r = d.result || {};
+    const fn = FC_DRAIN_ACTION_TEXT[r.action] || (x => x.action || 'done');
+    out.innerHTML = `<div style="font-size:0.82rem">${esc(fn(r))}</div>`;
+    // A run fires as a background job; give it a moment, then re-read.
+    setTimeout(() => { loadFirstCommentDrain(); }, 2500);
   } catch (e) {
     out.innerHTML = `<div class="error-box">${esc(String(e))}</div>`;
   }
