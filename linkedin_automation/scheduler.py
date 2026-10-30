@@ -60,6 +60,14 @@ The engine has no Flask/dashboard imports — the executor (``submit_post_job``
 the clock (``now_fn``), the RNG (``rng``) and the profile list
 (``list_profiles``) are all injected, so the whole thing is unit-testable
 with a mock clock and no real browser/posting/generation.
+
+The engine never enforces or depends on scrape finishing before generate —
+window placement only (see ``DEFAULT_SCHEDULER["generate"]["windows"]``
+below). ``merge_scheduler_config`` — the one "config load" point every
+reader funnels through — logs a warning, naming both windows, whenever a
+profile's ``generate`` window starts before a ``scrape`` window ends. It
+does not refuse the config and does not reorder anything; it only makes an
+overlapping edit visible instead of silent.
 """
 
 import os
@@ -176,9 +184,41 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
-def merge_scheduler_config(section: dict) -> dict:
-    """Fill a profile's raw ``scheduler`` section against :data:`DEFAULT_SCHEDULER`."""
-    return _deep_merge(DEFAULT_SCHEDULER, section or {})
+def merge_scheduler_config(section: dict, profile: str = None) -> dict:
+    """Fill a profile's raw ``scheduler`` section against :data:`DEFAULT_SCHEDULER`.
+
+    Also warns - never refuses, never reorders - if the merged config's
+    ``generate`` windows overlap its ``scrape`` windows (see
+    :func:`_warn_if_generate_overlaps_scrape`): this is the one "config load"
+    point every reader (tick, status, run_now, toggle, the circuit breaker's
+    outcome reporters) funnels through.
+    """
+    merged = _deep_merge(DEFAULT_SCHEDULER, section or {})
+    _warn_if_generate_overlaps_scrape(merged, profile)
+    return merged
+
+
+def _warn_if_generate_overlaps_scrape(merged: dict, profile: str = None):
+    """Log a warning, naming both windows, for every (generate, scrape) window
+    pair where the generate window starts before the scrape window ends.
+
+    The engine does not enforce or depend on scrape finishing before generate
+    (see the module docstring) and this does not change that - it only makes
+    an overlapping edit visible instead of silent. The default windows
+    (generate 12:30-13:30, scrape 09:00-12:00) never trigger it.
+    """
+    generate_windows = (merged.get("generate") or {}).get("windows") or []
+    scrape_windows = (merged.get("scrape") or {}).get("windows") or []
+    for g_window in generate_windows:
+        g_start = _parse_hhmm(g_window[0])
+        for s_window in scrape_windows:
+            s_end = _parse_hhmm(s_window[1])
+            if g_start < s_end:
+                logger.warning(
+                    "Scheduler[%s]: generate window %s starts before scrape "
+                    "window %s ends - the engine does not enforce sequencing, "
+                    "so generate may fire before that day's scrape.",
+                    profile, list(g_window), list(s_window))
 
 
 def _parse_hhmm(value: str):
@@ -287,7 +327,7 @@ class Scheduler:
                     logger.exception("Scheduler: profile %s tick failed", profile)
 
     def _tick_profile(self, profile, now):
-        cfg = merge_scheduler_config((self._config_fn(profile) or {}).get("scheduler"))
+        cfg = merge_scheduler_config((self._config_fn(profile) or {}).get("scheduler"), profile)
         if not cfg.get("enabled"):
             return
         state = self._profile_state(profile)
@@ -493,7 +533,7 @@ class Scheduler:
     def report_generate_outcome(self, profile, success, note=None):
         """Feed back a real (possibly async) generate job's success/failure."""
         with self._lock:
-            cfg = merge_scheduler_config((self._config_fn(profile) or {}).get("scheduler"))
+            cfg = merge_scheduler_config((self._config_fn(profile) or {}).get("scheduler"), profile)
             if not cfg.get("auto_mode"):
                 return
             self._score_auto_mode_cycle(profile, "generate", success, note)
@@ -507,7 +547,7 @@ class Scheduler:
         crashed scrape produced exactly as little.
         """
         with self._lock:
-            cfg = merge_scheduler_config((self._config_fn(profile) or {}).get("scheduler"))
+            cfg = merge_scheduler_config((self._config_fn(profile) or {}).get("scheduler"), profile)
             if not cfg.get("auto_mode"):
                 return
             success = post_count > 0
@@ -537,7 +577,7 @@ class Scheduler:
         """Turn auto_mode off and persist why - the dashboard reads this back
         from config, not from the log line above. It does not loop quietly."""
         cfg = self._config_fn(profile) or {}
-        sched = merge_scheduler_config(cfg.get("scheduler"))
+        sched = merge_scheduler_config(cfg.get("scheduler"), profile)
         sched["auto_mode"] = False
         reason = f"{job_type} failed {count} consecutive cycles"
         if note:
@@ -596,7 +636,7 @@ class Scheduler:
         today's rolled fire time + skip flag, count ranges, and recent runs."""
         with self._lock:
             now = self._now()
-            cfg = merge_scheduler_config((self._config_fn(profile) or {}).get("scheduler"))
+            cfg = merge_scheduler_config((self._config_fn(profile) or {}).get("scheduler"), profile)
             state = self._profile_state(profile)
             jobs = {}
             for job_type in JOB_TYPES:
@@ -649,7 +689,7 @@ class Scheduler:
             return {"action": "error", "count": 0, "note": f"unknown job {job_type}"}
         with self._lock:
             now = self._now()
-            cfg = merge_scheduler_config((self._config_fn(profile) or {}).get("scheduler"))
+            cfg = merge_scheduler_config((self._config_fn(profile) or {}).get("scheduler"), profile)
             result = self._fire(profile, job_type, cfg.get(job_type, {}), now)
             state = self._profile_state(profile)
             slot = {"job_type": job_type, "window_index": -1,
@@ -672,7 +712,7 @@ class Scheduler:
         """
         with self._lock:
             cfg = self._config_fn(profile) or {}
-            sched = merge_scheduler_config(cfg.get("scheduler"))
+            sched = merge_scheduler_config(cfg.get("scheduler"), profile)
             if target == "master":
                 sched["enabled"] = bool(enabled)
             elif target == "auto_mode":
@@ -698,10 +738,17 @@ class Scheduler:
             return sched
 
     def update_config(self, profile, patch):
-        """Deep-merge a partial scheduler config (windows/counts/etc.) and persist."""
+        """Deep-merge a partial scheduler config (windows/counts/etc.) and persist.
+
+        Re-checks the overlap warning against the FINAL patched windows, not
+        just the pre-patch ones ``merge_scheduler_config`` already checked -
+        an edit that introduces the overlap is visible at the moment it is
+        made, not only on the next tick/status read.
+        """
         with self._lock:
             cfg = self._config_fn(profile) or {}
-            sched = _deep_merge(merge_scheduler_config(cfg.get("scheduler")), patch or {})
+            sched = _deep_merge(merge_scheduler_config(cfg.get("scheduler"), profile), patch or {})
+            _warn_if_generate_overlaps_scrape(sched, profile)
             cfg["scheduler"] = sched
             pm.save_profile_config(profile, cfg)
             return sched

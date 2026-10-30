@@ -168,6 +168,94 @@ def test_partial_config_merges_defaults():
     assert pc["skip_chance"] == 0.1
 
 
+# ─── Generate/scrape window overlap warning ───────────────────────────────────
+#
+# The engine never enforces or depends on scrape finishing before generate -
+# window placement only. This warns (never refuses, never reorders) so an
+# overlapping edit is visible instead of silent. Assert on the warning, not
+# on behavior: these tests never check that anything actually fires in a
+# different order.
+
+def _overlap_warnings(caplog):
+    return [r for r in caplog.records
+            if r.levelname == "WARNING" and "starts before scrape window" in r.getMessage()]
+
+
+def test_default_windows_do_not_warn(caplog):
+    """The shipped defaults (generate 12:30-13:30, scrape 09:00-12:00) never
+    trigger the warning."""
+    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
+        sched.merge_scheduler_config({})
+    assert _overlap_warnings(caplog) == []
+
+
+def test_overlapping_windows_warn_naming_both(caplog):
+    """A generate window starting before a scrape window ends warns, by name."""
+    section = {
+        "generate": {"windows": [["06:00", "07:00"]]},
+        "scrape": {"windows": [["06:30", "12:00"]]},
+    }
+    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
+        sched.merge_scheduler_config(section, "p")
+    warnings = _overlap_warnings(caplog)
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "p" in message
+    assert "06:00" in message and "07:00" in message  # the generate window
+    assert "06:30" in message and "12:00" in message  # the scrape window
+
+
+def test_non_overlapping_custom_windows_do_not_warn(caplog):
+    """A custom but still-sequential pair (generate strictly after scrape)
+    does not warn."""
+    section = {
+        "generate": {"windows": [["13:00", "14:00"]]},
+        "scrape": {"windows": [["09:00", "12:00"]]},
+    }
+    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
+        sched.merge_scheduler_config(section, "p")
+    assert _overlap_warnings(caplog) == []
+
+
+def test_overlap_warning_does_not_change_the_merged_config(caplog):
+    """The warning is observational only - it never refuses or reorders."""
+    section = {
+        "generate": {"windows": [["06:00", "07:00"]]},
+        "scrape": {"windows": [["06:30", "12:00"]]},
+    }
+    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
+        merged = sched.merge_scheduler_config(section, "p")
+    assert merged["generate"]["windows"] == [["06:00", "07:00"]]
+    assert merged["scrape"]["windows"] == [["06:30", "12:00"]]
+
+
+def test_status_read_warns_for_an_overlapping_profile(caplog):
+    """The warning fires from a real read path (status()), not just a direct
+    merge_scheduler_config call."""
+    cfg = _config({
+        "enabled": True,
+        "generate": {"windows": [["06:00", "07:00"]]},
+        "scrape": {"windows": [["06:30", "12:00"]]},
+    })
+    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 0, 5)), config=cfg)
+    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
+        engine.status("p")
+    assert _overlap_warnings(caplog)
+
+
+def test_update_config_warns_immediately_on_an_overlapping_edit(persist, caplog):
+    """An edit that introduces the overlap is visible at the moment it is
+    made, not only on the next tick/status read."""
+    cfg = {"scheduler": {"enabled": True}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg)
+    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
+        engine.update_config("p", {
+            "generate": {"windows": [["06:00", "07:00"]]},
+            "scrape": {"windows": [["06:30", "12:00"]]},
+        })
+    assert _overlap_warnings(caplog)
+
+
 # ─── Fire-time rolling stays within window bounds ─────────────────────────────
 
 @pytest.mark.parametrize("seed", range(25))
