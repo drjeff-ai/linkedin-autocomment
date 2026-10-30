@@ -160,3 +160,45 @@ def test_run_job_permission_error_is_clean():
     assert job["status"] == "failed"
     assert "Permission denied" in job["error"]
     assert not any("Traceback" in line for line in job["log"])
+
+
+# ─── run_job's on_complete hook (Dispatch 37: feeds the scheduler's auto_mode
+# circuit breaker the real outcome of an async job, since the engine itself
+# never waits on one) ──────────────────────────────────────────────────────────
+
+def test_on_complete_sees_the_finished_job_on_success():
+    seen = []
+    linkedin_dashboard.run_job("eh_oc_ok", lambda jid: {"ok": True},
+                               on_complete=lambda job: seen.append(dict(job)))
+    _wait("eh_oc_ok")
+    assert len(seen) == 1
+    assert seen[0]["status"] == "completed"
+    assert seen[0]["result"] == {"ok": True}
+    assert seen[0]["error"] is None
+
+
+def test_on_complete_sees_the_finished_job_on_failure():
+    seen = []
+
+    def boom(jid):
+        raise RuntimeError("kaboom")
+
+    linkedin_dashboard.run_job("eh_oc_fail", boom,
+                               on_complete=lambda job: seen.append(dict(job)))
+    _wait("eh_oc_fail")
+    assert len(seen) == 1
+    assert seen[0]["status"] == "failed"
+    assert "kaboom" in seen[0]["error"]
+
+
+def test_a_raising_on_complete_does_not_corrupt_the_job_record():
+    """A bug in a feedback hook must never hide the job's own result/error -
+    it is logged, not re-raised into the job thread."""
+    def on_complete(job):
+        raise ValueError("buggy hook")
+
+    linkedin_dashboard.run_job("eh_oc_buggy", lambda jid: {"ok": True},
+                               on_complete=on_complete)
+    job = _wait("eh_oc_buggy")
+    assert job["status"] == "completed"
+    assert job["result"] == {"ok": True}

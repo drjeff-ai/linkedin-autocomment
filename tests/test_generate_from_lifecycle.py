@@ -261,3 +261,73 @@ def test_url_less_new_posts_are_not_actionable(env, client, captured_jobs):
     resp = client.post("/api/comments/demo/generate", json={})
     assert resp.status_code == 400
     assert captured_jobs == []
+
+
+# ─── _generate_job: the scheduled counterpart to the manual endpoint above ────
+# (Dispatch 37 - auto_mode's generate job type). Calls dash._generate_job
+# directly rather than through an HTTP route, mirroring how the manual
+# endpoint's own logic is exercised above but with run_subprocess stubbed
+# instead of run_job, since _generate_job IS the job body, not a route.
+
+@pytest.fixture
+def no_subprocess(monkeypatch):
+    """Stub run_subprocess so the comment_generator subprocess never launches;
+    capture the command it would have run."""
+    calls = []
+
+    def fake_run_subprocess(job_id, cmd, on_start=None):
+        calls.append({"job_id": job_id, "cmd": cmd})
+        return 0, ""
+
+    monkeypatch.setattr(dash, "run_subprocess", fake_run_subprocess)
+    return calls
+
+
+def test_generate_job_caps_via_limit_flag(env, no_subprocess):
+    _seed_store([_rec(i, NEW) for i in range(1, 6)])
+    result = dash._generate_job("j1", "demo", 3)
+    assert result == {"generated": 3, "count": 3}
+    cmd = no_subprocess[0]["cmd"]
+    assert "--limit" in cmd
+    assert cmd[cmd.index("--limit") + 1] == "3"
+
+
+def test_generate_job_writes_the_new_bin_as_input(env, no_subprocess):
+    _seed_store([_rec(1, NEW), _rec(2, NEW)])
+    dash._generate_job("j2", "demo", 10)
+    cmd = no_subprocess[0]["cmd"]
+    infile = cmd[cmd.index("linkedin_automation.comment_generator") + 1]
+    data = json.loads(open(infile, encoding="utf-8").read())
+    assert {p["url"] for p in data["quality_posts"]} == {ACTIVITY.format(1), ACTIVITY.format(2)}
+
+
+def test_generate_job_no_new_posts_skips_the_subprocess(env, no_subprocess):
+    _seed_store([_rec(1, COMMENTED, comment="x")])
+    result = dash._generate_job("j3", "demo", 10)
+    assert result == {"generated": 0, "count": 0, "note": "no NEW posts"}
+    assert no_subprocess == []  # never launched
+
+
+def test_generate_job_raises_on_nonzero_exit(env, monkeypatch):
+    _seed_store([_rec(1, NEW)])
+    monkeypatch.setattr(dash, "run_subprocess", lambda job_id, cmd, on_start=None: (1, "boom"))
+    with pytest.raises(RuntimeError):
+        dash._generate_job("j4", "demo", 10)
+
+
+# ─── _scrape_job: reports a real post count for the auto_mode circuit breaker ─
+
+def test_scrape_job_returns_the_quality_found_count(env, monkeypatch):
+    monkeypatch.setattr(dash, "run_subprocess", lambda job_id, cmd, on_start=None: (0, ""))
+    out_file = env.timeline / "ai_posts_20260101_000000.json"
+    _write(out_file, {"quality_found": 7, "quality_posts": [_post(i) for i in range(7)]})
+    result = dash._scrape_job("j5", "demo", 50, 10)
+    assert result == {"file": str(out_file), "count": 7}
+
+
+def test_scrape_job_zero_posts_reports_zero(env, monkeypatch):
+    monkeypatch.setattr(dash, "run_subprocess", lambda job_id, cmd, on_start=None: (0, ""))
+    out_file = env.timeline / "ai_posts_20260101_000000.json"
+    _write(out_file, {"quality_found": 0, "quality_posts": []})
+    result = dash._scrape_job("j6", "demo", 50, 10)
+    assert result["count"] == 0
