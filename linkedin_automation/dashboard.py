@@ -984,15 +984,23 @@ def connector_stats(profile_name):
 
 @app.route('/api/connector/<profile_name>/start', methods=['POST'])
 def start_connector(profile_name):
-    """Start the auto-connector."""
+    """Start the auto-connector.
+
+    ``search_url`` is optional: when omitted, the next URL in the profile's
+    ``connector.search_urls`` rotation is used (and the rotation pointer
+    advances); an explicit URL is used as-is and never advances it.
+    """
+    from .auto_connector import resolve_search_url
     body = request.json or {}
-    search_url = body.get('search_url', '')
+    explicit_url = body.get('search_url') or None
     max_requests = body.get('max_requests', 25)
     max_pages = body.get('max_pages', 10)
     note = body.get('note', '')
 
-    if not search_url:
-        return jsonify({"error": "search_url is required"}), 400
+    try:
+        search_url = resolve_search_url(profile_name, explicit_url)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     job_id = f"connect_{profile_name}_{int(time.time())}"
 
@@ -2104,10 +2112,60 @@ def _sched_submit_generate_job(profile_name, cap):
     return job_id
 
 
+def _connector_job(job_id, profile_name, pages):
+    """Background job: a scheduled auto-connector run.
+
+    A scheduled run never has an operator-supplied URL, so it always goes
+    through the search-URL rotation. If the profile has no ``search_urls``
+    configured, that is reported as a job failure (not a silent no-op) —
+    the scheduler already confirmed the daily/weekly cap has room, so a
+    missing URL list is a real configuration gap worth surfacing.
+    """
+    from .auto_connector import resolve_search_url
+    log_job(job_id, f"Starting scheduled auto-connector for {profile_name}...")
+    search_url = resolve_search_url(profile_name)
+
+    cmd = [
+        sys.executable, "-m", "linkedin_automation.auto_connector",
+        search_url,
+        "--pages", str(pages),
+        "--profile", profile_name,
+        "--allow-production",
+    ]
+
+    def _register(proc):
+        jobs[job_id]["process"] = proc
+        jobs[job_id]["profile"] = profile_name
+
+    returncode, _ = run_subprocess(job_id, cmd, on_start=_register)
+
+    if returncode == pm.EXIT_LOGIN_REQUIRED:
+        raise pm.LoginRequiredError(
+            f"Login required. Run: python tools/login_check.py --profile {profile_name}"
+        )
+    if returncode != 0:
+        raise RuntimeError(f"Auto-connector exited with code {returncode}")
+
+    log_job(job_id, "Connector finished")
+    return {"completed": True}
+
+
+def _sched_submit_connector_job(profile_name, pages):
+    """Start a scheduled connector job unless the browser lock is held."""
+    if not can_start_browser_task(profile_name):
+        logger.info("Scheduler: browser busy for %s, connector job not submitted", profile_name)
+        return None
+    job_id = f"sched_connect_{profile_name}_{int(time.time())}"
+    run_job(job_id, _connector_job, profile_name, pages,
+            profile=profile_name, task_type="browser", category="scheduled_connector")
+    return job_id
+
+
 scheduler_engine = scheduler_mod.Scheduler(
     submit_post_job=_sched_submit_post_job,
     submit_scrape_job=_sched_submit_scrape_job,
     submit_generate_job=_sched_submit_generate_job,
+    submit_connector_job=_sched_submit_connector_job,
     browser_available=can_start_browser_task,
     list_profiles=lambda: list(pm.list_profiles().get("profiles", {}).keys()),
 )
@@ -2389,10 +2447,11 @@ def scheduler_status(profile_name):
 def scheduler_toggle(profile_name):
     """POST — enable/disable the master switch, auto_mode, or a specific job.
 
-    Body: ``{"job": "master"|"auto_mode"|"post_comments"|"scrape"|"generate",
-    "enabled": bool}``. Turning ``auto_mode`` on is the single toggle that
-    enables the full scrape->generate->post chain in one write (see
-    ``scheduler.Scheduler.toggle``).
+    Body: ``{"job": "master"|"auto_mode"|"post_comments"|"scrape"|"generate"
+    |"connector", "enabled": bool}``. Turning ``auto_mode`` on is the single
+    toggle that enables the scrape->generate->post chain in one write (see
+    ``scheduler.Scheduler.toggle``) — it never touches ``connector``, which
+    is an unrelated feature sharing the same toggle endpoint.
     """
     body = request.json or {}
     target = body.get("job", "master")
@@ -2419,15 +2478,15 @@ def scheduler_config(profile_name):
 def scheduler_run_now(profile_name):
     """POST — fire a job immediately for testing, ignoring window/skip/min-gap.
 
-    Body: ``{"job": "post_comments"|"scrape"|"generate"}``. Bypasses the
-    auto_mode gate on purpose, same as it already bypasses each job's own
-    ``enabled`` flag - this is an explicit manual action, not the unattended
-    tick loop auto_mode polices.
+    Body: ``{"job": "post_comments"|"scrape"|"generate"|"connector"}``.
+    Bypasses the auto_mode gate on purpose, same as it already bypasses each
+    job's own ``enabled`` flag - this is an explicit manual action, not the
+    unattended tick loop auto_mode polices.
     """
     body = request.json or {}
     job = body.get("job")
     if job not in scheduler_mod.JOB_TYPES:
-        return jsonify({"error": "job must be post_comments, scrape, or generate"}), 400
+        return jsonify({"error": "job must be post_comments, scrape, generate, or connector"}), 400
     result = scheduler_engine.run_now(profile_name, job)
     return jsonify({"ok": True, "result": result})
 

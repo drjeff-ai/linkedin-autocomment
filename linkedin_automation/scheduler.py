@@ -1,11 +1,11 @@
-"""In-dashboard randomized scheduler for posting comments, scraping, and
-(under ``auto_mode``) generating drafts to feed the other two.
+"""In-dashboard randomized scheduler for posting comments, scraping,
+connecting, and (under ``auto_mode``) generating drafts to feed the chain.
 
 A single background thread, started when the Flask dashboard launches, ticks
 every :data:`TICK_SECONDS`. On each tick it walks every profile whose
 ``scheduler`` config is enabled and, for each enabled job (``post_comments`` /
-``scrape`` / ``generate``) and each of that job's time windows, decides
-whether to fire.
+``scrape`` / ``generate`` / ``connector``) and each of that job's time
+windows, decides whether to fire.
 
 Randomization is the whole point — LinkedIn punishes mechanical automation, so:
 
@@ -56,10 +56,10 @@ called from the dashboard's job-completion hook — the engine's own tick/fire
 path never blocks on a real job finishing.
 
 The engine has no Flask/dashboard imports — the executor (``submit_post_job``
-/ ``submit_scrape_job`` / ``submit_generate_job`` / ``browser_available``),
-the clock (``now_fn``), the RNG (``rng``) and the profile list
-(``list_profiles``) are all injected, so the whole thing is unit-testable
-with a mock clock and no real browser/posting/generation.
+/ ``submit_scrape_job`` / ``submit_generate_job`` / ``submit_connector_job``
+/ ``browser_available``), the clock (``now_fn``), the RNG (``rng``) and the
+profile list (``list_profiles``) are all injected, so the whole thing is
+unit-testable with a mock clock and no real browser/posting/generation.
 
 The engine never enforces or depends on scrape finishing before generate —
 window placement only (see ``DEFAULT_SCHEDULER["generate"]["windows"]``
@@ -68,6 +68,15 @@ reader funnels through — logs a warning, naming both windows, whenever a
 profile's ``generate`` window starts before a ``scrape`` window ends. It
 does not refuse the config and does not reorder anything; it only makes an
 overlapping edit visible instead of silent.
+
+``connector`` is cap-gated, not queue-gated: unlike ``post_comments`` (empty
+GENERATED bin) or ``scrape`` (nothing to check beforehand), a connector run
+has a cross-run daily/weekly cap tracked in
+:class:`auto_connector.ConnectionTracker`'s on-disk file. ``_fire_connector``
+reads that cap BEFORE calling the executor, so a profile already at its cap
+never even submits a job — mirroring how ``_fire_generate`` (this module's
+sibling concept) checks the NEW bin before submitting, rather than letting the
+job start and fail.
 """
 
 import os
@@ -80,6 +89,7 @@ from datetime import datetime, time as dtime, timedelta
 from . import profile_manager as pm
 from . import post_store
 from .comment_fields import comments_to_txt
+from .auto_connector import ConnectionTracker
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +116,15 @@ GENERATE_DEFAULT_CAP = 10
 #: failures in a row trips it even if scrape has been fine, and vice versa.
 AUTO_MODE_FAILURE_THRESHOLD = 3
 
-JOB_TYPES = ("post_comments", "scrape", "generate")
+JOB_TYPES = ("post_comments", "scrape", "generate", "connector")
+
+#: The comment-pipeline jobs ``auto_mode`` governs as a single chain
+#: (Dispatch 37: scrape -> generate -> post_comments). ``connector``
+#: (Dispatch 38) is an unrelated feature - auto-connecting to people, not
+#: part of the comment pipeline - so toggling ``auto_mode`` must never
+#: enable or disable it as a side effect, even though it shares the same
+#: ``JOB_TYPES``/scheduler plumbing.
+AUTO_MODE_JOB_TYPES = ("post_comments", "scrape", "generate")
 
 # Default scheduler config. get_profile_config already deep-merges the shipped
 # default_profile_config.json, but we merge against this constant too so missing
@@ -138,6 +156,17 @@ DEFAULT_SCHEDULER = {
         "max_comments": GENERATE_DEFAULT_CAP,
         "skip_chance": 0.1,
     },
+    "connector": {
+        "enabled": False,
+        "windows": [["10:00", "16:00"]],
+        # How many search-result pages ONE scheduled session walks. Deliberately
+        # half the CLI's own manual default (10) — unattended, conservative.
+        # The real ceiling is the cross-run daily/weekly cap in
+        # ConnectionTracker, not this; pages only bounds how far a single
+        # session paginates toward sending that many.
+        "pages": 5,
+        "skip_chance": 0.1,
+    },
 }
 
 # Slot lifecycle within a single day.
@@ -151,6 +180,7 @@ ACTION_FIRED = "fired"
 ACTION_SKIPPED = "skipped"
 ACTION_QUEUE_EMPTY = "queue_empty"
 ACTION_MISSED = "missed"
+ACTION_AT_CAP = "at_cap"
 
 
 # ─── Config helpers ───────────────────────────────────────────────────────────
@@ -254,6 +284,9 @@ class Scheduler:
     * ``submit_scrape_job(profile, max_posts, min_quality) -> job_id | None``.
     * ``submit_generate_job(profile, cap) -> job_id | None`` — start an API
       (non-browser) generate job capped at ``cap`` drafts.
+    * ``submit_connector_job(profile, pages) -> job_id | None`` — start a
+      browser connector (auto-connect) job walking at most ``pages`` of
+      search results.
     * ``browser_available(profile) -> bool`` — the browser-task lock check.
     * ``list_profiles() -> list[str]`` and ``config_fn(profile) -> dict``.
     """
@@ -261,6 +294,7 @@ class Scheduler:
     def __init__(self, *, now_fn=None, rng=None, tick_seconds=TICK_SECONDS,
                  min_gap_minutes=MIN_GAP_MINUTES, submit_post_job=None,
                  submit_scrape_job=None, submit_generate_job=None,
+                 submit_connector_job=None,
                  auto_mode_failure_threshold=AUTO_MODE_FAILURE_THRESHOLD,
                  browser_available=None, list_profiles=None, config_fn=None):
         self._now = now_fn or datetime.now
@@ -270,6 +304,7 @@ class Scheduler:
         self._submit_post_job = submit_post_job
         self._submit_scrape_job = submit_scrape_job
         self._submit_generate_job = submit_generate_job
+        self._submit_connector_job = submit_connector_job
         self._auto_mode_threshold = auto_mode_failure_threshold
         self._browser_available = browser_available or (lambda profile: True)
         self._list_profiles = list_profiles or _default_list_profiles
@@ -452,6 +487,8 @@ class Scheduler:
             return self._fire_scrape(profile, job_cfg, now)
         if job_type == "generate":
             return self._fire_generate(profile, job_cfg, now)
+        if job_type == "connector":
+            return self._fire_connector(profile, job_cfg, now)
         return {"action": "error", "count": 0, "note": f"unknown job {job_type}"}
 
     def _fire_post_comments(self, profile, job_cfg, now):
@@ -589,6 +626,34 @@ class Scheduler:
         logger.error("Scheduler[%s] AUTO MODE DISABLED ITSELF: %s", profile, reason)
         self._profile_state(profile)["auto_mode_failures"][job_type] = 0
 
+    def _fire_connector(self, profile, job_cfg, now):
+        """Fire a connector session; no-op if the cross-run cap is already spent.
+
+        The cap check happens here, before the executor (and so before any
+        browser factory) is ever reached — a profile already at its daily or
+        weekly cap never submits a job, let alone opens a browser that can't
+        send anything.
+        """
+        full_config = self._config_fn(profile) or {}
+        conn_cfg = full_config.get("connector", {}) or {}
+        daily_limit = conn_cfg.get("max_daily_requests", ConnectionTracker.DEFAULT_DAILY_LIMIT)
+        weekly_limit = conn_cfg.get("weekly_limit", ConnectionTracker.DEFAULT_WEEKLY_LIMIT)
+        tracker = ConnectionTracker(profile, weekly_limit=weekly_limit, daily_limit=daily_limit)
+        remaining = tracker.get_remaining()
+        if remaining <= 0:
+            logger.info("Scheduler[%s] connector: at daily/weekly cap, skipping", profile)
+            return {"action": ACTION_AT_CAP, "count": 0,
+                    "note": "daily or weekly connection cap reached"}
+
+        pages = int(job_cfg.get("pages", 5))
+        job_id = None
+        if self._submit_connector_job:
+            job_id = self._submit_connector_job(profile, pages)
+        logger.info("Scheduler[%s] connector FIRED: pages=%s job=%s",
+                    profile, pages, job_id)
+        return {"action": ACTION_FIRED, "count": 0, "job_id": job_id,
+                "note": None if job_id else "browser busy, not submitted"}
+
     def _write_comments_file(self, profile, records, now):
         """Serialize GENERATED records to a poster-readable TXT file."""
         comments = []
@@ -664,6 +729,7 @@ class Scheduler:
                     "max_posts": job_cfg.get("max_posts"),
                     "min_quality": job_cfg.get("min_quality"),
                     "max_comments": job_cfg.get("max_comments"),
+                    "pages": job_cfg.get("pages"),
                     "skip_chance": job_cfg.get("skip_chance"),
                     "last_run": last_run,
                 }
@@ -719,7 +785,7 @@ class Scheduler:
                 sched["auto_mode"] = bool(enabled)
                 if enabled:
                     sched["enabled"] = True
-                    for job_type in JOB_TYPES:
+                    for job_type in AUTO_MODE_JOB_TYPES:
                         sched.setdefault(job_type, {})["enabled"] = True
                 sched.pop("auto_mode_stopped_reason", None)
                 sched.pop("auto_mode_stopped_at", None)

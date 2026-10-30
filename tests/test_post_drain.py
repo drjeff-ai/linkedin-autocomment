@@ -396,7 +396,7 @@ def test_the_drain_is_not_a_scheduler_job_type():
     and a skipped drain silently leaves a post unscheduled."""
     assert "drain" not in sched_mod.JOB_TYPES
     assert "post_drain" not in sched_mod.JOB_TYPES
-    assert sched_mod.JOB_TYPES == ("post_comments", "scrape", "generate")
+    assert sched_mod.JOB_TYPES == ("post_comments", "scrape", "generate", "connector")
 
 
 def test_the_two_feeders_use_different_job_categories():

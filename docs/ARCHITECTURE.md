@@ -511,12 +511,23 @@ outcome leaves it `GENERATED` for the next run.
 ## 6. Scheduler — `scheduler.py` _(sketch)_
 
 In-process thread, no Flask imports; the dashboard injects executor callbacks.
-Per-profile randomized windows for `post_comments` and `scrape`, with a skip
-chance, a minimum gap between fires, and daily roll of fire times. Submits
-through the dashboard's `run_job` + browser lock.
+Per-profile randomized windows for `post_comments`, `scrape`, `generate`, and
+`connector` (§7), with a skip chance, a minimum gap between fires, and daily
+roll of fire times. Submits through the dashboard's `run_job` + browser lock.
 
 `_fire_post_comments` reads the store's GENERATED bin and writes
-`scheduled_comments_<ts>.txt` for the poster.
+`scheduled_comments_<ts>.txt` for the poster. `_fire_connector` reads
+`ConnectionTracker`'s cross-run cap directly and never submits a job for a
+profile already at it (§7) — the one job type whose fire decision depends on
+state outside this module.
+
+`generate` is the third job type (Dispatch 37): unlike `post_comments` and
+`scrape`, it only ever fires from the unattended tick loop when a profile's
+`auto_mode` is also on — see the module docstring in `scheduler.py` for the
+per-cycle cap and the circuit breaker that disables `auto_mode` after
+consecutive failures. `auto_mode`'s single-toggle convenience governs exactly
+`post_comments`/`scrape`/`generate` (`AUTO_MODE_JOB_TYPES`); `connector` is
+unrelated and is never touched by it.
 
 ### 6.1 Config isolation between profiles
 
@@ -539,10 +550,55 @@ activity is exactly what gets an account restricted. Regression coverage is in
 ## 7. Auto-connector — `auto_connector.py` _(sketch)_
 
 Selenium over search-result pages, iterating Connect links (not result cards).
-Handles the shadow-DOM Send button via JS injection. Rate limits — randomized
-session target, daily soft cap, 200/week — resolved from the profile config.
-State in `connections/connection_tracker.json` + per-session JSON. A stop file
-(`.stop_connector_<profile>`) and subprocess termination both halt a run.
+Handles the shadow-DOM Send button via JS injection. State in
+`connections/connection_tracker.json` (`ConnectionTracker`) + per-session JSON.
+A stop file (`.stop_connector_<profile>`) and subprocess termination both halt
+a run.
+
+**The real config fields, measured against the code (`AUDIT_36.md` §6), not
+assumed from naming.** The profile config's `connector` section has exactly
+three fields the code reads: `max_daily_requests` (daily cap, default 25),
+`weekly_limit` (weekly cap, default 100), `note_template` (optional note
+text). **There is no "randomized session target."** A profile config was once
+found carrying `daily_limit`/`session_min`/`session_max` that nothing in
+`auto_connector.py` ever read (`conn.get(...)` only ever reads the three names
+above) — dead config that would be tuned and believed
+(`docs/PRINCIPLES.md` §2's "a silent failure is the bug" applies to config as
+much as runtime behavior). Those three keys were removed from the live
+profile that carried them rather than wired to a feature nothing asked for.
+
+**Both caps are cross-run, not per-session.** `ConnectionTracker.get_remaining()`
+sums every `record_sent()` ever made for that profile against the calendar
+day / ISO week, read from `connection_tracker.json` — the file is the
+authority, not any in-memory count. `run()` reads it and clamps
+`max_requests` to `remaining` **before `setup()` ever opens a browser**: a
+profile already at its daily or weekly cap returns a (non-failure) result
+with zero sent and never calls `pm.create_driver` at all. Before this, the
+clamp happened after `setup()`, so a capped-out profile still paid for a full
+browser session that could never send anything.
+
+**Search-URL rotation.** `connector.search_urls` (a list) is the per-profile
+home for a rotating queue of search-results URLs. `resolve_search_url(profile,
+explicit_url)` is the one decision point: an explicit URL (a human pasting a
+fresh one, in the dashboard or on the CLI) is used as-is and never touches the
+rotation; with none given, `ConnectionTracker.next_search_url(urls)` returns
+the next URL and persists the advance **in the tracker file**, not memory, so
+it survives a restart and wraps at the end — a single-URL list therefore
+behaves exactly as it always did. Nothing else about the connector gained
+"resume where I left off" state; the pointer is specifically about which URL a
+run uses, not which page or which candidate within a run.
+
+**Scheduling.** `connector` is a fourth `scheduler.py` job type (alongside
+`post_comments`/`scrape`/`generate`, §6), default off, with its own randomized windows
+and a `pages` field (how many search-result pages one scheduled session
+paginates — deliberately half the CLI's own manual default of 10, since this
+fires unattended). It goes through the same browser-task lock every other
+scheduled job does. Unlike `post_comments` (queue-gated on the GENERATED bin)
+or `scrape` (nothing to pre-check), `connector` is **cap-gated**:
+`_fire_connector` reads `ConnectionTracker.get_remaining()` before ever
+calling the executor, so a profile already at its cap never submits a job,
+let alone reaches the browser factory — mirroring how a queue-empty check
+keeps `post_comments` from submitting a pointless job.
 
 ---
 

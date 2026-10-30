@@ -2,6 +2,8 @@
 
 Offline: pm.get_data_dir and pm.get_profile_config are redirected; no browser."""
 
+import json
+
 import pytest
 
 from linkedin_automation import profile_manager as pm
@@ -89,3 +91,133 @@ def test_empty_note_means_no_note(config, monkeypatch):
     c = ac.LinkedInAutoConnector(profile_name="x")
     assert c.note_text == ""
     assert c.add_note is False
+
+
+# ─── Search-URL rotation (Dispatch 38.2) ──────────────────────────────────────
+
+def test_next_search_url_advances_and_wraps(tracker_dir):
+    t = ac.ConnectionTracker("x")
+    urls = ["https://a", "https://b", "https://c"]
+    seen = [t.next_search_url(urls) for _ in range(5)]
+    assert seen == ["https://a", "https://b", "https://c", "https://a", "https://b"]
+
+
+def test_next_search_url_single_url_repeats(tracker_dir):
+    """A single-URL list behaves like today: every call returns the same URL."""
+    t = ac.ConnectionTracker("x")
+    urls = ["https://only"]
+    assert [t.next_search_url(urls) for _ in range(3)] == ["https://only"] * 3
+
+
+def test_next_search_url_empty_raises(tracker_dir):
+    t = ac.ConnectionTracker("x")
+    with pytest.raises(ValueError):
+        t.next_search_url([])
+
+
+def test_next_search_url_persists_across_restart(tracker_dir):
+    """The pointer lives in the tracker FILE, not memory — a fresh tracker
+    instance (simulating a process restart) continues where the last one
+    left off."""
+    urls = ["https://a", "https://b", "https://c"]
+    first = ac.ConnectionTracker("x")
+    assert first.next_search_url(urls) == "https://a"
+
+    # A brand-new instance, as a restarted process would construct.
+    second = ac.ConnectionTracker("x")
+    assert second.next_search_url(urls) == "https://b"
+
+    # Assert on the tracker file itself, not just the object's behavior.
+    tracker_file = tracker_dir / "connection_tracker.json"
+    assert tracker_file.exists()
+    saved = json.loads(tracker_file.read_text(encoding="utf-8"))
+    assert saved["rotation_index"] == 2
+
+
+def test_resolve_search_url_explicit_does_not_advance(tracker_dir, monkeypatch):
+    """An explicit URL is used as-is and never even touches the tracker file."""
+    monkeypatch.setattr(
+        pm, "get_profile_config",
+        lambda profile_name=None: {"connector": {"search_urls": ["https://a", "https://b"]}},
+    )
+    url = ac.resolve_search_url("x", explicit_url="https://explicit")
+    assert url == "https://explicit"
+    assert not (tracker_dir / "connection_tracker.json").exists()
+
+
+def test_resolve_search_url_rotates_when_no_explicit(tracker_dir, monkeypatch):
+    monkeypatch.setattr(
+        pm, "get_profile_config",
+        lambda profile_name=None: {"connector": {"search_urls": ["https://a", "https://b"]}},
+    )
+    assert ac.resolve_search_url("x") == "https://a"
+    assert ac.resolve_search_url("x") == "https://b"
+    assert ac.resolve_search_url("x") == "https://a"  # wraps
+
+
+def test_resolve_search_url_raises_when_nothing_configured(tracker_dir, monkeypatch):
+    monkeypatch.setattr(pm, "get_profile_config",
+                        lambda profile_name=None: {"connector": {}})
+    with pytest.raises(ValueError):
+        ac.resolve_search_url("x")
+
+
+# ─── Cap check happens before the browser factory (Dispatch 38.3) ────────────
+
+def test_run_at_daily_cap_never_creates_browser(tracker_dir, monkeypatch):
+    """A profile already at its daily cap must not open a browser at all."""
+    tracker = ac.ConnectionTracker("x", weekly_limit=100, daily_limit=3)
+    for i in range(3):
+        tracker.record_sent(f"n{i}", f"https://www.linkedin.com/in/p{i}/")
+
+    def _must_not_be_called(*a, **k):
+        raise AssertionError("pm.create_driver was called at the daily cap")
+    monkeypatch.setattr(pm, "create_driver", _must_not_be_called)
+    monkeypatch.setattr(pm, "get_profile_config", lambda profile_name=None: {"connector": {}})
+
+    c = ac.LinkedInAutoConnector(profile_name="x", max_requests=10)
+    c.weekly_limit, c.daily_limit = 100, 3
+    results = c.run("https://search-url")
+    assert results["ok"] is True
+    assert results["session"]["sent"] == 0
+
+
+def test_run_at_weekly_cap_never_creates_browser(tracker_dir, monkeypatch):
+    """Weekly cap binds the same way, even with daily room to spare."""
+    tracker = ac.ConnectionTracker("x", weekly_limit=2, daily_limit=25)
+    for i in range(2):
+        tracker.record_sent(f"n{i}", f"https://www.linkedin.com/in/p{i}/")
+
+    def _must_not_be_called(*a, **k):
+        raise AssertionError("pm.create_driver was called at the weekly cap")
+    monkeypatch.setattr(pm, "create_driver", _must_not_be_called)
+    monkeypatch.setattr(pm, "get_profile_config", lambda profile_name=None: {"connector": {}})
+
+    c = ac.LinkedInAutoConnector(profile_name="x", max_requests=10)
+    c.weekly_limit, c.daily_limit = 2, 25
+    results = c.run("https://search-url")
+    assert results["ok"] is True
+    assert results["session"]["sent"] == 0
+
+
+def test_run_under_cap_still_calls_browser_factory(tracker_dir, monkeypatch):
+    """Sanity check for the fix above: under the cap, the factory IS called."""
+    calls = []
+
+    class FakeDriver:
+        def quit(self):
+            pass
+
+    def fake_create_driver(profile_name, allow_production=False):
+        calls.append(profile_name)
+        return FakeDriver(), {"profile": profile_name}
+
+    monkeypatch.setattr(pm, "create_driver", fake_create_driver)
+    monkeypatch.setattr(pm, "login", lambda driver, profile: True)
+    monkeypatch.setattr(pm, "get_profile_config", lambda profile_name=None: {"connector": {}})
+
+    c = ac.LinkedInAutoConnector(profile_name="x", max_requests=10)
+    c.weekly_limit, c.daily_limit = 100, 25
+    c.run("https://search-url")  # fails past setup (no real driver) — fine, we
+    # only care that the factory was reached at all.
+    assert calls == ["x"]

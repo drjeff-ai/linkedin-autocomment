@@ -119,3 +119,54 @@ def test_run_now_generate_no_new_posts_is_queue_empty(api_client):
     resp = api_client.post("/api/scheduler/work/run-now", json={"job": "generate"})
     assert resp.status_code == 200
     assert resp.get_json()["result"]["action"] == "queue_empty"
+
+
+# ─── connector (Dispatch 38) ───────────────────────────────────────────────────
+
+def test_status_includes_connector_job(api_client):
+    """connector joins the job list, default off, with its own pages field."""
+    resp = api_client.get("/api/scheduler/work/status")
+    data = resp.get_json()
+    assert data["jobs"]["connector"]["enabled"] is False
+    assert data["jobs"]["connector"]["pages"] == 5
+
+
+def test_toggle_connector_job(api_client):
+    resp = api_client.post("/api/scheduler/work/toggle",
+                           json={"job": "connector", "enabled": True})
+    assert resp.status_code == 200
+    assert resp.get_json()["scheduler"]["connector"]["enabled"] is True
+    assert api_client.get("/api/scheduler/work/status").get_json()["jobs"]["connector"]["enabled"] is True
+
+
+def test_run_now_connector_submits_job(api_client, monkeypatch):
+    """run-now connector reaches the executor (under the empty-tracker cap);
+    stub run_job so no subprocess spawns."""
+    calls = []
+    monkeypatch.setattr(linkedin_dashboard, "run_job",
+                        lambda *a, **k: calls.append((a, k)))
+    resp = api_client.post("/api/scheduler/work/run-now", json={"job": "connector"})
+    assert resp.status_code == 200
+    assert resp.get_json()["result"]["action"] == "fired"
+    assert calls
+
+
+def test_run_now_connector_at_cap_does_not_submit(api_client, monkeypatch):
+    """A profile already at its daily cap: run-now reports at_cap, no submit.
+
+    The scheduler's config_fn is bound to the real pm.get_profile_config at
+    construction time, so this writes through the real (tmp-redirected)
+    config file rather than monkeypatching get_profile_config itself — a
+    patched attribute wouldn't be seen by that already-captured reference.
+    """
+    from linkedin_automation.auto_connector import ConnectionTracker
+    tracker = ConnectionTracker("work", weekly_limit=100, daily_limit=1)
+    tracker.record_sent("n", "https://www.linkedin.com/in/p/")
+    pm.save_profile_config("work", {"connector": {"max_daily_requests": 1}})
+    calls = []
+    monkeypatch.setattr(linkedin_dashboard, "run_job",
+                        lambda *a, **k: calls.append((a, k)))
+    resp = api_client.post("/api/scheduler/work/run-now", json={"job": "connector"})
+    assert resp.status_code == 200
+    assert resp.get_json()["result"]["action"] == "at_cap"
+    assert calls == []

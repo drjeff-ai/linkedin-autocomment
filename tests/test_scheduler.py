@@ -16,6 +16,7 @@ import pytest
 from linkedin_automation import profile_manager as pm
 from linkedin_automation import post_store
 from linkedin_automation import scheduler as sched
+from linkedin_automation import auto_connector as ac
 
 
 # ─── Test doubles ─────────────────────────────────────────────────────────────
@@ -44,15 +45,19 @@ class FakeRng:
 
 
 class RecordingExecutor:
-    """Captures every submit_post_job / submit_scrape_job / submit_generate_job
-    call. ``seq`` is a single shared counter across all three, so tests can
-    assert ORDER between job types (not just each list's own order)."""
+    """Captures every submit_post_job / submit_scrape_job / submit_generate_job /
+    submit_connector_job call. ``seq`` is a single shared counter across
+    post/scrape/generate, so tests can assert ORDER between those job types
+    (not just each list's own order). ``connector_calls`` predates that
+    counter and is asserted elsewhere by exact dict equality, so it is left
+    without a ``seq`` key rather than widening those assertions."""
     def __init__(self, available=True, return_job=True):
         self.available = available
         self.return_job = return_job
         self.post_calls = []
         self.scrape_calls = []
         self.generate_calls = []
+        self.connector_calls = []
         self._seq = 0
 
     def _next_seq(self):
@@ -73,6 +78,10 @@ class RecordingExecutor:
         self.generate_calls.append({"profile": profile, "cap": cap,
                                     "seq": self._next_seq()})
         return f"generate_{len(self.generate_calls)}" if self.return_job else None
+
+    def submit_connector(self, profile, pages):
+        self.connector_calls.append({"profile": profile, "pages": pages})
+        return f"connect_{len(self.connector_calls)}" if self.return_job else None
 
     def browser_available(self, profile):
         return self.available
@@ -121,6 +130,7 @@ def make_scheduler(*, now, rng=None, executor=None, config=None,
         submit_post_job=executor.submit_post,
         submit_scrape_job=executor.submit_scrape,
         submit_generate_job=executor.submit_generate,
+        submit_connector_job=executor.submit_connector,
         browser_available=executor.browser_available,
         list_profiles=lambda: list(profiles),
         config_fn=lambda profile: cfg,
@@ -155,6 +165,8 @@ def test_config_defaults_when_missing():
     gc = st["jobs"]["generate"]
     assert gc["enabled"] is False
     assert gc["max_comments"] == sched.GENERATE_DEFAULT_CAP
+    assert st["jobs"]["connector"]["enabled"] is False
+    assert st["jobs"]["connector"]["pages"] == 5
 
 
 def test_partial_config_merges_defaults():
@@ -459,6 +471,86 @@ def test_scrape_run_now_uses_config_params():
     assert call == {"profile": "p", "max_posts": 42, "min_quality": 7}
 
 
+# ─── Connector job ────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def tracker_dir(tmp_path, monkeypatch):
+    """Redirect ConnectionTracker's file at tmp, like test_connector_config.py."""
+    monkeypatch.setattr(pm, "get_data_dir", lambda profile_name=None, subdir=None: str(tmp_path))
+    return tmp_path
+
+
+def test_connector_run_now_uses_config_pages(tracker_dir):
+    cfg = _config({"enabled": True, "connector": {"enabled": True, "pages": 3}})
+    executor = RecordingExecutor()
+    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 10, 0)),
+                               executor=executor, config=cfg)
+    engine.run_now("p", "connector")
+    assert executor.connector_calls == [{"profile": "p", "pages": 3}]
+
+
+def test_connector_at_daily_cap_does_not_submit(tracker_dir):
+    """A profile already at its daily cap: the job is never submitted."""
+    tracker = ac.ConnectionTracker("p", weekly_limit=100, daily_limit=5)
+    for i in range(5):
+        tracker.record_sent(f"n{i}", f"https://www.linkedin.com/in/p{i}/")
+    cfg = _config({"enabled": True, "connector": {"enabled": True, "pages": 5}})
+    # connector.max_daily_requests must match the tracker's daily_limit above.
+    cfg["connector"] = {"max_daily_requests": 5, "weekly_limit": 100}
+    executor = RecordingExecutor()
+    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 10, 0)),
+                               executor=executor, config=cfg)
+    result = engine.run_now("p", "connector")
+    assert result["action"] == sched.ACTION_AT_CAP
+    assert executor.connector_calls == []  # never reached the browser factory
+
+
+def test_connector_at_weekly_cap_does_not_submit(tracker_dir):
+    """A profile already at its weekly cap (even with daily room): no submit."""
+    tracker = ac.ConnectionTracker("p", weekly_limit=3, daily_limit=25)
+    for i in range(3):
+        tracker.record_sent(f"n{i}", f"https://www.linkedin.com/in/p{i}/")
+    cfg = _config({"enabled": True, "connector": {"enabled": True, "pages": 5}})
+    cfg["connector"] = {"max_daily_requests": 25, "weekly_limit": 3}
+    executor = RecordingExecutor()
+    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 10, 0)),
+                               executor=executor, config=cfg)
+    result = engine.run_now("p", "connector")
+    assert result["action"] == sched.ACTION_AT_CAP
+    assert executor.connector_calls == []
+
+
+def test_connector_under_cap_submits(tracker_dir):
+    """Below the cap, the connector job is submitted normally."""
+    cfg = _config({"enabled": True, "connector": {"enabled": True, "pages": 5}})
+    cfg["connector"] = {"max_daily_requests": 25, "weekly_limit": 100}
+    executor = RecordingExecutor()
+    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 10, 0)),
+                               executor=executor, config=cfg)
+    result = engine.run_now("p", "connector")
+    assert result["action"] == sched.ACTION_FIRED
+    assert len(executor.connector_calls) == 1
+
+
+def test_connector_default_off_never_fires_from_tick(tracker_dir):
+    """Connector's own enabled flag defaults False: a tick never fires it."""
+    clock = Clock(datetime(2026, 7, 7, 7, 0))
+    executor = RecordingExecutor()
+    cfg = _config({"enabled": True})  # master on; connector section omitted entirely
+    engine, _ = make_scheduler(now=clock, rng=FakeRng(randint_fn=lambda a, b: 0),
+                               executor=executor, config=cfg)
+    clock.dt = datetime(2026, 7, 7, 12, 0)
+    engine.tick()
+    assert executor.connector_calls == []
+
+
+def test_toggle_connector_persists(persist):
+    cfg = {"scheduler": {"enabled": True}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg)
+    engine.toggle("p", "connector", True)
+    assert persist["p"]["scheduler"]["connector"]["enabled"] is True
+
+
 def test_disabled_job_never_fires(redirect_store):
     """A disabled job type is skipped even when the master switch is on."""
     clock = Clock(datetime(2026, 7, 7, 7, 0))
@@ -743,6 +835,19 @@ def test_toggle_auto_mode_on_enables_the_whole_chain(persist):
     assert sched_out["generate"]["enabled"] is True
     assert sched_out["post_comments"]["enabled"] is True
     assert persist["p"]["scheduler"]["auto_mode"] is True
+
+
+def test_toggle_auto_mode_on_never_touches_connector(persist):
+    """connector (Dispatch 38) is an unrelated feature sharing JOB_TYPES with
+    the comment-pipeline jobs auto_mode (Dispatch 37) governs - enabling
+    auto_mode must not enable it as a side effect."""
+    cfg = {"scheduler": {"enabled": False, "scrape": {"enabled": False},
+                        "generate": {"enabled": False},
+                        "post_comments": {"enabled": True},
+                        "connector": {"enabled": False}}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg)
+    sched_out = engine.toggle("p", "auto_mode", True)
+    assert sched_out["connector"]["enabled"] is False
 
 
 def test_toggle_auto_mode_off_leaves_other_flags_alone(persist):
