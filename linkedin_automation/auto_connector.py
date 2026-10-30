@@ -61,13 +61,15 @@ class ConnectionTracker:
             with open(self.tracker_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             data.setdefault("daily_counts", {})  # additive for older tracker files
+            data.setdefault("rotation_index", 0)  # additive for older tracker files
             return data
         return {
             "sent_requests": [],
             "weekly_counts": {},
             "daily_counts": {},
             "skipped": [],
-            "errors": []
+            "errors": [],
+            "rotation_index": 0,
         }
 
     def save(self):
@@ -151,6 +153,22 @@ class ConnectionTracker:
         })
         self.save()
 
+    def next_search_url(self, urls: List[str]) -> str:
+        """Return the next URL in ``urls`` and persist the advance.
+
+        The pointer lives in this tracker's file, not in memory, so it
+        survives a process restart and is shared across every run for this
+        profile. Wraps at the end, so a single-URL list always returns the
+        same URL — today's behavior, unchanged.
+        """
+        if not urls:
+            raise ValueError("search_urls is empty")
+        idx = self.data.get("rotation_index", 0) % len(urls)
+        url = urls[idx]
+        self.data["rotation_index"] = (idx + 1) % len(urls)
+        self.save()
+        return url
+
     def _normalize_url(self, url: str) -> str:
         """Normalize profile URL for comparison."""
         if not url:
@@ -170,6 +188,39 @@ class ConnectionTracker:
             "total_skipped": len(self.data.get("skipped", [])),
             "total_errors": len(self.data.get("errors", []))
         }
+
+
+def resolve_search_url(profile_name: str = None, explicit_url: str = None) -> str:
+    """Decide which search URL a connector run uses.
+
+    An explicit URL — a human pasting a fresh search-results page, in the
+    dashboard or on the CLI — is used as-is and never advances the rotation
+    pointer. With none given, the next URL in the profile's
+    ``connector.search_urls`` list rotates: the pointer is read from and
+    persisted to that profile's :class:`ConnectionTracker` file (never kept
+    in memory), so it survives a restart, and wraps at the end — a
+    single-URL list therefore always returns that one URL, unchanged from
+    today's behavior.
+
+    Raises ``ValueError`` if neither an explicit URL nor a configured list
+    is available, so a caller with nothing to work from fails loud instead
+    of launching a browser with no destination.
+    """
+    if explicit_url:
+        return explicit_url
+    resolved = profile_name or pm.get_default_profile_name() or "default"
+    conn = pm.get_profile_config(resolved).get("connector", {}) or {}
+    urls = conn.get("search_urls") or []
+    if not urls:
+        raise ValueError(
+            "no search_url given and connector.search_urls is empty for this profile"
+        )
+    tracker = ConnectionTracker(
+        resolved,
+        weekly_limit=conn.get("weekly_limit", ConnectionTracker.DEFAULT_WEEKLY_LIMIT),
+        daily_limit=conn.get("max_daily_requests", ConnectionTracker.DEFAULT_DAILY_LIMIT),
+    )
+    return tracker.next_search_url(urls)
 
 
 # ─── Auto Connector ─────────────────────────────────────────────────────────
@@ -322,16 +373,15 @@ class LinkedInAutoConnector:
             return True
         return False
 
-    def setup(self):
-        """Setup driver and login."""
-        logger.info("Setting up browser...")
-        self.driver, profile = pm.create_driver(
-            self.profile_name, allow_production=self.allow_production)
-        self.wait = WebDriverWait(self.driver, 20)
+    def check_limits(self) -> int:
+        """Load the cross-run tracker and report how many requests remain.
 
-        if not pm.login(self.driver, profile):
-            raise RuntimeError("Failed to log in")
-
+        Called before a browser ever opens (see ``run()``): the daily/weekly
+        caps are authoritative cross-run state, so there is no reason to pay
+        for a driver + login only to discover afterward that today's cap is
+        already spent. Returns the remaining count; ``self.max_requests`` is
+        clamped to it.
+        """
         resolved = self.profile_name or pm.get_default_profile_name() or "default"
         self.tracker = ConnectionTracker(
             resolved, weekly_limit=self.weekly_limit, daily_limit=self.daily_limit
@@ -344,10 +394,22 @@ class LinkedInAutoConnector:
             f"{remaining} remaining"
         )
 
-        if remaining == 0:
+        if remaining <= 0:
             logger.warning("Daily or weekly connection limit reached! Try again later.")
 
         self.max_requests = min(self.max_requests, remaining)
+        return remaining
+
+    def setup(self):
+        """Setup driver and login. Call check_limits() first — see run()."""
+        logger.info("Setting up browser...")
+        self.driver, profile = pm.create_driver(
+            self.profile_name, allow_production=self.allow_production)
+        self.wait = WebDriverWait(self.driver, 20)
+
+        if not pm.login(self.driver, profile):
+            raise RuntimeError("Failed to log in")
+
         logger.info(f"Will send up to {self.max_requests} requests this session")
 
     # ─── Navigation ──────────────────────────────────────────────────────
@@ -1340,13 +1402,18 @@ class LinkedInAutoConnector:
         A failure nobody is told about is worse than a failure.
         """
         self.failure = None
-        self.stage = "setup"
+        self.stage = "limits"
         try:
-            self.setup()
-
-            if self.max_requests == 0:
-                logger.warning("No requests remaining this week. Exiting.")
+            remaining = self.check_limits()
+            if remaining <= 0:
+                logger.warning(
+                    "Daily or weekly connection limit reached. Not opening a "
+                    "browser for a session that can't send anything."
+                )
                 return self._get_results()
+
+            self.stage = "setup"
+            self.setup()
 
             self.stage = "navigate"
             self.navigate_to_search(search_url)
@@ -1513,8 +1580,13 @@ Examples:
         print(f"Errors:                {stats['total_errors']}")
         return
 
-    if not args.search_url:
-        parser.error("search_url is required (unless using --stats)")
+    if args.search_url:
+        search_url = args.search_url
+    else:
+        try:
+            search_url = resolve_search_url(args.profile)
+        except ValueError as e:
+            parser.error(str(e))
 
     # max_requests/note_text default to None so the connector falls back to config.
     connector = LinkedInAutoConnector(
@@ -1526,7 +1598,7 @@ Examples:
         allow_production=args.allow_production,
     )
 
-    results = connector.run(args.search_url, max_pages=args.pages)
+    results = connector.run(search_url, max_pages=args.pages)
 
     resolved = args.profile or pm.get_default_profile_name() or "default"
     results_dir = pm.get_data_dir(resolved, "connections")

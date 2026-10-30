@@ -1,9 +1,11 @@
-"""In-dashboard randomized scheduler for posting comments (and optional scraping).
+"""In-dashboard randomized scheduler for posting comments (and optional scraping
+and connecting).
 
 A single background thread, started when the Flask dashboard launches, ticks
 every :data:`TICK_SECONDS`. On each tick it walks every profile whose
 ``scheduler`` config is enabled and, for each enabled job (``post_comments`` /
-``scrape``) and each of that job's time windows, decides whether to fire.
+``scrape`` / ``connector``) and each of that job's time windows, decides
+whether to fire.
 
 Randomization is the whole point — LinkedIn punishes mechanical automation, so:
 
@@ -25,9 +27,19 @@ real run goes through the injected executor callbacks, which use the dashboard's
 task per profile" rule and never collides with a manual run.
 
 The engine has no Flask/dashboard imports — the executor (``submit_post_job`` /
-``submit_scrape_job`` / ``browser_available``), the clock (``now_fn``), the RNG
-(``rng``) and the profile list (``list_profiles``) are all injected, so the
-whole thing is unit-testable with a mock clock and no real browser/posting.
+``submit_scrape_job`` / ``submit_connector_job`` / ``browser_available``), the
+clock (``now_fn``), the RNG (``rng``) and the profile list (``list_profiles``)
+are all injected, so the whole thing is unit-testable with a mock clock and no
+real browser/posting.
+
+``connector`` is cap-gated, not queue-gated: unlike ``post_comments`` (empty
+GENERATED bin) or ``scrape`` (nothing to check beforehand), a connector run
+has a cross-run daily/weekly cap tracked in
+:class:`auto_connector.ConnectionTracker`'s on-disk file. ``_fire_connector``
+reads that cap BEFORE calling the executor, so a profile already at its cap
+never even submits a job — mirroring how ``_fire_generate`` (this module's
+sibling concept) checks the NEW bin before submitting, rather than letting the
+job start and fail.
 """
 
 import os
@@ -40,6 +52,7 @@ from datetime import datetime, time as dtime, timedelta
 from . import profile_manager as pm
 from . import post_store
 from .comment_fields import comments_to_txt
+from .auto_connector import ConnectionTracker
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +62,7 @@ TICK_SECONDS = 30          # how often the background loop re-evaluates
 MIN_GAP_MINUTES = 90       # never fire two real runs for a profile closer than this
 MAX_RECENT_RUNS = 50       # per-profile ring buffer of run records for the UI
 
-JOB_TYPES = ("post_comments", "scrape")
+JOB_TYPES = ("post_comments", "scrape", "connector")
 
 # Default scheduler config. get_profile_config already deep-merges the shipped
 # default_profile_config.json, but we merge against this constant too so missing
@@ -70,6 +83,17 @@ DEFAULT_SCHEDULER = {
         "min_quality": 10,
         "skip_chance": 0.1,
     },
+    "connector": {
+        "enabled": False,
+        "windows": [["10:00", "16:00"]],
+        # How many search-result pages ONE scheduled session walks. Deliberately
+        # half the CLI's own manual default (10) — unattended, conservative.
+        # The real ceiling is the cross-run daily/weekly cap in
+        # ConnectionTracker, not this; pages only bounds how far a single
+        # session paginates toward sending that many.
+        "pages": 5,
+        "skip_chance": 0.1,
+    },
 }
 
 # Slot lifecycle within a single day.
@@ -83,6 +107,7 @@ ACTION_FIRED = "fired"
 ACTION_SKIPPED = "skipped"
 ACTION_QUEUE_EMPTY = "queue_empty"
 ACTION_MISSED = "missed"
+ACTION_AT_CAP = "at_cap"
 
 
 # ─── Config helpers ───────────────────────────────────────────────────────────
@@ -158,14 +183,15 @@ class Scheduler:
 
     def __init__(self, *, now_fn=None, rng=None, tick_seconds=TICK_SECONDS,
                  min_gap_minutes=MIN_GAP_MINUTES, submit_post_job=None,
-                 submit_scrape_job=None, browser_available=None,
-                 list_profiles=None, config_fn=None):
+                 submit_scrape_job=None, submit_connector_job=None,
+                 browser_available=None, list_profiles=None, config_fn=None):
         self._now = now_fn or datetime.now
         self._rng = rng or random
         self._tick_seconds = tick_seconds
         self._min_gap = min_gap_minutes
         self._submit_post_job = submit_post_job
         self._submit_scrape_job = submit_scrape_job
+        self._submit_connector_job = submit_connector_job
         self._browser_available = browser_available or (lambda profile: True)
         self._list_profiles = list_profiles or _default_list_profiles
         self._config_fn = config_fn or pm.get_profile_config
@@ -335,6 +361,8 @@ class Scheduler:
             return self._fire_post_comments(profile, job_cfg, now)
         if job_type == "scrape":
             return self._fire_scrape(profile, job_cfg, now)
+        if job_type == "connector":
+            return self._fire_connector(profile, job_cfg, now)
         return {"action": "error", "count": 0, "note": f"unknown job {job_type}"}
 
     def _fire_post_comments(self, profile, job_cfg, now):
@@ -372,6 +400,34 @@ class Scheduler:
         logger.info("Scheduler[%s] scrape FIRED: max_posts=%s min_quality=%s job=%s",
                     profile, max_posts, min_quality, job_id)
         return {"action": ACTION_FIRED, "count": max_posts, "job_id": job_id,
+                "note": None if job_id else "browser busy, not submitted"}
+
+    def _fire_connector(self, profile, job_cfg, now):
+        """Fire a connector session; no-op if the cross-run cap is already spent.
+
+        The cap check happens here, before the executor (and so before any
+        browser factory) is ever reached — a profile already at its daily or
+        weekly cap never submits a job, let alone opens a browser that can't
+        send anything.
+        """
+        full_config = self._config_fn(profile) or {}
+        conn_cfg = full_config.get("connector", {}) or {}
+        daily_limit = conn_cfg.get("max_daily_requests", ConnectionTracker.DEFAULT_DAILY_LIMIT)
+        weekly_limit = conn_cfg.get("weekly_limit", ConnectionTracker.DEFAULT_WEEKLY_LIMIT)
+        tracker = ConnectionTracker(profile, weekly_limit=weekly_limit, daily_limit=daily_limit)
+        remaining = tracker.get_remaining()
+        if remaining <= 0:
+            logger.info("Scheduler[%s] connector: at daily/weekly cap, skipping", profile)
+            return {"action": ACTION_AT_CAP, "count": 0,
+                    "note": "daily or weekly connection cap reached"}
+
+        pages = int(job_cfg.get("pages", 5))
+        job_id = None
+        if self._submit_connector_job:
+            job_id = self._submit_connector_job(profile, pages)
+        logger.info("Scheduler[%s] connector FIRED: pages=%s job=%s",
+                    profile, pages, job_id)
+        return {"action": ACTION_FIRED, "count": 0, "job_id": job_id,
                 "note": None if job_id else "browser busy, not submitted"}
 
     def _write_comments_file(self, profile, records, now):
@@ -445,6 +501,7 @@ class Scheduler:
                     "count_max": job_cfg.get("count_max"),
                     "max_posts": job_cfg.get("max_posts"),
                     "min_quality": job_cfg.get("min_quality"),
+                    "pages": job_cfg.get("pages"),
                     "skip_chance": job_cfg.get("skip_chance"),
                 }
             return {

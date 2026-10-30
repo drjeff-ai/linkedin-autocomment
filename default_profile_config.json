@@ -109,7 +109,8 @@
   "connector": {
     "note_template": "",
     "max_daily_requests": 25,
-    "weekly_limit": 100
+    "weekly_limit": 100,
+    "search_urls": []
   },
   "behavior": {
     "typing_speed_range": [
