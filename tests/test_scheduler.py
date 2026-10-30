@@ -44,33 +44,50 @@ class FakeRng:
 
 
 class RecordingExecutor:
-    """Captures every submit_post_job / submit_scrape_job call."""
+    """Captures every submit_post_job / submit_scrape_job / submit_generate_job
+    call. ``seq`` is a single shared counter across all three, so tests can
+    assert ORDER between job types (not just each list's own order)."""
     def __init__(self, available=True, return_job=True):
         self.available = available
         self.return_job = return_job
         self.post_calls = []
         self.scrape_calls = []
+        self.generate_calls = []
+        self._seq = 0
+
+    def _next_seq(self):
+        self._seq += 1
+        return self._seq
 
     def submit_post(self, profile, comments_file, count):
-        self.post_calls.append({"profile": profile, "file": comments_file, "count": count})
+        self.post_calls.append({"profile": profile, "file": comments_file,
+                                "count": count, "seq": self._next_seq()})
         return f"job_{len(self.post_calls)}" if self.return_job else None
 
     def submit_scrape(self, profile, max_posts, min_quality):
         self.scrape_calls.append({"profile": profile, "max_posts": max_posts,
-                                  "min_quality": min_quality})
+                                  "min_quality": min_quality, "seq": self._next_seq()})
         return f"scrape_{len(self.scrape_calls)}" if self.return_job else None
+
+    def submit_generate(self, profile, cap):
+        self.generate_calls.append({"profile": profile, "cap": cap,
+                                    "seq": self._next_seq()})
+        return f"generate_{len(self.generate_calls)}" if self.return_job else None
 
     def browser_available(self, profile):
         return self.available
 
 
 class FakeStore:
-    """Stand-in for post_store: returns fixed GENERATED records."""
-    def __init__(self, generated):
-        self._generated = generated
+    """Stand-in for post_store: returns fixed records per status."""
+    def __init__(self, generated=None, new=None):
+        self._by_status = {
+            post_store.GENERATED: list(generated or []),
+            post_store.NEW: list(new or []),
+        }
 
     def by_status(self, status):
-        return list(self._generated) if status == post_store.GENERATED else []
+        return list(self._by_status.get(status, []))
 
 
 def _generated(n):
@@ -81,22 +98,33 @@ def _generated(n):
     } for i in range(n)]
 
 
+def _new_posts(n):
+    return [{"key": f"n{i}", "url": f"https://example.com/new/{i}",
+             "author": f"Author {i}", "text": f"New post body {i}"} for i in range(n)]
+
+
 def _config(scheduler_section):
     """A profile config wrapping just the scheduler section."""
     return {"scheduler": scheduler_section}
 
 
 def make_scheduler(*, now, rng=None, executor=None, config=None,
-                   min_gap_minutes=90, profiles=("p",)):
+                   min_gap_minutes=90, profiles=("p",),
+                   auto_mode_failure_threshold=None):
     executor = executor or RecordingExecutor()
     cfg = config if config is not None else {}
+    kwargs = {}
+    if auto_mode_failure_threshold is not None:
+        kwargs["auto_mode_failure_threshold"] = auto_mode_failure_threshold
     return sched.Scheduler(
         now_fn=now, rng=rng or FakeRng(), min_gap_minutes=min_gap_minutes,
         submit_post_job=executor.submit_post,
         submit_scrape_job=executor.submit_scrape,
+        submit_generate_job=executor.submit_generate,
         browser_available=executor.browser_available,
         list_profiles=lambda: list(profiles),
         config_fn=lambda profile: cfg,
+        **kwargs,
     ), executor
 
 
@@ -117,11 +145,16 @@ def test_config_defaults_when_missing():
     engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 0, 5)), config={})
     st = engine.status("p")
     assert st["enabled"] is False
+    assert st["auto_mode"] is False
+    assert st["auto_mode_stopped_reason"] is None
     pc = st["jobs"]["post_comments"]
     assert pc["enabled"] is True
     assert pc["count_min"] == 4 and pc["count_max"] == 8
     assert [w["window"] for w in pc["windows"]] == [["08:00", "11:00"], ["14:00", "17:00"]]
     assert st["jobs"]["scrape"]["enabled"] is False
+    gc = st["jobs"]["generate"]
+    assert gc["enabled"] is False
+    assert gc["max_comments"] == sched.GENERATE_DEFAULT_CAP
 
 
 def test_partial_config_merges_defaults():
@@ -133,6 +166,94 @@ def test_partial_config_merges_defaults():
     pc = st["jobs"]["post_comments"]
     assert pc["count_min"] == 2 and pc["count_max"] == 8  # count_max from default
     assert pc["skip_chance"] == 0.1
+
+
+# ─── Generate/scrape window overlap warning ───────────────────────────────────
+#
+# The engine never enforces or depends on scrape finishing before generate -
+# window placement only. This warns (never refuses, never reorders) so an
+# overlapping edit is visible instead of silent. Assert on the warning, not
+# on behavior: these tests never check that anything actually fires in a
+# different order.
+
+def _overlap_warnings(caplog):
+    return [r for r in caplog.records
+            if r.levelname == "WARNING" and "starts before scrape window" in r.getMessage()]
+
+
+def test_default_windows_do_not_warn(caplog):
+    """The shipped defaults (generate 12:30-13:30, scrape 09:00-12:00) never
+    trigger the warning."""
+    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
+        sched.merge_scheduler_config({})
+    assert _overlap_warnings(caplog) == []
+
+
+def test_overlapping_windows_warn_naming_both(caplog):
+    """A generate window starting before a scrape window ends warns, by name."""
+    section = {
+        "generate": {"windows": [["06:00", "07:00"]]},
+        "scrape": {"windows": [["06:30", "12:00"]]},
+    }
+    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
+        sched.merge_scheduler_config(section, "p")
+    warnings = _overlap_warnings(caplog)
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "p" in message
+    assert "06:00" in message and "07:00" in message  # the generate window
+    assert "06:30" in message and "12:00" in message  # the scrape window
+
+
+def test_non_overlapping_custom_windows_do_not_warn(caplog):
+    """A custom but still-sequential pair (generate strictly after scrape)
+    does not warn."""
+    section = {
+        "generate": {"windows": [["13:00", "14:00"]]},
+        "scrape": {"windows": [["09:00", "12:00"]]},
+    }
+    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
+        sched.merge_scheduler_config(section, "p")
+    assert _overlap_warnings(caplog) == []
+
+
+def test_overlap_warning_does_not_change_the_merged_config(caplog):
+    """The warning is observational only - it never refuses or reorders."""
+    section = {
+        "generate": {"windows": [["06:00", "07:00"]]},
+        "scrape": {"windows": [["06:30", "12:00"]]},
+    }
+    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
+        merged = sched.merge_scheduler_config(section, "p")
+    assert merged["generate"]["windows"] == [["06:00", "07:00"]]
+    assert merged["scrape"]["windows"] == [["06:30", "12:00"]]
+
+
+def test_status_read_warns_for_an_overlapping_profile(caplog):
+    """The warning fires from a real read path (status()), not just a direct
+    merge_scheduler_config call."""
+    cfg = _config({
+        "enabled": True,
+        "generate": {"windows": [["06:00", "07:00"]]},
+        "scrape": {"windows": [["06:30", "12:00"]]},
+    })
+    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 0, 5)), config=cfg)
+    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
+        engine.status("p")
+    assert _overlap_warnings(caplog)
+
+
+def test_update_config_warns_immediately_on_an_overlapping_edit(persist, caplog):
+    """An edit that introduces the overlap is visible at the moment it is
+    made, not only on the next tick/status read."""
+    cfg = {"scheduler": {"enabled": True}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg)
+    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
+        engine.update_config("p", {
+            "generate": {"windows": [["06:00", "07:00"]]},
+            "scrape": {"windows": [["06:30", "12:00"]]},
+        })
+    assert _overlap_warnings(caplog)
 
 
 # ─── Fire-time rolling stays within window bounds ─────────────────────────────
@@ -332,7 +453,10 @@ def test_scrape_run_now_uses_config_params():
     engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 10, 0)),
                                executor=executor, config=cfg)
     engine.run_now("p", "scrape")
-    assert executor.scrape_calls == [{"profile": "p", "max_posts": 42, "min_quality": 7}]
+    assert len(executor.scrape_calls) == 1
+    call = dict(executor.scrape_calls[0])
+    del call["seq"]
+    assert call == {"profile": "p", "max_posts": 42, "min_quality": 7}
 
 
 def test_disabled_job_never_fires(redirect_store):
@@ -470,3 +594,267 @@ def test_update_config_does_not_alias_the_caller_patch():
     merged = sched._deep_merge(sched.merge_scheduler_config({}), patch)
     merged["scrape"]["windows"].append(["23:00", "23:30"])
     assert patch["scrape"]["windows"] == [["08:00", "09:00"]]
+
+
+# ─── Generate job (Dispatch 37) ────────────────────────────────────────────────
+
+def _generate_cfg(**over):
+    base = {"enabled": True, "windows": [["12:00", "13:00"]],
+            "max_comments": 10, "skip_chance": 0.1}
+    base.update(over)
+    return _config({"enabled": True, "auto_mode": True, "generate": base})
+
+
+def test_generate_run_now_uses_config_cap(redirect_store):
+    redirect_store["store"] = FakeStore(new=_new_posts(5))
+    executor = RecordingExecutor()
+    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 12, 30)),
+                               executor=executor, config=_generate_cfg(max_comments=3))
+    result = engine.run_now("p", "generate")
+    assert result["action"] == sched.ACTION_FIRED
+    assert executor.generate_calls == [{"profile": "p", "cap": 3, "seq": 1}]
+
+
+def test_generate_cap_holds_against_a_large_new_bin(redirect_store):
+    """A scrape of 60 must not generate more than the configured cap."""
+    redirect_store["store"] = FakeStore(new=_new_posts(60))
+    executor = RecordingExecutor()
+    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 12, 30)),
+                               executor=executor, config=_generate_cfg())
+    engine.run_now("p", "generate")
+    assert executor.generate_calls[0]["cap"] == sched.GENERATE_DEFAULT_CAP == 10
+
+
+def test_generate_cap_clamped_to_available_new_posts(redirect_store):
+    """Fewer NEW posts than the cap means only that many are asked for."""
+    redirect_store["store"] = FakeStore(new=_new_posts(4))
+    executor = RecordingExecutor()
+    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 12, 30)),
+                               executor=executor, config=_generate_cfg(max_comments=10))
+    engine.run_now("p", "generate")
+    assert executor.generate_calls[0]["cap"] == 4
+
+
+def test_generate_no_new_posts_is_queue_empty(redirect_store):
+    redirect_store["store"] = FakeStore(new=[])
+    executor = RecordingExecutor()
+    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 12, 30)),
+                               executor=executor, config=_generate_cfg())
+    result = engine.run_now("p", "generate")
+    assert result["action"] == sched.ACTION_QUEUE_EMPTY
+    assert executor.generate_calls == []
+
+
+# ─── auto_mode gates generate from the unattended tick loop ──────────────────
+
+def test_auto_mode_off_generate_never_fires_from_tick(redirect_store):
+    """Auto mode off: nothing new fires. The generate job is never submitted,
+    even though its own enabled flag is on and its window has arrived."""
+    redirect_store["store"] = FakeStore(new=_new_posts(5))
+    clock = Clock(datetime(2026, 7, 7, 7, 0))
+    executor = RecordingExecutor()
+    rng = FakeRng(randint_fn=lambda a, b: 0, random_val=0.99)
+    cfg = _config({"enabled": True, "auto_mode": False,
+                   "generate": {"enabled": True, "windows": [["12:00", "13:00"]],
+                                "max_comments": 10, "skip_chance": 0.1}})
+    engine, _ = make_scheduler(now=clock, rng=rng, executor=executor, config=cfg)
+    _fire_via_tick(engine, clock, datetime(2026, 7, 7, 7, 0), datetime(2026, 7, 7, 12, 30))
+    assert executor.generate_calls == []
+
+
+def test_auto_mode_on_generate_fires_from_tick(redirect_store):
+    """The mirror case: auto_mode on, generate's own window has arrived."""
+    redirect_store["store"] = FakeStore(new=_new_posts(5))
+    clock = Clock(datetime(2026, 7, 7, 7, 0))
+    executor = RecordingExecutor()
+    rng = FakeRng(randint_fn=lambda a, b: 0, random_val=0.99)
+    engine, _ = make_scheduler(now=clock, rng=rng, executor=executor,
+                               config=_generate_cfg())
+    _fire_via_tick(engine, clock, datetime(2026, 7, 7, 7, 0), datetime(2026, 7, 7, 12, 30))
+    assert len(executor.generate_calls) == 1
+
+
+def test_run_now_generate_bypasses_auto_mode(redirect_store):
+    """run_now is a manual, supervised action - it ignores auto_mode, the same
+    way it already ignores each job's own enabled flag (existing behavior)."""
+    redirect_store["store"] = FakeStore(new=_new_posts(5))
+    cfg = _config({"enabled": True, "auto_mode": False,
+                   "generate": {"enabled": False, "windows": [["12:00", "13:00"]],
+                                "max_comments": 10}})
+    executor = RecordingExecutor()
+    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 12, 30)),
+                               executor=executor, config=cfg)
+    result = engine.run_now("p", "generate")
+    assert result["action"] == sched.ACTION_FIRED
+    assert len(executor.generate_calls) == 1
+
+
+# ─── A full auto_mode cycle fires scrape, then generate, then post, in order ──
+
+def test_auto_mode_cycle_runs_scrape_then_generate_then_post_in_order(redirect_store):
+    """One simulated day: scrape's window, then generate's (after it), then
+    post_comments' (after that) - each fires in turn, in that order."""
+    redirect_store["store"] = FakeStore(new=_new_posts(5), generated=_generated(5))
+
+    clock = Clock(datetime(2026, 7, 7, 7, 0))
+    executor = RecordingExecutor()
+    # offset 0 everywhere: each window fires at its own start time; no skips.
+    rng = FakeRng(randint_fn=lambda a, b: 0 if a == 0 else a, random_val=0.99)
+    cfg = _config({
+        "enabled": True, "auto_mode": True,
+        "scrape": {"enabled": True, "windows": [["09:00", "09:30"]],
+                   "max_posts": 60, "min_quality": 10, "skip_chance": 0.1},
+        "generate": {"enabled": True, "windows": [["12:00", "12:30"]],
+                     "max_comments": 10, "skip_chance": 0.1},
+        "post_comments": {"enabled": True, "windows": [["15:00", "15:30"]],
+                          "count_min": 4, "count_max": 4, "skip_chance": 0.1},
+    })
+    engine, _ = make_scheduler(now=clock, rng=rng, executor=executor,
+                               min_gap_minutes=0, config=cfg)
+
+    clock.dt = datetime(2026, 7, 7, 7, 0)
+    engine.tick()  # rolls all three windows for today
+
+    clock.dt = datetime(2026, 7, 7, 9, 15)
+    engine.tick()  # scrape window has arrived
+    clock.dt = datetime(2026, 7, 7, 12, 15)
+    engine.tick()  # generate window has arrived
+    clock.dt = datetime(2026, 7, 7, 15, 15)
+    engine.tick()  # post window has arrived
+
+    assert len(executor.scrape_calls) == 1
+    assert len(executor.generate_calls) == 1
+    assert len(executor.post_calls) == 1
+    assert (executor.scrape_calls[0]["seq"] < executor.generate_calls[0]["seq"]
+            < executor.post_calls[0]["seq"])
+
+
+# ─── toggle("auto_mode", ...) enables/disables the chain in one write ─────────
+
+def test_toggle_auto_mode_on_enables_the_whole_chain(persist):
+    cfg = {"scheduler": {"enabled": False, "scrape": {"enabled": False},
+                        "generate": {"enabled": False},
+                        "post_comments": {"enabled": True}}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg)
+    sched_out = engine.toggle("p", "auto_mode", True)
+    assert sched_out["auto_mode"] is True
+    assert sched_out["enabled"] is True
+    assert sched_out["scrape"]["enabled"] is True
+    assert sched_out["generate"]["enabled"] is True
+    assert sched_out["post_comments"]["enabled"] is True
+    assert persist["p"]["scheduler"]["auto_mode"] is True
+
+
+def test_toggle_auto_mode_off_leaves_other_flags_alone(persist):
+    cfg = {"scheduler": {"enabled": True, "auto_mode": True,
+                        "scrape": {"enabled": True},
+                        "post_comments": {"enabled": True}}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg)
+    sched_out = engine.toggle("p", "auto_mode", False)
+    assert sched_out["auto_mode"] is False
+    assert sched_out["enabled"] is True  # untouched
+    assert sched_out["scrape"]["enabled"] is True  # untouched
+
+
+def test_toggle_auto_mode_on_clears_a_stale_stopped_reason(persist):
+    cfg = {"scheduler": {"enabled": False, "auto_mode": False,
+                        "auto_mode_stopped_reason": "generate failed 3 consecutive cycles",
+                        "auto_mode_stopped_at": "2026-07-01T00:00:00"}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg)
+    sched_out = engine.toggle("p", "auto_mode", True)
+    assert "auto_mode_stopped_reason" not in sched_out
+    assert "auto_mode_stopped_at" not in sched_out
+
+
+# ─── The circuit breaker: N consecutive failures disables auto_mode ──────────
+
+def test_generate_failures_disable_auto_mode_after_threshold(persist):
+    cfg = {"scheduler": {"enabled": True, "auto_mode": True}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg, auto_mode_failure_threshold=3)
+
+    engine.report_generate_outcome("p", False, "boom 1")
+    assert "p" not in persist  # not yet - only 1 consecutive failure
+    engine.report_generate_outcome("p", False, "boom 2")
+    assert "p" not in persist  # 2 consecutive
+    engine.report_generate_outcome("p", False, "boom 3")
+
+    # The gate: assert on the config WRITE, not the log line.
+    assert "p" in persist
+    assert persist["p"]["scheduler"]["auto_mode"] is False
+    reason = persist["p"]["scheduler"]["auto_mode_stopped_reason"]
+    assert "generate" in reason and "3 consecutive cycles" in reason
+    assert "boom 3" in reason
+    assert persist["p"]["scheduler"]["auto_mode_stopped_at"]
+
+
+def test_scrape_zero_posts_disables_auto_mode_after_threshold(persist):
+    cfg = {"scheduler": {"enabled": True, "auto_mode": True}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg, auto_mode_failure_threshold=3)
+
+    engine.report_scrape_outcome("p", 0)
+    engine.report_scrape_outcome("p", 0)
+    assert "p" not in persist
+    engine.report_scrape_outcome("p", 0)
+
+    assert persist["p"]["scheduler"]["auto_mode"] is False
+    assert "scrape" in persist["p"]["scheduler"]["auto_mode_stopped_reason"]
+
+
+def test_a_success_resets_the_consecutive_counter(persist):
+    """2 failures, then a success, then 2 more failures must NOT trip a
+    threshold of 3 - the counter is CONSECUTIVE, not cumulative."""
+    cfg = {"scheduler": {"enabled": True, "auto_mode": True}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg, auto_mode_failure_threshold=3)
+
+    engine.report_generate_outcome("p", False)
+    engine.report_generate_outcome("p", False)
+    engine.report_generate_outcome("p", True)   # resets to 0
+    engine.report_generate_outcome("p", False)
+    engine.report_generate_outcome("p", False)
+    assert "p" not in persist  # only 2 consecutive since the reset
+
+
+def test_scrape_and_generate_failures_are_counted_independently(persist):
+    """Two generate failures plus two scrape failures must not sum to trip a
+    threshold of 3 for either - each job type gets its own counter."""
+    cfg = {"scheduler": {"enabled": True, "auto_mode": True}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg, auto_mode_failure_threshold=3)
+
+    engine.report_generate_outcome("p", False)
+    engine.report_generate_outcome("p", False)
+    engine.report_scrape_outcome("p", 0)
+    engine.report_scrape_outcome("p", 0)
+    assert "p" not in persist
+
+
+def test_report_outcome_is_a_noop_when_auto_mode_is_off(persist):
+    """The circuit breaker only polices the unattended chain - with auto_mode
+    off, failures are not even counted, let alone written back."""
+    cfg = {"scheduler": {"enabled": True, "auto_mode": False}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg, auto_mode_failure_threshold=1)
+
+    engine.report_generate_outcome("p", False, "whatever")
+    engine.report_scrape_outcome("p", 0)
+    assert "p" not in persist
+
+
+def test_reenabling_auto_mode_resets_the_failure_counters(persist):
+    """After a self-disable, re-enabling (the same engine instance - the
+    dashboard runs exactly one) must start the counter fresh, not resume
+    counting from the streak that just tripped it."""
+    cfg_holder = {"cfg": {"scheduler": {"enabled": True, "auto_mode": True}}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg_holder["cfg"],
+                             auto_mode_failure_threshold=2)
+
+    engine.report_generate_outcome("p", False)
+    engine.report_generate_outcome("p", False)  # trips, disables auto_mode
+    assert persist["p"]["scheduler"]["auto_mode"] is False
+
+    # config_fn reads back whatever was last persisted, same as the real
+    # pm.get_profile_config would after the write above.
+    cfg_holder["cfg"] = persist["p"]
+    engine.toggle("p", "auto_mode", True)
+    persist.clear()  # isolate what happens next from the toggle's own write
+
+    engine.report_generate_outcome("p", False)
+    assert "p" not in persist  # one failure after the reset, not tripped again
