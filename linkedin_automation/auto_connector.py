@@ -169,6 +169,17 @@ class ConnectionTracker:
         self.save()
         return url
 
+    def peek_next_search_url(self, urls: List[str]) -> Optional[str]:
+        """Return the URL ``next_search_url`` would return, WITHOUT advancing
+        the rotation pointer or writing to disk - for display only (e.g. "next
+        up" in a dashboard). Returns ``None`` for an empty list rather than
+        raising, since "nothing queued" is a normal display state here, not
+        the error condition it is for an actual run."""
+        if not urls:
+            return None
+        idx = self.data.get("rotation_index", 0) % len(urls)
+        return urls[idx]
+
     def _normalize_url(self, url: str) -> str:
         """Normalize profile URL for comparison."""
         if not url:

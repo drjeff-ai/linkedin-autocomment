@@ -2491,6 +2491,65 @@ def scheduler_run_now(profile_name):
     return jsonify({"ok": True, "result": result})
 
 
+@app.route('/api/scheduler/<profile_name>/connector/status', methods=['GET'])
+def scheduler_connector_status(profile_name):
+    """GET — the connector scheduler's search-URL rotation and cap stats.
+
+    Separate from the generic ``/connector/stats`` endpoint (which the manual
+    Auto-Connector panel uses and which does not read a profile's configured
+    caps at all): this one builds :class:`ConnectionTracker` with the
+    profile's actual ``connector.max_daily_requests`` / ``connector.weekly_limit``
+    config, the same way ``Scheduler._fire_connector`` does, so the numbers
+    shown here are never a separate calculation from what governs a real run.
+    """
+    from .auto_connector import ConnectionTracker
+    conn = pm.get_profile_config(profile_name).get("connector", {}) or {}
+    urls = conn.get("search_urls") or []
+    daily_limit = conn.get("max_daily_requests", ConnectionTracker.DEFAULT_DAILY_LIMIT)
+    weekly_limit = conn.get("weekly_limit", ConnectionTracker.DEFAULT_WEEKLY_LIMIT)
+    tracker = ConnectionTracker(profile_name, weekly_limit=weekly_limit, daily_limit=daily_limit)
+    stats = tracker.get_stats()
+    return jsonify({
+        "search_urls": urls,
+        "next_url": tracker.peek_next_search_url(urls),
+        "sent_today": stats["today"],
+        "sent_this_week": stats["this_week"],
+        "daily_limit": stats["daily_limit"],
+        "weekly_limit": stats["weekly_limit"],
+        "remaining": stats["remaining"],
+        "at_cap": stats["remaining"] <= 0,
+    })
+
+
+@app.route('/api/scheduler/<profile_name>/connector/urls', methods=['POST'])
+def scheduler_connector_urls(profile_name):
+    """POST — replace the connector's ``search_urls`` rotation list.
+
+    Body: ``{"search_urls": [url, ...]}``. The client sends the full desired
+    list; add/remove/reorder are all expressed as "here is the new list", one
+    write, same shape as ``schedSaveConfig`` already uses for job windows.
+    Blank entries are dropped; order and duplicates are otherwise kept as
+    given. This writes the profile's top-level ``connector`` section, not the
+    ``scheduler`` section — ``search_urls`` is read by the same
+    ``resolve_search_url``/manual-run path the scheduler's connector job
+    shares, not a scheduler-only setting.
+    """
+    body = request.json or {}
+    urls = body.get("search_urls")
+    if not isinstance(urls, list) or not all(isinstance(u, str) for u in urls):
+        return jsonify({"error": "search_urls must be a list of strings"}), 400
+    cleaned = [u.strip() for u in urls if u.strip()]
+    # read_stored_config, not get_profile_config, is the correct base for a
+    # partial update - get_profile_config deep-merges the default template
+    # in, and writing that back would bake every default key (persona,
+    # keywords, behaviour, ...) into this profile's file (see
+    # update_profile_config_route above, same lesson).
+    stored = pm.read_stored_config(profile_name)
+    merged = pm._deep_merge(stored, {"connector": {"search_urls": cleaned}})
+    pm.save_profile_config(profile_name, merged)
+    return jsonify({"ok": True, "search_urls": cleaned})
+
+
 # ─── Serve Frontend ──────────────────────────────────────────────────────────
 
 @app.route('/')

@@ -1554,6 +1554,60 @@ header {
         </div>
       </div>
 
+      <!-- Connector job (unrelated to Auto Mode above - its own toggle) -->
+      <div class="poster-section" style="margin-bottom:1rem">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <h3>🔗 Connector</h3>
+          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer">
+            <input type="checkbox" id="schedConnEnabled" onchange="schedToggle('connector', this.checked)">
+            enabled
+          </label>
+        </div>
+        <p style="color:var(--text-dim);font-size:0.85rem;margin:0.25rem 0 0.75rem">
+          Sends connection requests on its own randomized window, walking the
+          search-URL list below. Unrelated to Auto Mode above — this toggle
+          never turns Auto Mode on or off, and vice versa.
+        </p>
+        <div class="form-row" style="gap:1rem;flex-wrap:wrap">
+          <div class="form-group" style="margin:0">
+            <label>Windows (HH:MM-HH:MM, comma separated)</label>
+            <input type="text" id="schedConnWindows" placeholder="10:00-16:00">
+          </div>
+          <div class="form-group" style="margin:0;max-width:110px">
+            <label>Pages per run</label>
+            <input type="number" id="schedConnPages" min="1">
+          </div>
+          <div class="form-group" style="margin:0;max-width:110px">
+            <label>Skip chance</label>
+            <input type="number" id="schedConnSkip" min="0" max="1" step="0.05">
+          </div>
+        </div>
+        <div id="schedConnWhen" style="color:var(--text-dim);font-size:0.85rem;margin-top:0.5rem"></div>
+        <div class="form-row" style="margin-top:0.75rem">
+          <button class="btn" onclick="schedSaveConfig()">Save Settings</button>
+          <button class="btn btn-primary" onclick="schedRunNow('connector')">Run Now (test)</button>
+        </div>
+
+        <div id="schedConnEmptyWarning" style="display:none;color:#ff8a8a;font-size:0.85rem;
+             background:rgba(255,80,80,0.08);border:1px solid rgba(255,80,80,0.3);
+             border-radius:6px;padding:0.5rem 0.7rem;margin-top:0.75rem">
+          ⚠ Enabled, but the search-URL list below is empty — this job cannot
+          run until at least one URL is added.
+        </div>
+
+        <div id="schedConnCaps" style="color:var(--text-dim);font-size:0.85rem;margin-top:0.75rem"></div>
+
+        <div style="margin-top:0.75rem;border-top:1px solid var(--border);padding-top:0.75rem">
+          <label style="font-size:0.85rem;color:var(--text-dim)">Search-URL rotation</label>
+          <div id="schedConnUrlList" style="margin:0.5rem 0"></div>
+          <div class="form-row" style="gap:0.5rem">
+            <input type="text" id="schedConnNewUrl" class="connector-url-input"
+                   style="flex:1" placeholder="https://www.linkedin.com/search/results/people/?...">
+            <button class="btn btn-sm" onclick="schedConnAddUrl()">Add</button>
+          </div>
+        </div>
+      </div>
+
       <!-- Recent runs -->
       <div class="poster-section">
         <div style="display:flex;justify-content:space-between;align-items:center">
@@ -4002,10 +4056,99 @@ async function loadScheduler() {
     document.getElementById('schedGenWhen').textContent =
       `Up to ${gc.max_comments} per run. Today: ${fmtWindows(gc)}. ${fmtLastRun(gc)}`;
 
+    const cc = s.jobs.connector;
+    document.getElementById('schedConnEnabled').checked = !!cc.enabled;
+    document.getElementById('schedConnWindows').value =
+      (cc.windows || []).map(w => `${w.window[0]}-${w.window[1]}`).join(', ');
+    document.getElementById('schedConnPages').value = cc.pages ?? 5;
+    document.getElementById('schedConnSkip').value = cc.skip_chance ?? 0.1;
+    document.getElementById('schedConnWhen').textContent =
+      `${cc.pages} page(s) per run. Today: ${fmtWindows(cc)}. ${fmtLastRun(cc)}`;
+    window._schedConnEnabled = !!cc.enabled;
+
     renderSchedRuns(s.recent_runs || []);
+    loadConnectorSchedulerStatus();
   } catch (e) {
     console.error('Scheduler load error:', e);
   }
+}
+
+async function loadConnectorSchedulerStatus() {
+  if (!currentProfile) return;
+  try {
+    const res = await fetch(`/api/scheduler/${currentProfile}/connector/status`);
+    const cs = await res.json();
+    renderConnUrlList(cs.search_urls || [], cs.next_url);
+
+    const warn = document.getElementById('schedConnEmptyWarning');
+    warn.style.display = (window._schedConnEnabled && (cs.search_urls || []).length === 0)
+      ? 'block' : 'none';
+
+    const capsEl = document.getElementById('schedConnCaps');
+    const capNote = cs.at_cap ? ' — ⚠ cap reached, next run will be skipped' : '';
+    capsEl.textContent =
+      `Sent today: ${cs.sent_today}/${cs.daily_limit} · this week: ${cs.sent_this_week}/${cs.weekly_limit}${capNote}`;
+  } catch (e) {
+    console.error('Connector scheduler status error:', e);
+  }
+}
+
+function renderConnUrlList(urls, nextUrl) {
+  const el = document.getElementById('schedConnUrlList');
+  if (!urls.length) {
+    el.innerHTML = `<div style="color:var(--text-dim);font-size:0.85rem">No search URLs configured.</div>`;
+    return;
+  }
+  el.innerHTML = urls.map((u, i) => {
+    const isNext = u === nextUrl;
+    return `<div class="card" style="padding:0.4rem 0.6rem;display:flex;align-items:center;gap:0.5rem;margin-bottom:0.3rem">
+      ${isNext ? '<span title="Next up">▶</span>' : '<span style="width:1em;display:inline-block"></span>'}
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.85rem">${esc(u)}</span>
+      <button class="btn btn-sm" onclick="schedConnMoveUrl(${i}, -1)" ${i === 0 ? 'disabled' : ''}>↑</button>
+      <button class="btn btn-sm" onclick="schedConnMoveUrl(${i}, 1)" ${i === urls.length - 1 ? 'disabled' : ''}>↓</button>
+      <button class="btn btn-sm btn-danger" onclick="schedConnRemoveUrl(${i})">Remove</button>
+    </div>`;
+  }).join('');
+}
+
+async function schedConnSaveUrls(urls) {
+  if (!currentProfile) return;
+  try {
+    await fetch(`/api/scheduler/${currentProfile}/connector/urls`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({search_urls: urls}),
+    });
+    loadConnectorSchedulerStatus();
+  } catch (e) {
+    console.error('Connector URL save error:', e);
+  }
+}
+
+async function schedConnAddUrl() {
+  const input = document.getElementById('schedConnNewUrl');
+  const url = input.value.trim();
+  if (!url) return;
+  const res = await fetch(`/api/scheduler/${currentProfile}/connector/status`);
+  const cs = await res.json();
+  const urls = [...(cs.search_urls || []), url];
+  input.value = '';
+  await schedConnSaveUrls(urls);
+}
+
+async function schedConnRemoveUrl(index) {
+  const res = await fetch(`/api/scheduler/${currentProfile}/connector/status`);
+  const cs = await res.json();
+  const urls = (cs.search_urls || []).filter((_, i) => i !== index);
+  await schedConnSaveUrls(urls);
+}
+
+async function schedConnMoveUrl(index, delta) {
+  const res = await fetch(`/api/scheduler/${currentProfile}/connector/status`);
+  const urls = (await res.json()).search_urls || [];
+  const target = index + delta;
+  if (target < 0 || target >= urls.length) return;
+  [urls[index], urls[target]] = [urls[target], urls[index]];
+  await schedConnSaveUrls(urls);
 }
 
 function renderSchedRuns(runs) {
@@ -4068,6 +4211,11 @@ async function schedSaveConfig() {
       windows: parseWindows(document.getElementById('schedGenWindows').value),
       max_comments: parseInt(document.getElementById('schedGenMax').value, 10),
       skip_chance: parseFloat(document.getElementById('schedGenSkip').value),
+    },
+    connector: {
+      windows: parseWindows(document.getElementById('schedConnWindows').value),
+      pages: parseInt(document.getElementById('schedConnPages').value, 10),
+      skip_chance: parseFloat(document.getElementById('schedConnSkip').value),
     },
   };
   try {

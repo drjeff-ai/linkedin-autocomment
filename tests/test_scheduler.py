@@ -482,6 +482,7 @@ def tracker_dir(tmp_path, monkeypatch):
 
 def test_connector_run_now_uses_config_pages(tracker_dir):
     cfg = _config({"enabled": True, "connector": {"enabled": True, "pages": 3}})
+    cfg["connector"] = {"search_urls": ["https://search-url"]}
     executor = RecordingExecutor()
     engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 10, 0)),
                                executor=executor, config=cfg)
@@ -496,7 +497,8 @@ def test_connector_at_daily_cap_does_not_submit(tracker_dir):
         tracker.record_sent(f"n{i}", f"https://www.linkedin.com/in/p{i}/")
     cfg = _config({"enabled": True, "connector": {"enabled": True, "pages": 5}})
     # connector.max_daily_requests must match the tracker's daily_limit above.
-    cfg["connector"] = {"max_daily_requests": 5, "weekly_limit": 100}
+    cfg["connector"] = {"max_daily_requests": 5, "weekly_limit": 100,
+                        "search_urls": ["https://search-url"]}
     executor = RecordingExecutor()
     engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 10, 0)),
                                executor=executor, config=cfg)
@@ -511,7 +513,8 @@ def test_connector_at_weekly_cap_does_not_submit(tracker_dir):
     for i in range(3):
         tracker.record_sent(f"n{i}", f"https://www.linkedin.com/in/p{i}/")
     cfg = _config({"enabled": True, "connector": {"enabled": True, "pages": 5}})
-    cfg["connector"] = {"max_daily_requests": 25, "weekly_limit": 3}
+    cfg["connector"] = {"max_daily_requests": 25, "weekly_limit": 3,
+                        "search_urls": ["https://search-url"]}
     executor = RecordingExecutor()
     engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 10, 0)),
                                executor=executor, config=cfg)
@@ -523,13 +526,41 @@ def test_connector_at_weekly_cap_does_not_submit(tracker_dir):
 def test_connector_under_cap_submits(tracker_dir):
     """Below the cap, the connector job is submitted normally."""
     cfg = _config({"enabled": True, "connector": {"enabled": True, "pages": 5}})
-    cfg["connector"] = {"max_daily_requests": 25, "weekly_limit": 100}
+    cfg["connector"] = {"max_daily_requests": 25, "weekly_limit": 100,
+                        "search_urls": ["https://search-url"]}
     executor = RecordingExecutor()
     engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 10, 0)),
                                executor=executor, config=cfg)
     result = engine.run_now("p", "connector")
     assert result["action"] == sched.ACTION_FIRED
     assert len(executor.connector_calls) == 1
+
+
+def test_connector_empty_search_urls_does_not_submit(tracker_dir):
+    """No search_urls configured: never reaches the cap check or the executor
+    (the browser factory), even if the job is enabled and under cap."""
+    cfg = _config({"enabled": True, "connector": {"enabled": True, "pages": 5}})
+    cfg["connector"] = {"max_daily_requests": 25, "weekly_limit": 100,
+                        "search_urls": []}
+    executor = RecordingExecutor()
+    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 10, 0)),
+                               executor=executor, config=cfg)
+    result = engine.run_now("p", "connector")
+    assert result["action"] == sched.ACTION_QUEUE_EMPTY
+    assert executor.connector_calls == []
+
+
+def test_connector_missing_search_urls_key_does_not_submit(tracker_dir):
+    """Same as above, but connector.search_urls is simply absent rather than
+    an explicit empty list - the default-merge path."""
+    cfg = _config({"enabled": True, "connector": {"enabled": True, "pages": 5}})
+    cfg["connector"] = {"max_daily_requests": 25, "weekly_limit": 100}
+    executor = RecordingExecutor()
+    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 10, 0)),
+                               executor=executor, config=cfg)
+    result = engine.run_now("p", "connector")
+    assert result["action"] == sched.ACTION_QUEUE_EMPTY
+    assert executor.connector_calls == []
 
 
 def test_connector_default_off_never_fires_from_tick(tracker_dir):
@@ -549,6 +580,17 @@ def test_toggle_connector_persists(persist):
     engine = sched.Scheduler(config_fn=lambda p: cfg)
     engine.toggle("p", "connector", True)
     assert persist["p"]["scheduler"]["connector"]["enabled"] is True
+
+
+def test_toggle_connector_on_never_touches_auto_mode(persist):
+    """The reverse of test_toggle_auto_mode_on_never_touches_connector:
+    connector and auto_mode are unrelated features sharing JOB_TYPES/toggle
+    plumbing - enabling connector must not enable auto_mode either."""
+    cfg = {"scheduler": {"enabled": True, "auto_mode": False}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg)
+    sched_out = engine.toggle("p", "connector", True)
+    assert sched_out["connector"]["enabled"] is True
+    assert sched_out["auto_mode"] is False
 
 
 def test_disabled_job_never_fires(redirect_store):
