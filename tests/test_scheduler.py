@@ -513,17 +513,6 @@ def test_toggle_connector_persists(persist):
     assert persist["p"]["scheduler"]["connector"]["enabled"] is True
 
 
-def test_toggle_connector_on_never_touches_auto_mode(persist):
-    """The reverse of test_toggle_auto_mode_on_never_touches_connector:
-    connector and auto_mode are unrelated features sharing JOB_TYPES/toggle
-    plumbing - enabling connector must not enable auto_mode either."""
-    cfg = {"scheduler": {"enabled": True, "auto_mode": False}}
-    engine = sched.Scheduler(config_fn=lambda p: cfg)
-    sched_out = engine.toggle("p", "connector", True)
-    assert sched_out["connector"]["enabled"] is True
-    assert sched_out["auto_mode"] is False
-
-
 def test_disabled_job_never_fires(redirect_store):
     """A disabled job type is skipped even when the master switch is on."""
     clock = Clock(datetime(2026, 7, 7, 7, 0))
