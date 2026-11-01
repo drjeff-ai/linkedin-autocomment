@@ -77,32 +77,34 @@ def test_run_now_scrape_submits_job(api_client, monkeypatch):
     assert calls  # a (stubbed) browser job was submitted
 
 
-# ─── auto_mode and generate (Dispatch 37) ─────────────────────────────────────
+# ─── auto_mode and auto_cycle (Dispatch 40) ────────────────────────────────────
 
-def test_status_includes_generate_job_and_auto_mode_off_by_default(api_client):
+def test_status_includes_auto_cycle_job_and_auto_mode_off_by_default(api_client):
     data = api_client.get("/api/scheduler/work/status").get_json()
     assert data["auto_mode"] is False
     assert data["auto_mode_stopped_reason"] is None
-    gen = data["jobs"]["generate"]
-    assert gen["enabled"] is False
+    cyc = data["jobs"]["auto_cycle"]
+    assert cyc["enabled"] is False
     from linkedin_automation import scheduler as sched_mod
-    assert gen["max_comments"] == sched_mod.GENERATE_DEFAULT_CAP
+    assert cyc["max_comments"] == sched_mod.GENERATE_DEFAULT_CAP
+    assert cyc["count_min"] == 4 and cyc["count_max"] == 8
 
 
-def test_toggle_auto_mode_enables_the_chain(api_client):
+def test_toggle_auto_mode_enables_the_cycle_only(api_client):
+    """auto_mode now drives exactly one job (auto_cycle) - it must not touch
+    scrape/post_comments's own independent toggles in either direction."""
     resp = api_client.post("/api/scheduler/work/toggle",
                            json={"job": "auto_mode", "enabled": True})
     assert resp.status_code == 200
     sched = resp.get_json()["scheduler"]
     assert sched["auto_mode"] is True
     assert sched["enabled"] is True
-    assert sched["generate"]["enabled"] is True
-    assert sched["scrape"]["enabled"] is True
-    assert sched["post_comments"]["enabled"] is True
+    assert sched["auto_cycle"]["enabled"] is True
+    assert sched["scrape"]["enabled"] is False  # untouched (shipped default)
 
     status = api_client.get("/api/scheduler/work/status").get_json()
     assert status["auto_mode"] is True
-    assert status["jobs"]["generate"]["enabled"] is True
+    assert status["jobs"]["auto_cycle"]["enabled"] is True
 
 
 def test_toggle_auto_mode_off(api_client):
@@ -113,12 +115,18 @@ def test_toggle_auto_mode_off(api_client):
     assert resp.get_json()["scheduler"]["auto_mode"] is False
 
 
-def test_run_now_generate_no_new_posts_is_queue_empty(api_client):
-    """generate's queue is the NEW bin, which is empty in a fresh tmp store -
-    same shape as the existing post_comments run-now test above."""
-    resp = api_client.post("/api/scheduler/work/run-now", json={"job": "generate"})
+def test_run_now_auto_cycle_submits_job(api_client, monkeypatch):
+    """run-now auto_cycle reaches the executor; stub run_job so no browser
+    spawns. The real stage sequencing lives inside the stubbed job body, so
+    this only proves the submit path is reached - see test_scheduler.py for
+    run_auto_cycle's own call-order/short-circuit tests."""
+    calls = []
+    monkeypatch.setattr(linkedin_dashboard, "run_job",
+                        lambda *a, **k: calls.append((a, k)))
+    resp = api_client.post("/api/scheduler/work/run-now", json={"job": "auto_cycle"})
     assert resp.status_code == 200
-    assert resp.get_json()["result"]["action"] == "queue_empty"
+    assert resp.get_json()["result"]["action"] == "fired"
+    assert calls
 
 
 # ─── connector (Dispatch 38) ───────────────────────────────────────────────────

@@ -511,7 +511,7 @@ outcome leaves it `GENERATED` for the next run.
 ## 6. Scheduler — `scheduler.py` _(sketch)_
 
 In-process thread, no Flask imports; the dashboard injects executor callbacks.
-Per-profile randomized windows for `post_comments`, `scrape`, `generate`, and
+Per-profile randomized windows for `post_comments`, `scrape`, `auto_cycle`, and
 `connector` (§7), with a skip chance, a minimum gap between fires, and daily
 roll of fire times. Submits through the dashboard's `run_job` + browser lock.
 
@@ -521,13 +521,36 @@ roll of fire times. Submits through the dashboard's `run_job` + browser lock.
 profile already at it (§7) — the one job type whose fire decision depends on
 state outside this module.
 
-`generate` is the third job type (Dispatch 37): unlike `post_comments` and
-`scrape`, it only ever fires from the unattended tick loop when a profile's
-`auto_mode` is also on — see the module docstring in `scheduler.py` for the
-per-cycle cap and the circuit breaker that disables `auto_mode` after
-consecutive failures. `auto_mode`'s single-toggle convenience governs exactly
-`post_comments`/`scrape`/`generate` (`AUTO_MODE_JOB_TYPES`); `connector` is
-unrelated and is never touched by it.
+`auto_cycle` is the third job type (Dispatch 40, replacing Dispatch 37's
+separate `generate` job): unlike `post_comments` and `scrape`, it only ever
+fires from the unattended tick loop when a profile's `auto_mode` is also on.
+It is ONE job with ONE window: firing it submits a single async job
+(`submit_cycle_job`) whose real body (`dashboard._auto_cycle_job`) runs
+scrape, then generate against what the scrape produced, then post, in that
+order, waiting for each stage to finish before starting the next and
+stopping at the first one that fails — sequenced by the pure, module-level
+`scheduler.run_auto_cycle(profile, run_scrape, run_generate, run_post)`,
+which takes the three stage runners as plain injected callables and is
+exactly what tests target for call-order and short-circuit behavior, with no
+engine, Flask, or subprocess involved. A scrape that finds zero posts is not
+a failure — the cycle still runs generate and post.
+
+Any stage failing disables `auto_mode` on that FIRST failure (no
+consecutive-failure counting — see `scheduler.report_cycle_outcome` /
+`_disable_auto_mode`), writing `auto_mode_stopped_reason` naming the failing
+stage. `auto_mode`'s single-toggle convenience now governs only `auto_cycle`;
+`post_comments`/`scrape` keep their own independent toggles (Audit 36 — they
+can run unattended under the plain master+job `enabled` flags, with no
+auto_mode involved), untouched by it in both directions, same as `connector`.
+
+Holding the browser lock across the whole cycle, rather than taking it in
+turn per stage, is possible and is what `_auto_cycle_job` does: the lock
+(`can_start_browser_task`) is just whether a `task_type="browser"` job entry
+is still `running`, not a literal webdriver handle, so one `run_job` call
+covering all three stages (even the API-only generate stage in the middle)
+holds it continuously for free. An existing config that still carries the
+old `scheduler.generate` section keeps it as inert data — nothing reads it,
+nothing fires from it, nothing deletes it.
 
 ### 6.1 Config isolation between profiles
 
