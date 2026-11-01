@@ -538,10 +538,25 @@ a failure — the cycle still runs generate and post.
 Any stage failing disables `auto_mode` on that FIRST failure (no
 consecutive-failure counting — see `scheduler.report_cycle_outcome` /
 `_disable_auto_mode`), writing `auto_mode_stopped_reason` naming the failing
-stage. `auto_mode`'s single-toggle convenience now governs only `auto_cycle`;
-`post_comments`/`scrape` keep their own independent toggles (Audit 36 — they
-can run unattended under the plain master+job `enabled` flags, with no
-auto_mode involved), untouched by it in both directions, same as `connector`.
+stage. `auto_mode`'s single-toggle convenience now governs only `auto_cycle`'s
+`enabled` flag; `post_comments`/`scrape` keep their own independent toggles
+(Audit 36 — they can run unattended under the plain master+job `enabled`
+flags, with no auto_mode involved) and their config is never written to by
+`auto_mode` in either direction, same as `connector`.
+
+**But while `auto_mode` is ON, `_tick_profile` suppresses `post_comments` and
+`scrape` from firing unattended (Dispatch 41).** `auto_cycle` already runs a
+scrape and a post stage itself; without the suppression, a profile with
+`auto_mode` on and `scrape.enabled`/`post_comments.enabled` also true gets
+the cycle's scrape/post AND the standalone jobs' own independent windows
+firing — duplicated work, not a second opinion. The gate is in the tick loop
+only: it reads `enabled` on both standalone jobs and skips evaluating their
+windows entirely while `auto_mode` is on, but never writes to their config,
+so turning `auto_mode` back off restores their own schedules exactly as
+configured, with no separate re-toggle. `run_now()` bypasses the gate (same
+as it already bypasses `enabled`), so a profile can still manually fire
+`scrape`/`post_comments` on demand regardless of `auto_mode`. `connector` is
+untouched by any of this, in both directions.
 
 Holding the browser lock across the whole cycle, rather than taking it in
 turn per stage, is possible and is what `_auto_cycle_job` does: the lock

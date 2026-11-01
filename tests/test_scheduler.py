@@ -693,6 +693,110 @@ def test_run_now_cycle_bypasses_auto_mode(redirect_store):
     assert len(executor.cycle_calls) == 1
 
 
+# ─── auto_mode suppresses the standalone scrape/post_comments jobs (Dispatch 41) ─
+# Traced before the fix: _tick_profile's only auto_mode gate was on auto_cycle
+# itself ("if job_type == 'auto_cycle' and not cfg.get('auto_mode'): continue").
+# Nothing stopped scrape/post_comments from being evaluated exactly as if
+# auto_mode did not exist - so a profile with auto_mode on AND
+# scrape.enabled/post_comments.enabled also true fired the cycle (which
+# already runs its own scrape and post stages) AND the two standalone jobs
+# from their own independent windows: duplicated work every cycle, not a
+# second opinion. Answer: YES, both fired.
+
+def _combined_auto_cfg(**over):
+    """auto_mode on, with scrape, post_comments and auto_cycle all
+    independently enabled and sharing one window - the exact shape the
+    dispatch asks about."""
+    base = {
+        "enabled": True, "auto_mode": True,
+        "scrape": {"enabled": True, "windows": [["12:00", "13:00"]],
+                   "max_posts": 50, "min_quality": 5, "skip_chance": 0.1},
+        "post_comments": {"enabled": True, "windows": [["12:00", "13:00"]],
+                          "count_min": 4, "count_max": 8, "skip_chance": 0.1},
+        "auto_cycle": {"enabled": True, "windows": [["12:00", "13:00"]],
+                       "max_posts": 100, "min_quality": 10, "max_comments": 10,
+                       "count_min": 4, "count_max": 8, "skip_chance": 0.1},
+    }
+    base.update(over)
+    return _config(base)
+
+
+def test_auto_mode_on_fires_the_cycle_and_not_the_standalone_jobs(redirect_store):
+    """Dispatch 41's gate: auto_mode on, with scrape.enabled and
+    post_comments.enabled both true, fires the cycle and NOT the standalone
+    jobs. Assert on which jobs are submitted. A non-empty GENERATED bin
+    proves post_comments would have fired for real (not resolved
+    queue_empty) had the suppression not caught it."""
+    redirect_store["store"] = FakeStore(_generated(5))
+    clock = Clock(datetime(2026, 7, 7, 7, 0))
+    executor = RecordingExecutor()
+    rng = FakeRng(randint_fn=lambda a, b: 0, random_val=0.99)
+    engine, _ = make_scheduler(now=clock, rng=rng, executor=executor,
+                               config=_combined_auto_cfg())
+    _fire_via_tick(engine, clock, datetime(2026, 7, 7, 7, 0), datetime(2026, 7, 7, 12, 30))
+    assert len(executor.cycle_calls) == 1
+    assert executor.scrape_calls == []
+    assert executor.post_calls == []
+
+
+def test_auto_mode_off_restores_the_standalone_jobs(redirect_store, persist):
+    """The mirror case: flipping auto_mode back off - without touching
+    scrape/post_comments's own config - lets their suppressed windows fire
+    again, exactly as the dispatch requires ("Their config values are left
+    alone so turning auto mode off restores them")."""
+    redirect_store["store"] = FakeStore(_generated(5))
+    clock = Clock(datetime(2026, 7, 7, 7, 0))
+    executor = RecordingExecutor()
+    rng = FakeRng(randint_fn=lambda a, b: 0, random_val=0.99)
+    engine, _ = make_scheduler(now=clock, rng=rng, executor=executor,
+                               config=_combined_auto_cfg())
+
+    # auto_mode on: suppressed, as proven above.
+    _fire_via_tick(engine, clock, datetime(2026, 7, 7, 7, 0), datetime(2026, 7, 7, 12, 30))
+    assert executor.scrape_calls == [] and executor.post_calls == []
+    assert len(executor.cycle_calls) == 1
+
+    # Flip auto_mode off. scrape/post_comments's own `enabled` flags were
+    # never written to by the suppression, so they are still True underneath.
+    sched_out = engine.toggle("p", "auto_mode", False)
+    assert sched_out["scrape"]["enabled"] is True
+    assert sched_out["post_comments"]["enabled"] is True
+
+    # Next day's roll fires their own window again. post_comments is
+    # evaluated first in JOB_TYPES order and consumes the shared min-gap
+    # slot by firing; scrape, evaluated right after in the same tick, waits
+    # out the gap - the same shared-slot mechanics test_min_gap_between_runs
+    # exercises in isolation.
+    clock.dt = datetime(2026, 7, 8, 7, 0)
+    engine.tick()
+    clock.dt = datetime(2026, 7, 8, 12, 30)
+    engine.tick()
+    assert len(executor.post_calls) == 1
+    assert executor.scrape_calls == []
+
+    clock.dt = datetime(2026, 7, 8, 14, 1)
+    engine.tick()
+    assert len(executor.scrape_calls) == 1
+
+    # auto_cycle stayed off (toggling auto_mode off does not force it off,
+    # but it also never fires without auto_mode) - it does not pile a second
+    # cycle on top of the restored standalone jobs.
+    assert len(executor.cycle_calls) == 1
+
+
+def test_auto_mode_on_suppression_never_writes_to_scrape_or_post_comments_config(persist):
+    """The suppression is a tick-loop gate only - toggling auto_mode on must
+    not persist any change to scrape/post_comments's own sections."""
+    cfg = {"scheduler": {"enabled": True, "scrape": {"enabled": True},
+                        "post_comments": {"enabled": True}}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg)
+    sched_out = engine.toggle("p", "auto_mode", True)
+    assert sched_out["scrape"]["enabled"] is True
+    assert sched_out["post_comments"]["enabled"] is True
+    assert persist["p"]["scheduler"]["scrape"]["enabled"] is True
+    assert persist["p"]["scheduler"]["post_comments"]["enabled"] is True
+
+
 # ─── run_auto_cycle: scrape -> generate -> post, in order, stop on failure ────
 # Pure, dependency-injected (scheduler.py module-level function) - no engine,
 # no Flask, no subprocess. This is the gate's own "assert on the call order,

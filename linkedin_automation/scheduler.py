@@ -39,14 +39,24 @@ the same plain ``enabled``-flag rule ``post_comments``/``scrape`` use: it only
 ever fires from the unattended tick loop when ``auto_mode`` is also on for
 that profile (see ``_tick_profile``). Flipping ``auto_mode`` on is a
 convenience that also turns on the master switch and ``auto_cycle``'s own
-``enabled`` flag in one write (``toggle(profile, "auto_mode", True)``);
-``post_comments``/``scrape``'s own independent schedules (Audit 36 - they can
-already run unattended under the plain master+job ``enabled`` flags, with no
-auto_mode involved) are untouched by this, in both directions. A per-cycle
-cap (``auto_cycle.max_comments``, default :data:`GENERATE_DEFAULT_CAP`) and
-count range (``auto_cycle.count_min``/``count_max``) bound the generate and
-post stages exactly as they did under the old separate jobs - same numbers,
-now read from one section.
+``enabled`` flag in one write (``toggle(profile, "auto_mode", True)``).
+
+``post_comments``/``scrape`` keep their own independent schedules (Audit 36 -
+they can run unattended under the plain master+job ``enabled`` flags with no
+auto_mode involved), but while ``auto_mode`` is ON for a profile, the
+unattended tick loop suppresses both of them from firing on their own
+(Dispatch 41) - the cycle already runs a scrape and a post stage itself, and
+letting the standalone jobs fire too would duplicate that work every cycle.
+Suppression is a tick-loop gate only: their ``enabled`` flags and every other
+config value are left exactly as configured, so turning ``auto_mode`` back
+off restores them with no separate re-toggle, and ``run_now()`` still fires
+either one on demand regardless of ``auto_mode`` (same bypass it already
+gives ``enabled``). ``connector`` is untouched by ``auto_mode`` in both
+directions, same as before. A per-cycle cap (``auto_cycle.max_comments``,
+default :data:`GENERATE_DEFAULT_CAP`) and count range
+(``auto_cycle.count_min``/``count_max``) bound the generate and post stages
+exactly as they did under the old separate jobs - same numbers, now read from
+one section.
 
 Any stage failing stops the cycle immediately - later stages do not run - and
 disables ``auto_mode`` for that profile on that FIRST failure, not after a
@@ -427,13 +437,20 @@ class Scheduler:
             if not job_cfg.get("enabled"):
                 continue
             # auto_cycle never fires from the unattended tick loop without
-            # auto_mode, regardless of its own enabled flag - this is the
-            # one gate that distinguishes it from scrape/post_comments, which
-            # already ran unattended under the plain master+job enabled flags
-            # before auto_mode existed (Audit 36) and keep doing so unchanged.
+            # auto_mode, regardless of its own enabled flag.
             # run_now() bypasses this deliberately, same as it already
             # bypasses enabled - see run_now's docstring.
             if job_type == "auto_cycle" and not cfg.get("auto_mode"):
+                continue
+            # While auto_mode is on, the cycle already runs scrape and post
+            # as its first and third stages - the standalone scrape /
+            # post_comments jobs must not ALSO fire unattended, or every
+            # cycle duplicates its own scrape and post as a second run.
+            # Their own `enabled` flag (and every other config value) is
+            # left untouched here, so turning auto_mode back off restores
+            # them exactly as configured, with no separate re-toggle.
+            # run_now() bypasses this too, for the same reason as above.
+            if job_type in ("scrape", "post_comments") and cfg.get("auto_mode"):
                 continue
             for idx, window in enumerate(job_cfg.get("windows") or []):
                 slot = self._slot(state, job_type, idx, window)
