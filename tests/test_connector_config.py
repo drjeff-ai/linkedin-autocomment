@@ -134,6 +134,34 @@ def test_next_search_url_persists_across_restart(tracker_dir):
     assert saved["rotation_index"] == 2
 
 
+# ─── peek_next_search_url: read-only, never advances (Dispatch 39) ───────────
+
+def test_peek_next_search_url_matches_what_next_would_return(tracker_dir):
+    t = ac.ConnectionTracker("x")
+    urls = ["https://a", "https://b", "https://c"]
+    assert t.peek_next_search_url(urls) == "https://a"
+    assert t.peek_next_search_url(urls) == "https://a"  # repeated peeks: same answer
+    assert t.next_search_url(urls) == "https://a"  # the real call advances it
+    assert t.peek_next_search_url(urls) == "https://b"
+
+
+def test_peek_next_search_url_empty_returns_none_not_raise(tracker_dir):
+    """Unlike next_search_url, peeking an empty list is a normal display
+    state ("nothing queued"), not an error."""
+    t = ac.ConnectionTracker("x")
+    assert t.peek_next_search_url([]) is None
+
+
+def test_peek_next_search_url_does_not_persist(tracker_dir):
+    """Peeking never writes to disk - a fresh instance sees the same pointer."""
+    urls = ["https://a", "https://b"]
+    first = ac.ConnectionTracker("x")
+    for _ in range(5):
+        first.peek_next_search_url(urls)
+    second = ac.ConnectionTracker("x")
+    assert second.peek_next_search_url(urls) == "https://a"
+
+
 def test_resolve_search_url_explicit_does_not_advance(tracker_dir, monkeypatch):
     """An explicit URL is used as-is and never even touches the tracker file."""
     monkeypatch.setattr(

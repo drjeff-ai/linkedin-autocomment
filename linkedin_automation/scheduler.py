@@ -627,15 +627,22 @@ class Scheduler:
         self._profile_state(profile)["auto_mode_failures"][job_type] = 0
 
     def _fire_connector(self, profile, job_cfg, now):
-        """Fire a connector session; no-op if the cross-run cap is already spent.
+        """Fire a connector session; no-op if there is nothing to search with
+        or if the cross-run cap is already spent.
 
-        The cap check happens here, before the executor (and so before any
-        browser factory) is ever reached — a profile already at its daily or
-        weekly cap never submits a job, let alone opens a browser that can't
-        send anything.
+        Both checks happen here, before the executor (and so before any
+        browser factory) is ever reached: a profile with no configured
+        ``search_urls``, or one already at its daily or weekly cap, never
+        submits a job, let alone opens a browser that can't send anything.
         """
         full_config = self._config_fn(profile) or {}
         conn_cfg = full_config.get("connector", {}) or {}
+        urls = conn_cfg.get("search_urls") or []
+        if not urls:
+            logger.info("Scheduler[%s] connector: no search_urls configured, skipping", profile)
+            return {"action": ACTION_QUEUE_EMPTY, "count": 0,
+                    "note": "no search URLs configured"}
+
         daily_limit = conn_cfg.get("max_daily_requests", ConnectionTracker.DEFAULT_DAILY_LIMIT)
         weekly_limit = conn_cfg.get("weekly_limit", ConnectionTracker.DEFAULT_WEEKLY_LIMIT)
         tracker = ConnectionTracker(profile, weekly_limit=weekly_limit, daily_limit=daily_limit)
