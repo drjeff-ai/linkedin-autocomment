@@ -45,9 +45,9 @@ class FakeRng:
 
 
 class RecordingExecutor:
-    """Captures every submit_post_job / submit_scrape_job / submit_generate_job /
+    """Captures every submit_post_job / submit_scrape_job / submit_cycle_job /
     submit_connector_job call. ``seq`` is a single shared counter across
-    post/scrape/generate, so tests can assert ORDER between those job types
+    post/scrape/cycle, so tests can assert ORDER between those job types
     (not just each list's own order). ``connector_calls`` predates that
     counter and is asserted elsewhere by exact dict equality, so it is left
     without a ``seq`` key rather than widening those assertions."""
@@ -56,7 +56,7 @@ class RecordingExecutor:
         self.return_job = return_job
         self.post_calls = []
         self.scrape_calls = []
-        self.generate_calls = []
+        self.cycle_calls = []
         self.connector_calls = []
         self._seq = 0
 
@@ -74,10 +74,10 @@ class RecordingExecutor:
                                   "min_quality": min_quality, "seq": self._next_seq()})
         return f"scrape_{len(self.scrape_calls)}" if self.return_job else None
 
-    def submit_generate(self, profile, cap):
-        self.generate_calls.append({"profile": profile, "cap": cap,
-                                    "seq": self._next_seq()})
-        return f"generate_{len(self.generate_calls)}" if self.return_job else None
+    def submit_cycle(self, profile, job_cfg):
+        self.cycle_calls.append({"profile": profile, "job_cfg": job_cfg,
+                                 "seq": self._next_seq()})
+        return f"cycle_{len(self.cycle_calls)}" if self.return_job else None
 
     def submit_connector(self, profile, pages):
         self.connector_calls.append({"profile": profile, "pages": pages})
@@ -107,34 +107,24 @@ def _generated(n):
     } for i in range(n)]
 
 
-def _new_posts(n):
-    return [{"key": f"n{i}", "url": f"https://example.com/new/{i}",
-             "author": f"Author {i}", "text": f"New post body {i}"} for i in range(n)]
-
-
 def _config(scheduler_section):
     """A profile config wrapping just the scheduler section."""
     return {"scheduler": scheduler_section}
 
 
 def make_scheduler(*, now, rng=None, executor=None, config=None,
-                   min_gap_minutes=90, profiles=("p",),
-                   auto_mode_failure_threshold=None):
+                   min_gap_minutes=90, profiles=("p",)):
     executor = executor or RecordingExecutor()
     cfg = config if config is not None else {}
-    kwargs = {}
-    if auto_mode_failure_threshold is not None:
-        kwargs["auto_mode_failure_threshold"] = auto_mode_failure_threshold
     return sched.Scheduler(
         now_fn=now, rng=rng or FakeRng(), min_gap_minutes=min_gap_minutes,
         submit_post_job=executor.submit_post,
         submit_scrape_job=executor.submit_scrape,
-        submit_generate_job=executor.submit_generate,
+        submit_cycle_job=executor.submit_cycle,
         submit_connector_job=executor.submit_connector,
         browser_available=executor.browser_available,
         list_profiles=lambda: list(profiles),
         config_fn=lambda profile: cfg,
-        **kwargs,
     ), executor
 
 
@@ -162,9 +152,10 @@ def test_config_defaults_when_missing():
     assert pc["count_min"] == 4 and pc["count_max"] == 8
     assert [w["window"] for w in pc["windows"]] == [["08:00", "11:00"], ["14:00", "17:00"]]
     assert st["jobs"]["scrape"]["enabled"] is False
-    gc = st["jobs"]["generate"]
-    assert gc["enabled"] is False
-    assert gc["max_comments"] == sched.GENERATE_DEFAULT_CAP
+    cyc = st["jobs"]["auto_cycle"]
+    assert cyc["enabled"] is False
+    assert cyc["max_comments"] == sched.GENERATE_DEFAULT_CAP
+    assert cyc["count_min"] == 4 and cyc["count_max"] == 8
     assert st["jobs"]["connector"]["enabled"] is False
     assert st["jobs"]["connector"]["pages"] == 5
 
@@ -180,92 +171,32 @@ def test_partial_config_merges_defaults():
     assert pc["skip_chance"] == 0.1
 
 
-# ─── Generate/scrape window overlap warning ───────────────────────────────────
-#
-# The engine never enforces or depends on scrape finishing before generate -
-# window placement only. This warns (never refuses, never reorders) so an
-# overlapping edit is visible instead of silent. Assert on the warning, not
-# on behavior: these tests never check that anything actually fires in a
-# different order.
+# ─── An old config's leftover scheduler.generate section is inert (Dispatch 40) ─
 
-def _overlap_warnings(caplog):
-    return [r for r in caplog.records
-            if r.levelname == "WARNING" and "starts before scrape window" in r.getMessage()]
-
-
-def test_default_windows_do_not_warn(caplog):
-    """The shipped defaults (generate 12:30-13:30, scrape 09:00-12:00) never
-    trigger the warning."""
-    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
-        sched.merge_scheduler_config({})
-    assert _overlap_warnings(caplog) == []
+def test_leftover_generate_section_survives_merge_as_inert_data():
+    """A config saved before Dispatch 40 may still carry scheduler.generate.
+    merge_scheduler_config must not choke on it, and nothing reads it - it
+    just sits in the merged result unused."""
+    section = {"generate": {"enabled": True, "windows": [["12:30", "13:30"]]}}
+    merged = sched.merge_scheduler_config(section, "p")
+    assert merged["generate"]["enabled"] is True  # untouched, but...
+    assert "generate" not in sched.JOB_TYPES  # ...nothing iterates it anymore
 
 
-def test_overlapping_windows_warn_naming_both(caplog):
-    """A generate window starting before a scrape window ends warns, by name."""
-    section = {
-        "generate": {"windows": [["06:00", "07:00"]]},
-        "scrape": {"windows": [["06:30", "12:00"]]},
-    }
-    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
-        sched.merge_scheduler_config(section, "p")
-    warnings = _overlap_warnings(caplog)
-    assert len(warnings) == 1
-    message = warnings[0].getMessage()
-    assert "p" in message
-    assert "06:00" in message and "07:00" in message  # the generate window
-    assert "06:30" in message and "12:00" in message  # the scrape window
-
-
-def test_non_overlapping_custom_windows_do_not_warn(caplog):
-    """A custom but still-sequential pair (generate strictly after scrape)
-    does not warn."""
-    section = {
-        "generate": {"windows": [["13:00", "14:00"]]},
-        "scrape": {"windows": [["09:00", "12:00"]]},
-    }
-    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
-        sched.merge_scheduler_config(section, "p")
-    assert _overlap_warnings(caplog) == []
-
-
-def test_overlap_warning_does_not_change_the_merged_config(caplog):
-    """The warning is observational only - it never refuses or reorders."""
-    section = {
-        "generate": {"windows": [["06:00", "07:00"]]},
-        "scrape": {"windows": [["06:30", "12:00"]]},
-    }
-    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
-        merged = sched.merge_scheduler_config(section, "p")
-    assert merged["generate"]["windows"] == [["06:00", "07:00"]]
-    assert merged["scrape"]["windows"] == [["06:30", "12:00"]]
-
-
-def test_status_read_warns_for_an_overlapping_profile(caplog):
-    """The warning fires from a real read path (status()), not just a direct
-    merge_scheduler_config call."""
-    cfg = _config({
-        "enabled": True,
-        "generate": {"windows": [["06:00", "07:00"]]},
-        "scrape": {"windows": [["06:30", "12:00"]]},
-    })
-    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 0, 5)), config=cfg)
-    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
-        engine.status("p")
-    assert _overlap_warnings(caplog)
-
-
-def test_update_config_warns_immediately_on_an_overlapping_edit(persist, caplog):
-    """An edit that introduces the overlap is visible at the moment it is
-    made, not only on the next tick/status read."""
-    cfg = {"scheduler": {"enabled": True}}
-    engine = sched.Scheduler(config_fn=lambda p: cfg)
-    with caplog.at_level("WARNING", logger="linkedin_automation.scheduler"):
-        engine.update_config("p", {
-            "generate": {"windows": [["06:00", "07:00"]]},
-            "scrape": {"windows": [["06:30", "12:00"]]},
-        })
-    assert _overlap_warnings(caplog)
+def test_leftover_generate_section_never_fires(redirect_store):
+    """Even enabled with a window that has arrived, the orphaned generate
+    section never fires - it is not in JOB_TYPES, so _tick_profile never
+    looks at it."""
+    clock = Clock(datetime(2026, 7, 7, 7, 0))
+    executor = RecordingExecutor()
+    cfg = _config({"enabled": True,
+                   "generate": {"enabled": True, "windows": [["07:00", "07:30"]]}})
+    engine, _ = make_scheduler(now=clock, rng=FakeRng(randint_fn=lambda a, b: 0),
+                               executor=executor, config=cfg)
+    clock.dt = datetime(2026, 7, 7, 7, 15)
+    engine.tick()
+    assert executor.cycle_calls == []
+    assert executor.post_calls == []
 
 
 # ─── Fire-time rolling stays within window bounds ─────────────────────────────
@@ -730,166 +661,309 @@ def test_update_config_does_not_alias_the_caller_patch():
     assert patch["scrape"]["windows"] == [["08:00", "09:00"]]
 
 
-# ─── Generate job (Dispatch 37) ────────────────────────────────────────────────
+# ─── Auto cycle job (Dispatch 40) ──────────────────────────────────────────────
+# auto_mode now drives ONE job type: a single submit_cycle_job call per fire.
+# The real scrape->generate->post sequencing is NOT this engine's concern -
+# it lives inside run_auto_cycle (tested in isolation below) and the real
+# job body it runs in (dashboard._auto_cycle_job, tested in
+# tests/test_generate_from_lifecycle.py). These tests only cover the
+# engine's own responsibility: firing exactly one async submit, gated the
+# same way the old generate job was.
 
-def _generate_cfg(**over):
-    base = {"enabled": True, "windows": [["12:00", "13:00"]],
-            "max_comments": 10, "skip_chance": 0.1}
+def _cycle_cfg(**over):
+    base = {"enabled": True, "windows": [["09:00", "12:00"]],
+            "max_posts": 100, "min_quality": 10, "max_comments": 10,
+            "count_min": 4, "count_max": 8, "skip_chance": 0.1}
     base.update(over)
-    return _config({"enabled": True, "auto_mode": True, "generate": base})
+    return _config({"enabled": True, "auto_mode": True, "auto_cycle": base})
 
 
-def test_generate_run_now_uses_config_cap(redirect_store):
-    redirect_store["store"] = FakeStore(new=_new_posts(5))
+def test_auto_cycle_run_now_submits_one_job_with_the_config(redirect_store):
     executor = RecordingExecutor()
-    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 12, 30)),
-                               executor=executor, config=_generate_cfg(max_comments=3))
-    result = engine.run_now("p", "generate")
+    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 9, 30)),
+                               executor=executor, config=_cycle_cfg(max_comments=3))
+    result = engine.run_now("p", "auto_cycle")
     assert result["action"] == sched.ACTION_FIRED
-    assert executor.generate_calls == [{"profile": "p", "cap": 3, "seq": 1}]
+    assert len(executor.cycle_calls) == 1
+    assert executor.cycle_calls[0]["job_cfg"]["max_comments"] == 3
 
 
-def test_generate_cap_holds_against_a_large_new_bin(redirect_store):
-    """A scrape of 60 must not generate more than the configured cap."""
-    redirect_store["store"] = FakeStore(new=_new_posts(60))
-    executor = RecordingExecutor()
-    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 12, 30)),
-                               executor=executor, config=_generate_cfg())
-    engine.run_now("p", "generate")
-    assert executor.generate_calls[0]["cap"] == sched.GENERATE_DEFAULT_CAP == 10
+# ─── auto_mode gates auto_cycle from the unattended tick loop ────────────────
 
-
-def test_generate_cap_clamped_to_available_new_posts(redirect_store):
-    """Fewer NEW posts than the cap means only that many are asked for."""
-    redirect_store["store"] = FakeStore(new=_new_posts(4))
-    executor = RecordingExecutor()
-    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 12, 30)),
-                               executor=executor, config=_generate_cfg(max_comments=10))
-    engine.run_now("p", "generate")
-    assert executor.generate_calls[0]["cap"] == 4
-
-
-def test_generate_no_new_posts_is_queue_empty(redirect_store):
-    redirect_store["store"] = FakeStore(new=[])
-    executor = RecordingExecutor()
-    engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 12, 30)),
-                               executor=executor, config=_generate_cfg())
-    result = engine.run_now("p", "generate")
-    assert result["action"] == sched.ACTION_QUEUE_EMPTY
-    assert executor.generate_calls == []
-
-
-# ─── auto_mode gates generate from the unattended tick loop ──────────────────
-
-def test_auto_mode_off_generate_never_fires_from_tick(redirect_store):
-    """Auto mode off: nothing new fires. The generate job is never submitted,
+def test_auto_mode_off_cycle_never_fires_from_tick(redirect_store):
+    """Auto mode off: nothing new fires. The cycle job is never submitted,
     even though its own enabled flag is on and its window has arrived."""
-    redirect_store["store"] = FakeStore(new=_new_posts(5))
     clock = Clock(datetime(2026, 7, 7, 7, 0))
     executor = RecordingExecutor()
     rng = FakeRng(randint_fn=lambda a, b: 0, random_val=0.99)
     cfg = _config({"enabled": True, "auto_mode": False,
-                   "generate": {"enabled": True, "windows": [["12:00", "13:00"]],
-                                "max_comments": 10, "skip_chance": 0.1}})
+                   "auto_cycle": {"enabled": True, "windows": [["12:00", "13:00"]]}})
     engine, _ = make_scheduler(now=clock, rng=rng, executor=executor, config=cfg)
     _fire_via_tick(engine, clock, datetime(2026, 7, 7, 7, 0), datetime(2026, 7, 7, 12, 30))
-    assert executor.generate_calls == []
+    assert executor.cycle_calls == []
 
 
-def test_auto_mode_on_generate_fires_from_tick(redirect_store):
-    """The mirror case: auto_mode on, generate's own window has arrived."""
-    redirect_store["store"] = FakeStore(new=_new_posts(5))
+def test_auto_mode_on_cycle_fires_from_tick(redirect_store):
+    """The mirror case: auto_mode on, the cycle's own window has arrived.
+
+    An empty GENERATED bin (post_comments' default windows are also enabled
+    in this merged config) means post_comments' own window resolves to
+    queue_empty rather than ACTION_FIRED - so it never consumes the min-gap
+    slot and this stays a clean test of auto_cycle's own gating, same shape
+    as the pre-Dispatch-40 version of this test.
+    """
+    redirect_store["store"] = FakeStore([])
     clock = Clock(datetime(2026, 7, 7, 7, 0))
     executor = RecordingExecutor()
     rng = FakeRng(randint_fn=lambda a, b: 0, random_val=0.99)
     engine, _ = make_scheduler(now=clock, rng=rng, executor=executor,
-                               config=_generate_cfg())
+                               config=_cycle_cfg(windows=[["12:00", "13:00"]]))
     _fire_via_tick(engine, clock, datetime(2026, 7, 7, 7, 0), datetime(2026, 7, 7, 12, 30))
-    assert len(executor.generate_calls) == 1
+    assert len(executor.cycle_calls) == 1
 
 
-def test_run_now_generate_bypasses_auto_mode(redirect_store):
+def test_run_now_cycle_bypasses_auto_mode(redirect_store):
     """run_now is a manual, supervised action - it ignores auto_mode, the same
     way it already ignores each job's own enabled flag (existing behavior)."""
-    redirect_store["store"] = FakeStore(new=_new_posts(5))
     cfg = _config({"enabled": True, "auto_mode": False,
-                   "generate": {"enabled": False, "windows": [["12:00", "13:00"]],
-                                "max_comments": 10}})
+                   "auto_cycle": {"enabled": False, "windows": [["12:00", "13:00"]]}})
     executor = RecordingExecutor()
     engine, _ = make_scheduler(now=Clock(datetime(2026, 7, 7, 12, 30)),
                                executor=executor, config=cfg)
-    result = engine.run_now("p", "generate")
+    result = engine.run_now("p", "auto_cycle")
     assert result["action"] == sched.ACTION_FIRED
-    assert len(executor.generate_calls) == 1
+    assert len(executor.cycle_calls) == 1
 
 
-# ─── A full auto_mode cycle fires scrape, then generate, then post, in order ──
+# ─── auto_mode suppresses the standalone scrape/post_comments jobs (Dispatch 41) ─
+# Traced before the fix: _tick_profile's only auto_mode gate was on auto_cycle
+# itself ("if job_type == 'auto_cycle' and not cfg.get('auto_mode'): continue").
+# Nothing stopped scrape/post_comments from being evaluated exactly as if
+# auto_mode did not exist - so a profile with auto_mode on AND
+# scrape.enabled/post_comments.enabled also true fired the cycle (which
+# already runs its own scrape and post stages) AND the two standalone jobs
+# from their own independent windows: duplicated work every cycle, not a
+# second opinion. Answer: YES, both fired.
 
-def test_auto_mode_cycle_runs_scrape_then_generate_then_post_in_order(redirect_store):
-    """One simulated day: scrape's window, then generate's (after it), then
-    post_comments' (after that) - each fires in turn, in that order."""
-    redirect_store["store"] = FakeStore(new=_new_posts(5), generated=_generated(5))
+def _combined_auto_cfg(**over):
+    """auto_mode on, with scrape, post_comments and auto_cycle all
+    independently enabled and sharing one window - the exact shape the
+    dispatch asks about."""
+    base = {
+        "enabled": True, "auto_mode": True,
+        "scrape": {"enabled": True, "windows": [["12:00", "13:00"]],
+                   "max_posts": 50, "min_quality": 5, "skip_chance": 0.1},
+        "post_comments": {"enabled": True, "windows": [["12:00", "13:00"]],
+                          "count_min": 4, "count_max": 8, "skip_chance": 0.1},
+        "auto_cycle": {"enabled": True, "windows": [["12:00", "13:00"]],
+                       "max_posts": 100, "min_quality": 10, "max_comments": 10,
+                       "count_min": 4, "count_max": 8, "skip_chance": 0.1},
+    }
+    base.update(over)
+    return _config(base)
 
+
+def test_auto_mode_on_fires_the_cycle_and_not_the_standalone_jobs(redirect_store):
+    """Dispatch 41's gate: auto_mode on, with scrape.enabled and
+    post_comments.enabled both true, fires the cycle and NOT the standalone
+    jobs. Assert on which jobs are submitted. A non-empty GENERATED bin
+    proves post_comments would have fired for real (not resolved
+    queue_empty) had the suppression not caught it."""
+    redirect_store["store"] = FakeStore(_generated(5))
     clock = Clock(datetime(2026, 7, 7, 7, 0))
     executor = RecordingExecutor()
-    # offset 0 everywhere: each window fires at its own start time; no skips.
-    rng = FakeRng(randint_fn=lambda a, b: 0 if a == 0 else a, random_val=0.99)
-    cfg = _config({
-        "enabled": True, "auto_mode": True,
-        "scrape": {"enabled": True, "windows": [["09:00", "09:30"]],
-                   "max_posts": 60, "min_quality": 10, "skip_chance": 0.1},
-        "generate": {"enabled": True, "windows": [["12:00", "12:30"]],
-                     "max_comments": 10, "skip_chance": 0.1},
-        "post_comments": {"enabled": True, "windows": [["15:00", "15:30"]],
-                          "count_min": 4, "count_max": 4, "skip_chance": 0.1},
-    })
+    rng = FakeRng(randint_fn=lambda a, b: 0, random_val=0.99)
     engine, _ = make_scheduler(now=clock, rng=rng, executor=executor,
-                               min_gap_minutes=0, config=cfg)
+                               config=_combined_auto_cfg())
+    _fire_via_tick(engine, clock, datetime(2026, 7, 7, 7, 0), datetime(2026, 7, 7, 12, 30))
+    assert len(executor.cycle_calls) == 1
+    assert executor.scrape_calls == []
+    assert executor.post_calls == []
 
-    clock.dt = datetime(2026, 7, 7, 7, 0)
-    engine.tick()  # rolls all three windows for today
 
-    clock.dt = datetime(2026, 7, 7, 9, 15)
-    engine.tick()  # scrape window has arrived
-    clock.dt = datetime(2026, 7, 7, 12, 15)
-    engine.tick()  # generate window has arrived
-    clock.dt = datetime(2026, 7, 7, 15, 15)
-    engine.tick()  # post window has arrived
+def test_auto_mode_off_restores_the_standalone_jobs(redirect_store, persist):
+    """The mirror case: flipping auto_mode back off - without touching
+    scrape/post_comments's own config - lets their suppressed windows fire
+    again, exactly as the dispatch requires ("Their config values are left
+    alone so turning auto mode off restores them")."""
+    redirect_store["store"] = FakeStore(_generated(5))
+    clock = Clock(datetime(2026, 7, 7, 7, 0))
+    executor = RecordingExecutor()
+    rng = FakeRng(randint_fn=lambda a, b: 0, random_val=0.99)
+    engine, _ = make_scheduler(now=clock, rng=rng, executor=executor,
+                               config=_combined_auto_cfg())
 
-    assert len(executor.scrape_calls) == 1
-    assert len(executor.generate_calls) == 1
+    # auto_mode on: suppressed, as proven above.
+    _fire_via_tick(engine, clock, datetime(2026, 7, 7, 7, 0), datetime(2026, 7, 7, 12, 30))
+    assert executor.scrape_calls == [] and executor.post_calls == []
+    assert len(executor.cycle_calls) == 1
+
+    # Flip auto_mode off. scrape/post_comments's own `enabled` flags were
+    # never written to by the suppression, so they are still True underneath.
+    sched_out = engine.toggle("p", "auto_mode", False)
+    assert sched_out["scrape"]["enabled"] is True
+    assert sched_out["post_comments"]["enabled"] is True
+
+    # Next day's roll fires their own window again. post_comments is
+    # evaluated first in JOB_TYPES order and consumes the shared min-gap
+    # slot by firing; scrape, evaluated right after in the same tick, waits
+    # out the gap - the same shared-slot mechanics test_min_gap_between_runs
+    # exercises in isolation.
+    clock.dt = datetime(2026, 7, 8, 7, 0)
+    engine.tick()
+    clock.dt = datetime(2026, 7, 8, 12, 30)
+    engine.tick()
     assert len(executor.post_calls) == 1
-    assert (executor.scrape_calls[0]["seq"] < executor.generate_calls[0]["seq"]
-            < executor.post_calls[0]["seq"])
+    assert executor.scrape_calls == []
+
+    clock.dt = datetime(2026, 7, 8, 14, 1)
+    engine.tick()
+    assert len(executor.scrape_calls) == 1
+
+    # auto_cycle stayed off (toggling auto_mode off does not force it off,
+    # but it also never fires without auto_mode) - it does not pile a second
+    # cycle on top of the restored standalone jobs.
+    assert len(executor.cycle_calls) == 1
 
 
-# ─── toggle("auto_mode", ...) enables/disables the chain in one write ─────────
+def test_auto_mode_on_suppression_never_writes_to_scrape_or_post_comments_config(persist):
+    """The suppression is a tick-loop gate only - toggling auto_mode on must
+    not persist any change to scrape/post_comments's own sections."""
+    cfg = {"scheduler": {"enabled": True, "scrape": {"enabled": True},
+                        "post_comments": {"enabled": True}}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg)
+    sched_out = engine.toggle("p", "auto_mode", True)
+    assert sched_out["scrape"]["enabled"] is True
+    assert sched_out["post_comments"]["enabled"] is True
+    assert persist["p"]["scheduler"]["scrape"]["enabled"] is True
+    assert persist["p"]["scheduler"]["post_comments"]["enabled"] is True
 
-def test_toggle_auto_mode_on_enables_the_whole_chain(persist):
+
+# ─── run_auto_cycle: scrape -> generate -> post, in order, stop on failure ────
+# Pure, dependency-injected (scheduler.py module-level function) - no engine,
+# no Flask, no subprocess. This is the gate's own "assert on the call order,
+# not on the end state" target.
+
+def _stage(label, calls, *, error=None, **extra):
+    """Build a run_X closure that records its call and returns a result dict."""
+    def _run():
+        calls.append(label)
+        result = {"error": error}
+        result.update(extra)
+        return result
+    return _run
+
+
+def test_run_auto_cycle_happy_path_calls_all_three_in_order():
+    calls = []
+    outcome = sched.run_auto_cycle(
+        "p",
+        _stage("scrape", calls, count=5),
+        _stage("generate", calls, generated=3),
+        _stage("post", calls, posted=2),
+    )
+    assert calls == ["scrape", "generate", "post"]
+    assert outcome["ok"] is True
+    assert outcome["failed_stage"] is None
+
+
+def test_run_auto_cycle_generate_failure_means_post_never_runs():
+    calls = []
+    outcome = sched.run_auto_cycle(
+        "p",
+        _stage("scrape", calls, count=5),
+        _stage("generate", calls, error="boom"),
+        _stage("post", calls, posted=2),
+    )
+    assert calls == ["scrape", "generate"]  # post never called
+    assert outcome["ok"] is False
+    assert outcome["failed_stage"] == "generate"
+    assert outcome["note"] == "boom"
+
+
+def test_run_auto_cycle_scrape_failure_means_neither_generate_nor_post_runs():
+    calls = []
+    outcome = sched.run_auto_cycle(
+        "p",
+        _stage("scrape", calls, error="login wall"),
+        _stage("generate", calls, generated=3),
+        _stage("post", calls, posted=2),
+    )
+    assert calls == ["scrape"]
+    assert outcome["ok"] is False
+    assert outcome["failed_stage"] == "scrape"
+    assert outcome["note"] == "login wall"
+
+
+def test_run_auto_cycle_post_failure_is_recorded_as_the_failed_stage():
+    calls = []
+    outcome = sched.run_auto_cycle(
+        "p",
+        _stage("scrape", calls, count=5),
+        _stage("generate", calls, generated=3),
+        _stage("post", calls, error="submit never enabled"),
+    )
+    assert calls == ["scrape", "generate", "post"]
+    assert outcome["ok"] is False
+    assert outcome["failed_stage"] == "post"
+
+
+def test_run_auto_cycle_zero_scrape_posts_is_not_an_error_and_continues():
+    """A quiet scrape (count=0, no error) is not a failure - the cycle
+    continues to generate and post."""
+    calls = []
+    outcome = sched.run_auto_cycle(
+        "p",
+        _stage("scrape", calls, count=0),
+        _stage("generate", calls, generated=0),
+        _stage("post", calls, posted=0),
+    )
+    assert calls == ["scrape", "generate", "post"]
+    assert outcome["ok"] is True
+    assert outcome["failed_stage"] is None
+
+
+# ─── toggle("auto_mode", ...) enables/disables the cycle in one write ────────
+
+def test_toggle_auto_mode_on_enables_only_the_cycle(persist):
+    """auto_mode drives exactly one job now - it must not touch scrape or
+    post_comments's own independent toggles."""
     cfg = {"scheduler": {"enabled": False, "scrape": {"enabled": False},
-                        "generate": {"enabled": False},
+                        "auto_cycle": {"enabled": False},
                         "post_comments": {"enabled": True}}}
     engine = sched.Scheduler(config_fn=lambda p: cfg)
     sched_out = engine.toggle("p", "auto_mode", True)
     assert sched_out["auto_mode"] is True
     assert sched_out["enabled"] is True
-    assert sched_out["scrape"]["enabled"] is True
-    assert sched_out["generate"]["enabled"] is True
-    assert sched_out["post_comments"]["enabled"] is True
+    assert sched_out["auto_cycle"]["enabled"] is True
+    assert sched_out["scrape"]["enabled"] is False  # untouched
+    assert sched_out["post_comments"]["enabled"] is True  # untouched (was already True)
     assert persist["p"]["scheduler"]["auto_mode"] is True
 
 
 def test_toggle_auto_mode_on_never_touches_connector(persist):
     """connector (Dispatch 38) is an unrelated feature sharing JOB_TYPES with
-    the comment-pipeline jobs auto_mode (Dispatch 37) governs - enabling
-    auto_mode must not enable it as a side effect."""
+    the cycle auto_mode governs - enabling auto_mode must not enable it as a
+    side effect."""
     cfg = {"scheduler": {"enabled": False, "scrape": {"enabled": False},
-                        "generate": {"enabled": False},
+                        "auto_cycle": {"enabled": False},
                         "post_comments": {"enabled": True},
                         "connector": {"enabled": False}}}
     engine = sched.Scheduler(config_fn=lambda p: cfg)
     sched_out = engine.toggle("p", "auto_mode", True)
     assert sched_out["connector"]["enabled"] is False
+
+
+def test_toggle_connector_on_never_touches_auto_mode(persist):
+    """The mirror case: enabling connector must not enable auto_mode/cycle."""
+    cfg = {"scheduler": {"enabled": False, "auto_mode": False,
+                        "auto_cycle": {"enabled": False},
+                        "connector": {"enabled": False}}}
+    engine = sched.Scheduler(config_fn=lambda p: cfg)
+    sched_out = engine.toggle("p", "connector", True)
+    assert sched_out["connector"]["enabled"] is True
+    assert sched_out["auto_mode"] is False
+    assert sched_out["auto_cycle"]["enabled"] is False
 
 
 def test_toggle_auto_mode_off_leaves_other_flags_alone(persist):
@@ -905,7 +979,7 @@ def test_toggle_auto_mode_off_leaves_other_flags_alone(persist):
 
 def test_toggle_auto_mode_on_clears_a_stale_stopped_reason(persist):
     cfg = {"scheduler": {"enabled": False, "auto_mode": False,
-                        "auto_mode_stopped_reason": "generate failed 3 consecutive cycles",
+                        "auto_mode_stopped_reason": "scrape failed: boom",
                         "auto_mode_stopped_at": "2026-07-01T00:00:00"}}
     engine = sched.Scheduler(config_fn=lambda p: cfg)
     sched_out = engine.toggle("p", "auto_mode", True)
@@ -913,88 +987,58 @@ def test_toggle_auto_mode_on_clears_a_stale_stopped_reason(persist):
     assert "auto_mode_stopped_at" not in sched_out
 
 
-# ─── The circuit breaker: N consecutive failures disables auto_mode ──────────
+# ─── The circuit breaker: one failed cycle disables auto_mode (Dispatch 40) ──
+# "One failure, not three": no consecutive-failure counting any more - this
+# replaces the old per-job-type 3-strikes threshold entirely.
 
-def test_generate_failures_disable_auto_mode_after_threshold(persist):
+def test_a_failed_cycle_disables_auto_mode_on_the_first_failure(persist):
     cfg = {"scheduler": {"enabled": True, "auto_mode": True}}
-    engine = sched.Scheduler(config_fn=lambda p: cfg, auto_mode_failure_threshold=3)
+    engine = sched.Scheduler(config_fn=lambda p: cfg)
 
-    engine.report_generate_outcome("p", False, "boom 1")
-    assert "p" not in persist  # not yet - only 1 consecutive failure
-    engine.report_generate_outcome("p", False, "boom 2")
-    assert "p" not in persist  # 2 consecutive
-    engine.report_generate_outcome("p", False, "boom 3")
+    engine.report_cycle_outcome("p", False, "generate", "boom 1")
 
     # The gate: assert on the config WRITE, not the log line.
     assert "p" in persist
     assert persist["p"]["scheduler"]["auto_mode"] is False
     reason = persist["p"]["scheduler"]["auto_mode_stopped_reason"]
-    assert "generate" in reason and "3 consecutive cycles" in reason
-    assert "boom 3" in reason
+    assert "generate" in reason and "boom 1" in reason
     assert persist["p"]["scheduler"]["auto_mode_stopped_at"]
 
 
-def test_scrape_zero_posts_disables_auto_mode_after_threshold(persist):
+def test_a_failed_cycle_names_whichever_stage_failed(persist):
     cfg = {"scheduler": {"enabled": True, "auto_mode": True}}
-    engine = sched.Scheduler(config_fn=lambda p: cfg, auto_mode_failure_threshold=3)
-
-    engine.report_scrape_outcome("p", 0)
-    engine.report_scrape_outcome("p", 0)
-    assert "p" not in persist
-    engine.report_scrape_outcome("p", 0)
-
-    assert persist["p"]["scheduler"]["auto_mode"] is False
+    engine = sched.Scheduler(config_fn=lambda p: cfg)
+    engine.report_cycle_outcome("p", False, "scrape", "login wall")
     assert "scrape" in persist["p"]["scheduler"]["auto_mode_stopped_reason"]
 
 
-def test_a_success_resets_the_consecutive_counter(persist):
-    """2 failures, then a success, then 2 more failures must NOT trip a
-    threshold of 3 - the counter is CONSECUTIVE, not cumulative."""
+def test_a_successful_cycle_never_disables_auto_mode(persist):
+    """Includes the "scrape found zero posts" case - run_auto_cycle never
+    reports that as a failure, so a cycle that reaches report_cycle_outcome
+    with success=True (whatever each stage individually did) is a no-op."""
     cfg = {"scheduler": {"enabled": True, "auto_mode": True}}
-    engine = sched.Scheduler(config_fn=lambda p: cfg, auto_mode_failure_threshold=3)
-
-    engine.report_generate_outcome("p", False)
-    engine.report_generate_outcome("p", False)
-    engine.report_generate_outcome("p", True)   # resets to 0
-    engine.report_generate_outcome("p", False)
-    engine.report_generate_outcome("p", False)
-    assert "p" not in persist  # only 2 consecutive since the reset
-
-
-def test_scrape_and_generate_failures_are_counted_independently(persist):
-    """Two generate failures plus two scrape failures must not sum to trip a
-    threshold of 3 for either - each job type gets its own counter."""
-    cfg = {"scheduler": {"enabled": True, "auto_mode": True}}
-    engine = sched.Scheduler(config_fn=lambda p: cfg, auto_mode_failure_threshold=3)
-
-    engine.report_generate_outcome("p", False)
-    engine.report_generate_outcome("p", False)
-    engine.report_scrape_outcome("p", 0)
-    engine.report_scrape_outcome("p", 0)
+    engine = sched.Scheduler(config_fn=lambda p: cfg)
+    engine.report_cycle_outcome("p", True)
     assert "p" not in persist
 
 
-def test_report_outcome_is_a_noop_when_auto_mode_is_off(persist):
+def test_report_cycle_outcome_is_a_noop_when_auto_mode_is_off(persist):
     """The circuit breaker only polices the unattended chain - with auto_mode
-    off, failures are not even counted, let alone written back."""
+    off, a failure is not even written back."""
     cfg = {"scheduler": {"enabled": True, "auto_mode": False}}
-    engine = sched.Scheduler(config_fn=lambda p: cfg, auto_mode_failure_threshold=1)
-
-    engine.report_generate_outcome("p", False, "whatever")
-    engine.report_scrape_outcome("p", 0)
+    engine = sched.Scheduler(config_fn=lambda p: cfg)
+    engine.report_cycle_outcome("p", False, "post", "whatever")
     assert "p" not in persist
 
 
-def test_reenabling_auto_mode_resets_the_failure_counters(persist):
+def test_reenabling_auto_mode_lets_a_fresh_cycle_disable_it_again(persist):
     """After a self-disable, re-enabling (the same engine instance - the
-    dashboard runs exactly one) must start the counter fresh, not resume
-    counting from the streak that just tripped it."""
+    dashboard runs exactly one) and a new failure disables it again - there
+    is no stale counter to carry over since there is no counter at all."""
     cfg_holder = {"cfg": {"scheduler": {"enabled": True, "auto_mode": True}}}
-    engine = sched.Scheduler(config_fn=lambda p: cfg_holder["cfg"],
-                             auto_mode_failure_threshold=2)
+    engine = sched.Scheduler(config_fn=lambda p: cfg_holder["cfg"])
 
-    engine.report_generate_outcome("p", False)
-    engine.report_generate_outcome("p", False)  # trips, disables auto_mode
+    engine.report_cycle_outcome("p", False, "generate", "boom")
     assert persist["p"]["scheduler"]["auto_mode"] is False
 
     # config_fn reads back whatever was last persisted, same as the real
@@ -1003,5 +1047,5 @@ def test_reenabling_auto_mode_resets_the_failure_counters(persist):
     engine.toggle("p", "auto_mode", True)
     persist.clear()  # isolate what happens next from the toggle's own write
 
-    engine.report_generate_outcome("p", False)
-    assert "p" not in persist  # one failure after the reset, not tripped again
+    engine.report_cycle_outcome("p", False, "post", "boom again")
+    assert persist["p"]["scheduler"]["auto_mode"] is False

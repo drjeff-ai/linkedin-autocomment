@@ -315,7 +315,7 @@ def test_generate_job_raises_on_nonzero_exit(env, monkeypatch):
         dash._generate_job("j4", "demo", 10)
 
 
-# ─── _scrape_job: reports a real post count for the auto_mode circuit breaker ─
+# ─── _scrape_job: reports a real post count ───────────────────────────────────
 
 def test_scrape_job_returns_the_quality_found_count(env, monkeypatch):
     monkeypatch.setattr(dash, "run_subprocess", lambda job_id, cmd, on_start=None: (0, ""))
@@ -331,3 +331,103 @@ def test_scrape_job_zero_posts_reports_zero(env, monkeypatch):
     _write(out_file, {"quality_found": 0, "quality_posts": []})
     result = dash._scrape_job("j6", "demo", 50, 10)
     assert result["count"] == 0
+
+
+# ─── _auto_cycle_job: scrape -> generate -> post, in order, stop on failure ───
+# (Dispatch 40). One job body, real subprocess-calling stages, routed through
+# scheduler.run_auto_cycle - these tests exercise the REAL closures dashboard
+# builds; run_auto_cycle's own call-order/short-circuit contract is tested in
+# isolation (fakes only) in tests/test_scheduler.py.
+
+def _module_name(cmd):
+    """Which subprocess module a captured command line invokes."""
+    for part in cmd:
+        if part.startswith("linkedin_automation."):
+            return part
+    return None
+
+
+@pytest.fixture
+def routed_subprocess(monkeypatch):
+    """Stub run_subprocess, dispatching per-module return codes from a dict
+    the test fills in, and recording every call (module, in order)."""
+    calls = []
+    rc_by_module = {}
+
+    def fake_run_subprocess(job_id, cmd, on_start=None):
+        module = _module_name(cmd)
+        calls.append(module)
+        return rc_by_module.get(module, 0), ""
+
+    monkeypatch.setattr(dash, "run_subprocess", fake_run_subprocess)
+    return SimpleNamespace(calls=calls, rc_by_module=rc_by_module)
+
+
+def _cycle_cfg(**over):
+    base = {"max_posts": 50, "min_quality": 10, "max_comments": 10,
+            "count_min": 2, "count_max": 2}
+    base.update(over)
+    return base
+
+
+def test_auto_cycle_job_happy_path_runs_all_three_in_order(env, routed_subprocess):
+    _write(env.timeline / "ai_posts_20260101_000000.json",
+           {"quality_found": 5, "quality_posts": [_post(i) for i in range(5)]})
+    # Generate's own subprocess is stubbed (never really drafts anything), so
+    # a NEW record makes generate's subprocess actually launch, and a
+    # GENERATED record is seeded directly for post to find - this test is
+    # about subprocess call ORDER, not real data flow from one stage into
+    # the next (that is what run_auto_cycle's fakes test, in isolation).
+    _seed_store([_rec(1, NEW), _rec(2, GENERATED, comment="nice point")])
+
+    result = dash._auto_cycle_job("j1", "demo", _cycle_cfg())
+
+    assert result["ok"] is True
+    assert result["failed_stage"] is None
+    assert routed_subprocess.calls == [
+        "linkedin_automation.post_finder",
+        "linkedin_automation.comment_generator",
+        "linkedin_automation.comment_poster",
+    ]
+
+
+def test_auto_cycle_job_scrape_failure_stops_before_generate_and_post(env, routed_subprocess):
+    routed_subprocess.rc_by_module["linkedin_automation.post_finder"] = 1
+
+    result = dash._auto_cycle_job("j2", "demo", _cycle_cfg())
+
+    assert result["ok"] is False
+    assert result["failed_stage"] == "scrape"
+    assert routed_subprocess.calls == ["linkedin_automation.post_finder"]
+
+
+def test_auto_cycle_job_generate_failure_stops_before_post(env, routed_subprocess):
+    _write(env.timeline / "ai_posts_20260101_000000.json",
+           {"quality_found": 5, "quality_posts": [_post(i) for i in range(5)]})
+    _seed_store([_rec(1, NEW)])
+    routed_subprocess.rc_by_module["linkedin_automation.comment_generator"] = 1
+
+    result = dash._auto_cycle_job("j3", "demo", _cycle_cfg())
+
+    assert result["ok"] is False
+    assert result["failed_stage"] == "generate"
+    assert routed_subprocess.calls == [
+        "linkedin_automation.post_finder", "linkedin_automation.comment_generator",
+    ]
+
+
+def test_auto_cycle_job_zero_scrape_posts_still_runs_generate_and_post(env, routed_subprocess):
+    """A quiet scrape (0 posts) is not a failure - the cycle continues."""
+    _write(env.timeline / "ai_posts_20260101_000000.json",
+           {"quality_found": 0, "quality_posts": []})
+    _seed_store([_rec(1, NEW), _rec(2, GENERATED, comment="already drafted")])
+
+    result = dash._auto_cycle_job("j4", "demo", _cycle_cfg())
+
+    assert result["ok"] is True
+    assert result["scrape"]["count"] == 0
+    assert routed_subprocess.calls == [
+        "linkedin_automation.post_finder",
+        "linkedin_automation.comment_generator",
+        "linkedin_automation.comment_poster",
+    ]

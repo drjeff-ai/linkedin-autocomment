@@ -11,6 +11,7 @@ import os
 import sys
 import json
 import time
+import random
 import threading
 import subprocess
 import glob
@@ -245,8 +246,10 @@ def _scrape_job(job_id, profile_name, max_posts, min_quality):
         data = _load_json(json_files[0]) or {}
         # 'quality_found' (post_finder.py) over len(quality_posts): the field
         # is what post_finder itself reports finding, so a malformed/partial
-        # posts list still yields the number the scheduler's auto_mode
-        # circuit breaker (scheduler.report_scrape_outcome) needs.
+        # posts list still yields the real count - including to the
+        # auto_cycle scrape stage, which reads it to decide whether a quiet
+        # scrape (count == 0) is fine to continue past (scheduler.
+        # run_auto_cycle never treats that as an error).
         count = data.get("quality_found", len(data.get("quality_posts", [])))
         return {"file": json_files[0], "count": count}
     raise RuntimeError("No output file found")
@@ -313,6 +316,61 @@ def _post_comments_job(job_id, profile_name, comments_file, count):
 
     log_job(job_id, "Finished posting")
     return {"posted": count}
+
+
+def _auto_cycle_job(job_id, profile_name, job_cfg):
+    """Run scrape -> generate -> post for one profile, in order, stopping at
+    the first stage that fails (Dispatch 40).
+
+    One job, one ``run_job`` call, ``task_type="browser"`` for the WHOLE
+    duration - the browser-task lock (``can_start_browser_task``) is just
+    this job entry's status, so holding it continuously across all three
+    stages (even generate, which is API-only) falls out for free; see
+    .dev/DECISIONS.md. Each stage reuses the exact same job body the
+    independent scrape/generate/post endpoints already use
+    (``_scrape_job``/``_generate_job``/``_post_comments_job``), wrapped so a
+    raised exception becomes a dict with an ``"error"`` key instead of
+    propagating - ``run_auto_cycle`` (scheduler.py) is what decides whether
+    that stops the cycle.
+    """
+    max_posts = int(job_cfg.get("max_posts", 100))
+    min_quality = int(job_cfg.get("min_quality", 10))
+    cap = int(job_cfg.get("max_comments", scheduler_mod.GENERATE_DEFAULT_CAP))
+    count_min = int(job_cfg.get("count_min", 4))
+    count_max = int(job_cfg.get("count_max", 8))
+    if count_max < count_min:
+        count_min, count_max = count_max, count_min
+
+    def run_scrape():
+        try:
+            result = _scrape_job(job_id, profile_name, max_posts, min_quality)
+            return {"error": None, "count": result.get("count", 0)}
+        except Exception as exc:
+            return {"error": str(exc), "count": 0}
+
+    def run_generate():
+        try:
+            result = _generate_job(job_id, profile_name, cap)
+            return {"error": None, "generated": result.get("generated", 0)}
+        except Exception as exc:
+            return {"error": str(exc), "generated": 0}
+
+    def run_post():
+        try:
+            store = post_store.load_synced_store(profile_name)
+            generated = store.by_status(post_store.GENERATED)
+            if not generated:
+                log_job(job_id, "No comments queued; nothing to post.")
+                return {"error": None, "posted": 0, "note": "no comments queued"}
+            count = min(random.randint(count_min, count_max), len(generated))
+            comments_file = scheduler_mod.write_comments_file(
+                profile_name, generated[:count], datetime.now())
+            result = _post_comments_job(job_id, profile_name, comments_file, count)
+            return {"error": None, "posted": result.get("posted", 0)}
+        except Exception as exc:
+            return {"error": str(exc), "posted": 0}
+
+    return scheduler_mod.run_auto_cycle(profile_name, run_scrape, run_generate, run_post)
 
 
 # ─── Scrape-file helpers ───────────────────────────────────────────────────────
@@ -2070,44 +2128,51 @@ def _sched_submit_post_job(profile_name, comments_file, count):
 def _sched_submit_scrape_job(profile_name, max_posts, min_quality):
     """Start a scheduled scrape job unless the browser lock is held.
 
-    ``on_complete`` feeds the real post count back to the auto_mode circuit
-    breaker (scheduler.report_scrape_outcome) once the subprocess actually
-    finishes - this function itself returns long before that, same as every
-    other scheduled submit here.
+    This is the INDEPENDENT scrape job type (Audit 36: runs unattended under
+    the plain master+job enabled flags, with no auto_mode involved) - it
+    feeds no circuit breaker. The auto_cycle job's own scrape stage is a
+    separate code path (``_auto_cycle_job``'s ``run_scrape`` closure) whose
+    outcome is scored by ``scheduler.report_cycle_outcome`` instead.
     """
     if not can_start_browser_task(profile_name):
         logger.info("Scheduler: browser busy for %s, scrape job not submitted", profile_name)
         return None
     job_id = f"sched_scrape_{profile_name}_{int(time.time())}"
 
-    def _report(job):
-        result = job.get("result") or {}
-        count = result.get("count", 0) if job.get("status") == "completed" else 0
-        scheduler_engine.report_scrape_outcome(profile_name, count, job.get("error"))
-
     run_job(job_id, _scrape_job, profile_name, max_posts, min_quality,
-            profile=profile_name, task_type="browser", category="scheduled_scrape",
-            on_complete=_report)
+            profile=profile_name, task_type="browser", category="scheduled_scrape")
     return job_id
 
 
-def _sched_submit_generate_job(profile_name, cap):
-    """Start a scheduled generate job.
+def _sched_submit_cycle_job(profile_name, job_cfg):
+    """Start the scheduled auto_cycle job unless the browser lock is held.
 
-    Generate is an API job (OpenAI only, no Selenium) - it does NOT check
-    ``can_start_browser_task``, unlike every other scheduled submit above.
-    See .dev/DECISIONS.md for the explicit confirmation this is safe.
-    ``on_complete`` feeds success/failure back to the auto_mode circuit
-    breaker (scheduler.report_generate_outcome).
+    One job, one browser-lock hold, for scrape -> generate -> post in order
+    (see ``_auto_cycle_job`` / ``scheduler.run_auto_cycle``) - ``task_type``
+    is ``"browser"`` for the whole thing even though the generate stage in
+    the middle is API-only, because the lock is this one job entry's status,
+    not a literal webdriver handle (.dev/DECISIONS.md). ``on_complete`` feeds
+    the outcome back to the circuit breaker (scheduler.report_cycle_outcome)
+    once the whole sequence actually finishes - this function itself returns
+    long before that, same as every other scheduled submit here.
     """
-    job_id = f"sched_generate_{profile_name}_{int(time.time())}"
+    if not can_start_browser_task(profile_name):
+        logger.info("Scheduler: browser busy for %s, auto_cycle job not submitted", profile_name)
+        return None
+    job_id = f"sched_cycle_{profile_name}_{int(time.time())}"
 
     def _report(job):
-        scheduler_engine.report_generate_outcome(
-            profile_name, job.get("status") == "completed", job.get("error"))
+        if job.get("status") != "completed":
+            scheduler_engine.report_cycle_outcome(
+                profile_name, False, "cycle", job.get("error") or "job crashed")
+            return
+        result = job.get("result") or {}
+        scheduler_engine.report_cycle_outcome(
+            profile_name, result.get("ok", False),
+            result.get("failed_stage"), result.get("note"))
 
-    run_job(job_id, _generate_job, profile_name, cap,
-            profile=profile_name, task_type="api", category="scheduled_generate",
+    run_job(job_id, _auto_cycle_job, profile_name, job_cfg,
+            profile=profile_name, task_type="browser", category="scheduled_auto_cycle",
             on_complete=_report)
     return job_id
 
@@ -2164,7 +2229,7 @@ def _sched_submit_connector_job(profile_name, pages):
 scheduler_engine = scheduler_mod.Scheduler(
     submit_post_job=_sched_submit_post_job,
     submit_scrape_job=_sched_submit_scrape_job,
-    submit_generate_job=_sched_submit_generate_job,
+    submit_cycle_job=_sched_submit_cycle_job,
     submit_connector_job=_sched_submit_connector_job,
     browser_available=can_start_browser_task,
     list_profiles=lambda: list(pm.list_profiles().get("profiles", {}).keys()),
@@ -2447,11 +2512,11 @@ def scheduler_status(profile_name):
 def scheduler_toggle(profile_name):
     """POST — enable/disable the master switch, auto_mode, or a specific job.
 
-    Body: ``{"job": "master"|"auto_mode"|"post_comments"|"scrape"|"generate"
+    Body: ``{"job": "master"|"auto_mode"|"post_comments"|"scrape"|"auto_cycle"
     |"connector", "enabled": bool}``. Turning ``auto_mode`` on is the single
-    toggle that enables the scrape->generate->post chain in one write (see
-    ``scheduler.Scheduler.toggle``) — it never touches ``connector``, which
-    is an unrelated feature sharing the same toggle endpoint.
+    toggle that enables the one-job scrape->generate->post cycle in one write
+    (see ``scheduler.Scheduler.toggle``) — it never touches ``connector``,
+    which is an unrelated feature sharing the same toggle endpoint.
     """
     body = request.json or {}
     target = body.get("job", "master")
@@ -2478,7 +2543,7 @@ def scheduler_config(profile_name):
 def scheduler_run_now(profile_name):
     """POST — fire a job immediately for testing, ignoring window/skip/min-gap.
 
-    Body: ``{"job": "post_comments"|"scrape"|"generate"|"connector"}``.
+    Body: ``{"job": "post_comments"|"scrape"|"auto_cycle"|"connector"}``.
     Bypasses the auto_mode gate on purpose, same as it already bypasses each
     job's own ``enabled`` flag - this is an explicit manual action, not the
     unattended tick loop auto_mode polices.
@@ -2486,7 +2551,7 @@ def scheduler_run_now(profile_name):
     body = request.json or {}
     job = body.get("job")
     if job not in scheduler_mod.JOB_TYPES:
-        return jsonify({"error": "job must be post_comments, scrape, generate, or connector"}), 400
+        return jsonify({"error": "job must be post_comments, scrape, auto_cycle, or connector"}), 400
     result = scheduler_engine.run_now(profile_name, job)
     return jsonify({"ok": True, "result": result})
 

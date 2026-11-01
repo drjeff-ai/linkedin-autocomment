@@ -1424,8 +1424,8 @@ header {
     </div>
 
     <div id="schedBody">
-      <!-- Auto mode: the single toggle that enables the full scrape -> generate
-           -> post chain unattended. Default off for every profile. -->
+      <!-- Auto mode: the single toggle that enables the one-job scrape ->
+           generate -> post cycle, unattended. Default off for every profile. -->
       <div class="poster-section" style="margin-bottom:1rem;border-color:var(--accent)">
         <div style="display:flex;justify-content:space-between;align-items:center">
           <h3>🤖 Auto Mode</h3>
@@ -1435,10 +1435,11 @@ header {
           </label>
         </div>
         <p style="color:var(--text-dim);font-size:0.85rem;margin:0.25rem 0 0.75rem">
-          One switch for the whole chain: scrape, generate, and post all fire on
-          their own schedules below. Off by default for every profile. If
-          Generate fails, or a scrape returns zero posts, three cycles in a row,
-          auto mode turns itself back off and says why here.
+          One switch for one job: scrape, then generate against what the scrape
+          produced, then post - in order, on the single schedule below. Off by
+          default for every profile. If any stage fails, the cycle stops right
+          there and auto mode turns itself back off and says why here - a
+          quiet scrape (zero posts found) is not a failure and does not stop it.
         </p>
         <div id="schedAutoModeStopped" style="display:none;color:#ff8a8a;font-size:0.85rem;
              background:rgba(255,80,80,0.08);border:1px solid rgba(255,80,80,0.3);
@@ -1519,38 +1520,55 @@ header {
         </div>
       </div>
 
-      <!-- Generate job (auto_mode only - never fires unattended without it) -->
+      <!-- Auto cycle job (auto_mode only - never fires unattended without it) -->
       <div class="poster-section" style="margin-bottom:1rem">
         <div style="display:flex;justify-content:space-between;align-items:center">
-          <h3>✍️ Generate (auto mode only)</h3>
+          <h3>🔁 Auto Cycle (auto mode only)</h3>
           <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer">
-            <input type="checkbox" id="schedGenEnabled" onchange="schedToggle('generate', this.checked)">
+            <input type="checkbox" id="schedCycleEnabled" onchange="schedToggle('auto_cycle', this.checked)">
             enabled
           </label>
         </div>
         <p style="color:var(--text-dim);font-size:0.85rem;margin:0.25rem 0 0.75rem">
-          Drafts comments for the NEW queue, capped per run so an unattended
-          scrape of dozens of posts can't generate dozens of drafts. Only ever
-          fires from this schedule while Auto Mode above is on.
+          One window for the whole scrape -> generate -> post sequence. Generate
+          is capped per run so an unattended scrape of dozens of posts can't
+          generate dozens of drafts. Only ever fires from this schedule while
+          Auto Mode above is on.
         </p>
         <div class="form-row" style="gap:1rem;flex-wrap:wrap">
           <div class="form-group" style="margin:0">
             <label>Windows (HH:MM-HH:MM, comma separated)</label>
-            <input type="text" id="schedGenWindows" placeholder="12:30-13:30">
+            <input type="text" id="schedCycleWindows" placeholder="09:00-12:00">
           </div>
           <div class="form-group" style="margin:0;max-width:110px">
-            <label>Max per run</label>
-            <input type="number" id="schedGenMax" min="1">
+            <label>Max posts (scrape)</label>
+            <input type="number" id="schedCycleMaxPosts" min="1">
+          </div>
+          <div class="form-group" style="margin:0;max-width:110px">
+            <label>Min quality (scrape)</label>
+            <input type="number" id="schedCycleQuality" min="0">
+          </div>
+          <div class="form-group" style="margin:0;max-width:110px">
+            <label>Max per run (generate)</label>
+            <input type="number" id="schedCycleMaxComments" min="1">
+          </div>
+          <div class="form-group" style="margin:0;max-width:90px">
+            <label>Count min (post)</label>
+            <input type="number" id="schedCycleCountMin" min="1">
+          </div>
+          <div class="form-group" style="margin:0;max-width:90px">
+            <label>Count max (post)</label>
+            <input type="number" id="schedCycleCountMax" min="1">
           </div>
           <div class="form-group" style="margin:0;max-width:110px">
             <label>Skip chance</label>
-            <input type="number" id="schedGenSkip" min="0" max="1" step="0.05">
+            <input type="number" id="schedCycleSkip" min="0" max="1" step="0.05">
           </div>
         </div>
-        <div id="schedGenWhen" style="color:var(--text-dim);font-size:0.85rem;margin-top:0.5rem"></div>
+        <div id="schedCycleWhen" style="color:var(--text-dim);font-size:0.85rem;margin-top:0.5rem"></div>
         <div class="form-row" style="margin-top:0.75rem">
           <button class="btn" onclick="schedSaveConfig()">Save Settings</button>
-          <button class="btn btn-primary" onclick="schedRunNow('generate')">Run Now (test)</button>
+          <button class="btn btn-primary" onclick="schedRunNow('auto_cycle')">Run Now (test)</button>
         </div>
       </div>
 
@@ -4047,14 +4065,19 @@ async function loadScheduler() {
     document.getElementById('schedScrapeWhen').textContent =
       `Today: ${fmtWindows(sc)}. ${fmtLastRun(sc)}`;
 
-    const gc = s.jobs.generate;
-    document.getElementById('schedGenEnabled').checked = !!gc.enabled;
-    document.getElementById('schedGenWindows').value =
-      (gc.windows || []).map(w => `${w.window[0]}-${w.window[1]}`).join(', ');
-    document.getElementById('schedGenMax').value = gc.max_comments ?? 10;
-    document.getElementById('schedGenSkip').value = gc.skip_chance ?? 0.1;
-    document.getElementById('schedGenWhen').textContent =
-      `Up to ${gc.max_comments} per run. Today: ${fmtWindows(gc)}. ${fmtLastRun(gc)}`;
+    const cyc = s.jobs.auto_cycle;
+    document.getElementById('schedCycleEnabled').checked = !!cyc.enabled;
+    document.getElementById('schedCycleWindows').value =
+      (cyc.windows || []).map(w => `${w.window[0]}-${w.window[1]}`).join(', ');
+    document.getElementById('schedCycleMaxPosts').value = cyc.max_posts ?? 100;
+    document.getElementById('schedCycleQuality').value = cyc.min_quality ?? 10;
+    document.getElementById('schedCycleMaxComments').value = cyc.max_comments ?? 10;
+    document.getElementById('schedCycleCountMin').value = cyc.count_min ?? 4;
+    document.getElementById('schedCycleCountMax').value = cyc.count_max ?? 8;
+    document.getElementById('schedCycleSkip').value = cyc.skip_chance ?? 0.1;
+    document.getElementById('schedCycleWhen').textContent =
+      `Scrape up to ${cyc.max_posts}, generate up to ${cyc.max_comments}, `
+      + `post ${cyc.count_min}-${cyc.count_max}. Today: ${fmtWindows(cyc)}. ${fmtLastRun(cyc)}`;
 
     const cc = s.jobs.connector;
     document.getElementById('schedConnEnabled').checked = !!cc.enabled;
@@ -4207,10 +4230,14 @@ async function schedSaveConfig() {
       min_quality: parseInt(document.getElementById('schedScrapeQuality').value, 10),
       skip_chance: parseFloat(document.getElementById('schedScrapeSkip').value),
     },
-    generate: {
-      windows: parseWindows(document.getElementById('schedGenWindows').value),
-      max_comments: parseInt(document.getElementById('schedGenMax').value, 10),
-      skip_chance: parseFloat(document.getElementById('schedGenSkip').value),
+    auto_cycle: {
+      windows: parseWindows(document.getElementById('schedCycleWindows').value),
+      max_posts: parseInt(document.getElementById('schedCycleMaxPosts').value, 10),
+      min_quality: parseInt(document.getElementById('schedCycleQuality').value, 10),
+      max_comments: parseInt(document.getElementById('schedCycleMaxComments').value, 10),
+      count_min: parseInt(document.getElementById('schedCycleCountMin').value, 10),
+      count_max: parseInt(document.getElementById('schedCycleCountMax').value, 10),
+      skip_chance: parseFloat(document.getElementById('schedCycleSkip').value),
     },
     connector: {
       windows: parseWindows(document.getElementById('schedConnWindows').value),

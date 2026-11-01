@@ -1,10 +1,11 @@
 """In-dashboard randomized scheduler for posting comments, scraping,
-connecting, and (under ``auto_mode``) generating drafts to feed the chain.
+connecting, and (under ``auto_mode``) running the full scrape-generate-post
+cycle unattended.
 
 A single background thread, started when the Flask dashboard launches, ticks
 every :data:`TICK_SECONDS`. On each tick it walks every profile whose
 ``scheduler`` config is enabled and, for each enabled job (``post_comments`` /
-``scrape`` / ``generate`` / ``connector``) and each of that job's time
+``scrape`` / ``auto_cycle`` / ``connector``) and each of that job's time
 windows, decides whether to fire.
 
 Randomization is the whole point — LinkedIn punishes mechanical automation, so:
@@ -26,57 +27,74 @@ real run goes through the injected executor callbacks, which use the dashboard's
 ``run_job`` / browser-task lock, so a scheduled run respects the "one browser
 task per profile" rule and never collides with a manual run.
 
-``auto_mode`` (default OFF for every profile) is the single switch that closes
-the previously-manual-only gap in the comment pipeline: Generate. Audit 36
-found that ``scrape`` and ``post_comments`` already ran unattended under the
-plain ``enabled`` master flag — only Generate had no scheduler job type at
-all. ``generate`` is now a third job type, but it is deliberately NOT governed
-by the same plain ``enabled``-flag rule the other two use: it only ever fires
-from the unattended tick loop when ``auto_mode`` is also on for that profile
-(see ``_tick_profile``). Flipping ``auto_mode`` on is a convenience that also
-turns on the master switch and all three jobs' own ``enabled`` flags in one
-write (``toggle(profile, "auto_mode", True)``) — "a single toggle that enables
-the chain" rather than four separate ones. A per-cycle cap
-(``generate.max_comments``, default :data:`GENERATE_DEFAULT_CAP`) bounds how
-many drafts one unattended Generate fire can produce, independent of how many
-NEW posts a scrape returned — see ``.dev/DECISIONS.md`` for why the default
-is a cap at all, given ``comment_generator``'s own default is no cap.
+``auto_mode`` (default OFF for every profile) is the single switch for the
+unattended comment pipeline. Dispatch 37 gave scrape, generate and post
+separate windows and separate fire times; the result was that work sat
+between stages and no cycle ever completed end to end in one unattended run.
+Dispatch 40 replaced that with ONE job type, ``auto_cycle``, that runs scrape,
+then generate against what the scrape produced, then post - in order,
+waiting for each stage to finish before starting the next. Like the old
+``generate`` job it replaces, ``auto_cycle`` is deliberately NOT governed by
+the same plain ``enabled``-flag rule ``post_comments``/``scrape`` use: it only
+ever fires from the unattended tick loop when ``auto_mode`` is also on for
+that profile (see ``_tick_profile``). Flipping ``auto_mode`` on is a
+convenience that also turns on the master switch and ``auto_cycle``'s own
+``enabled`` flag in one write (``toggle(profile, "auto_mode", True)``).
 
-A circuit breaker protects the unattended chain specifically: if Generate
-fails, or a scrape returns zero posts, on :data:`AUTO_MODE_FAILURE_THRESHOLD`
-consecutive cycles, ``auto_mode`` disables itself for that profile — written
-back through the same ``pm.save_profile_config`` path ``toggle``/
-``update_config`` use, with the reason and timestamp persisted onto the
-config (``auto_mode_stopped_reason`` / ``auto_mode_stopped_at``) so the
-dashboard can surface it, not just a log line. Real scrape/generate jobs run
-as background subprocesses the engine does not wait on (same "never catches
-up" design as everything else here), so the two counters are fed
-asynchronously via ``report_scrape_outcome`` / ``report_generate_outcome``,
-called from the dashboard's job-completion hook — the engine's own tick/fire
-path never blocks on a real job finishing.
+``post_comments``/``scrape`` keep their own independent schedules (Audit 36 -
+they can run unattended under the plain master+job ``enabled`` flags with no
+auto_mode involved), but while ``auto_mode`` is ON for a profile, the
+unattended tick loop suppresses both of them from firing on their own
+(Dispatch 41) - the cycle already runs a scrape and a post stage itself, and
+letting the standalone jobs fire too would duplicate that work every cycle.
+Suppression is a tick-loop gate only: their ``enabled`` flags and every other
+config value are left exactly as configured, so turning ``auto_mode`` back
+off restores them with no separate re-toggle, and ``run_now()`` still fires
+either one on demand regardless of ``auto_mode`` (same bypass it already
+gives ``enabled``). ``connector`` is untouched by ``auto_mode`` in both
+directions, same as before. A per-cycle cap (``auto_cycle.max_comments``,
+default :data:`GENERATE_DEFAULT_CAP`) and count range
+(``auto_cycle.count_min``/``count_max``) bound the generate and post stages
+exactly as they did under the old separate jobs - same numbers, now read from
+one section.
+
+Any stage failing stops the cycle immediately - later stages do not run - and
+disables ``auto_mode`` for that profile on that FIRST failure, not after a
+run of consecutive ones ("one failure, not three": the user wants to look at
+it, not have it silently retried). This is written back through the same
+``pm.save_profile_config`` path ``toggle``/``update_config`` use, with the
+failing stage and a note persisted onto the config
+(``auto_mode_stopped_reason`` / ``auto_mode_stopped_at``) so the dashboard can
+surface it, not just a log line. A scrape that finds zero posts is explicitly
+NOT a failure - the cycle continues to generate (which will find nothing new)
+and then to post (which drains whatever is already GENERATED); a quiet day is
+not a fault. The real cycle runs as a background job this engine does not
+wait on (same "never catches up" design as everything else here) - the
+engine fires it as a single async submit and is fed the outcome
+asynchronously via ``report_cycle_outcome``, called from the dashboard's
+job-completion hook once the whole sequence actually finishes. The engine's
+own tick/fire path never blocks on it - see ``run_auto_cycle`` below for
+where the real sequential waiting happens, and .dev/DECISIONS.md for why
+holding the browser lock across the whole cycle is possible without that.
 
 The engine has no Flask/dashboard imports — the executor (``submit_post_job``
-/ ``submit_scrape_job`` / ``submit_generate_job`` / ``submit_connector_job``
+/ ``submit_scrape_job`` / ``submit_cycle_job`` / ``submit_connector_job``
 / ``browser_available``), the clock (``now_fn``), the RNG (``rng``) and the
 profile list (``list_profiles``) are all injected, so the whole thing is
 unit-testable with a mock clock and no real browser/posting/generation.
-
-The engine never enforces or depends on scrape finishing before generate —
-window placement only (see ``DEFAULT_SCHEDULER["generate"]["windows"]``
-below). ``merge_scheduler_config`` — the one "config load" point every
-reader funnels through — logs a warning, naming both windows, whenever a
-profile's ``generate`` window starts before a ``scrape`` window ends. It
-does not refuse the config and does not reorder anything; it only makes an
-overlapping edit visible instead of silent.
+``run_auto_cycle`` (module-level, pure, also dependency-injected) is what
+actually sequences scrape/generate/post and is the one gate tests target
+directly for call-order and short-circuit-on-failure, with no Scheduler, no
+Flask and no subprocess involved at all.
 
 ``connector`` is cap-gated, not queue-gated: unlike ``post_comments`` (empty
 GENERATED bin) or ``scrape`` (nothing to check beforehand), a connector run
 has a cross-run daily/weekly cap tracked in
 :class:`auto_connector.ConnectionTracker`'s on-disk file. ``_fire_connector``
 reads that cap BEFORE calling the executor, so a profile already at its cap
-never even submits a job — mirroring how ``_fire_generate`` (this module's
-sibling concept) checks the NEW bin before submitting, rather than letting the
-job start and fail.
+never even submits a job. ``connector`` is an unrelated feature - auto
+connecting to people, not part of the comment pipeline - and auto_mode never
+touches it, in either direction.
 """
 
 import os
@@ -110,21 +128,7 @@ MAX_RECENT_RUNS = 50       # per-profile ring buffer of run records for the UI
 #: regardless of scrape size. See .dev/DECISIONS.md for the chosen value.
 GENERATE_DEFAULT_CAP = 10
 
-#: Consecutive bad cycles (Generate failing, or a scrape returning zero
-#: posts) before auto_mode disables itself for a profile. Tracked per job
-#: type (see ``_score_auto_mode_cycle``), not shared — three Generate
-#: failures in a row trips it even if scrape has been fine, and vice versa.
-AUTO_MODE_FAILURE_THRESHOLD = 3
-
-JOB_TYPES = ("post_comments", "scrape", "generate", "connector")
-
-#: The comment-pipeline jobs ``auto_mode`` governs as a single chain
-#: (Dispatch 37: scrape -> generate -> post_comments). ``connector``
-#: (Dispatch 38) is an unrelated feature - auto-connecting to people, not
-#: part of the comment pipeline - so toggling ``auto_mode`` must never
-#: enable or disable it as a side effect, even though it shares the same
-#: ``JOB_TYPES``/scheduler plumbing.
-AUTO_MODE_JOB_TYPES = ("post_comments", "scrape", "generate")
+JOB_TYPES = ("post_comments", "scrape", "auto_cycle", "connector")
 
 # Default scheduler config. get_profile_config already deep-merges the shipped
 # default_profile_config.json, but we merge against this constant too so missing
@@ -146,14 +150,19 @@ DEFAULT_SCHEDULER = {
         "min_quality": 10,
         "skip_chance": 0.1,
     },
-    "generate": {
+    "auto_cycle": {
         "enabled": False,
-        # After scrape's default window (09:00-12:00), before post_comments'
-        # afternoon window (14:00-17:00) - "generate runs after scrape in the
-        # day's order" (Dispatch 37), expressed as window placement rather
-        # than a hard dependency the engine enforces (see module docstring).
-        "windows": [["12:30", "13:30"]],
+        # One window, one fire time, for the whole scrape -> generate -> post
+        # cycle (Dispatch 40) - replaces the old separate scrape/generate/
+        # post_comments windows auto_mode used to drive independently. See
+        # .dev/DECISIONS.md for what happens to an existing config that still
+        # carries the old scheduler.generate section.
+        "windows": [["09:00", "12:00"]],
+        "max_posts": 100,
+        "min_quality": 10,
         "max_comments": GENERATE_DEFAULT_CAP,
+        "count_min": 4,
+        "count_max": 8,
         "skip_chance": 0.1,
     },
     "connector": {
@@ -217,38 +226,16 @@ def _deep_merge(base: dict, override: dict) -> dict:
 def merge_scheduler_config(section: dict, profile: str = None) -> dict:
     """Fill a profile's raw ``scheduler`` section against :data:`DEFAULT_SCHEDULER`.
 
-    Also warns - never refuses, never reorders - if the merged config's
-    ``generate`` windows overlap its ``scrape`` windows (see
-    :func:`_warn_if_generate_overlaps_scrape`): this is the one "config load"
-    point every reader (tick, status, run_now, toggle, the circuit breaker's
-    outcome reporters) funnels through.
+    This is the one "config load" point every reader (tick, status, run_now,
+    toggle, the circuit breaker's outcome reporter) funnels through. An
+    existing config that still carries the old (pre-Dispatch-40)
+    ``scheduler.generate`` section keeps it: ``_deep_merge`` copies every key
+    the override has, regardless of whether :data:`DEFAULT_SCHEDULER` still
+    has a matching key, so that section survives in the merged result as
+    inert data. Nothing reads it, nothing fires from it, and nothing deletes
+    it - it just sits there until the profile's config is edited or reset.
     """
-    merged = _deep_merge(DEFAULT_SCHEDULER, section or {})
-    _warn_if_generate_overlaps_scrape(merged, profile)
-    return merged
-
-
-def _warn_if_generate_overlaps_scrape(merged: dict, profile: str = None):
-    """Log a warning, naming both windows, for every (generate, scrape) window
-    pair where the generate window starts before the scrape window ends.
-
-    The engine does not enforce or depend on scrape finishing before generate
-    (see the module docstring) and this does not change that - it only makes
-    an overlapping edit visible instead of silent. The default windows
-    (generate 12:30-13:30, scrape 09:00-12:00) never trigger it.
-    """
-    generate_windows = (merged.get("generate") or {}).get("windows") or []
-    scrape_windows = (merged.get("scrape") or {}).get("windows") or []
-    for g_window in generate_windows:
-        g_start = _parse_hhmm(g_window[0])
-        for s_window in scrape_windows:
-            s_end = _parse_hhmm(s_window[1])
-            if g_start < s_end:
-                logger.warning(
-                    "Scheduler[%s]: generate window %s starts before scrape "
-                    "window %s ends - the engine does not enforce sequencing, "
-                    "so generate may fire before that day's scrape.",
-                    profile, list(g_window), list(s_window))
+    return _deep_merge(DEFAULT_SCHEDULER, section or {})
 
 
 def _parse_hhmm(value: str):
@@ -270,6 +257,84 @@ def _default_list_profiles():
         return []
 
 
+def write_comments_file(profile, records, now):
+    """Serialize GENERATED records to a poster-readable TXT file.
+
+    Shared by ``_fire_post_comments`` (the independent post_comments job) and
+    the auto_cycle post stage (dashboard's real ``run_post`` closure) - one
+    serialization, used by both.
+    """
+    comments = []
+    for rec in records:
+        meta = rec.get("comment_meta") or {}
+        comments.append({
+            "url": rec.get("url", ""),
+            "author": rec.get("author", ""),
+            "post_text": rec.get("text", ""),
+            "category": rec.get("category", ""),
+            "comment": rec.get("comment", ""),
+            "word_count": meta.get("word_count"),
+            "style": meta.get("style", ""),
+            "approach": meta.get("approach", ""),
+        })
+    comments_dir = pm.get_comments_dir(profile)
+    ts = now.strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(comments_dir, f"scheduled_comments_{ts}.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(comments_to_txt(comments, now.strftime("%Y-%m-%d %H:%M")))
+    return path
+
+
+def run_auto_cycle(profile, run_scrape, run_generate, run_post):
+    """Run one profile's unattended cycle: scrape, then generate against what
+    the scrape produced, then post - in order, waiting for each stage to
+    finish before starting the next, stopping at the first stage that fails.
+
+    Each ``run_X`` callable takes no arguments (the caller closes over
+    profile/params) and returns a dict with an ``"error"`` key, ``None`` on
+    success. A scrape that finds zero posts is NOT an error - only a real
+    failure (crash, login wall, bad exit code) stops the cycle; a quiet
+    scrape still runs generate (which will find nothing new) and post (which
+    drains whatever is already GENERATED) - a quiet day is not a fault.
+
+    Pure and dependency-injected - no Flask, no subprocess, no browser - so
+    the call order and the short-circuit-on-failure behavior are directly
+    unit-testable with fakes (see tests/test_scheduler.py). In production,
+    dashboard._auto_cycle_job builds the real (blocking, subprocess/API
+    calling) closures and is the only caller; this function only sequences
+    them and never touches the browser lock, Flask, or any job bookkeeping
+    itself.
+    """
+    outcome = {"ok": True, "failed_stage": None, "note": None,
+               "scrape": None, "generate": None, "post": None}
+
+    scrape_result = run_scrape()
+    outcome["scrape"] = scrape_result
+    if scrape_result.get("error"):
+        outcome["ok"] = False
+        outcome["failed_stage"] = "scrape"
+        outcome["note"] = scrape_result["error"]
+        return outcome
+
+    generate_result = run_generate()
+    outcome["generate"] = generate_result
+    if generate_result.get("error"):
+        outcome["ok"] = False
+        outcome["failed_stage"] = "generate"
+        outcome["note"] = generate_result["error"]
+        return outcome
+
+    post_result = run_post()
+    outcome["post"] = post_result
+    if post_result.get("error"):
+        outcome["ok"] = False
+        outcome["failed_stage"] = "post"
+        outcome["note"] = post_result["error"]
+        return outcome
+
+    return outcome
+
+
 # ─── Scheduler engine ─────────────────────────────────────────────────────────
 
 class Scheduler:
@@ -282,8 +347,11 @@ class Scheduler:
     * ``submit_post_job(profile, comments_file, count) -> job_id | None`` — start
       a browser posting job (returns ``None`` if the browser lock is held).
     * ``submit_scrape_job(profile, max_posts, min_quality) -> job_id | None``.
-    * ``submit_generate_job(profile, cap) -> job_id | None`` — start an API
-      (non-browser) generate job capped at ``cap`` drafts.
+    * ``submit_cycle_job(profile, job_cfg) -> job_id | None`` — start the one
+      unattended auto_cycle job (scrape -> generate -> post, in order). The
+      real sequential waiting happens inside this job's own body
+      (``run_auto_cycle`` below), on its own background thread - this call
+      itself returns immediately, same as every other submit here.
     * ``submit_connector_job(profile, pages) -> job_id | None`` — start a
       browser connector (auto-connect) job walking at most ``pages`` of
       search results.
@@ -293,9 +361,8 @@ class Scheduler:
 
     def __init__(self, *, now_fn=None, rng=None, tick_seconds=TICK_SECONDS,
                  min_gap_minutes=MIN_GAP_MINUTES, submit_post_job=None,
-                 submit_scrape_job=None, submit_generate_job=None,
+                 submit_scrape_job=None, submit_cycle_job=None,
                  submit_connector_job=None,
-                 auto_mode_failure_threshold=AUTO_MODE_FAILURE_THRESHOLD,
                  browser_available=None, list_profiles=None, config_fn=None):
         self._now = now_fn or datetime.now
         self._rng = rng or random
@@ -303,9 +370,8 @@ class Scheduler:
         self._min_gap = min_gap_minutes
         self._submit_post_job = submit_post_job
         self._submit_scrape_job = submit_scrape_job
-        self._submit_generate_job = submit_generate_job
+        self._submit_cycle_job = submit_cycle_job
         self._submit_connector_job = submit_connector_job
-        self._auto_mode_threshold = auto_mode_failure_threshold
         self._browser_available = browser_available or (lambda profile: True)
         self._list_profiles = list_profiles or _default_list_profiles
         self._config_fn = config_fn or pm.get_profile_config
@@ -313,7 +379,7 @@ class Scheduler:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
-        self._state = {}  # profile -> {"slots", "last_fire", "recent_runs", "auto_mode_failures"}
+        self._state = {}  # profile -> {"slots", "last_fire", "recent_runs"}
 
     # ── thread lifecycle ──────────────────────────────────────────────────────
 
@@ -370,14 +436,21 @@ class Scheduler:
             job_cfg = cfg.get(job_type, {})
             if not job_cfg.get("enabled"):
                 continue
-            # Generate never fires from the unattended tick loop without
-            # auto_mode, regardless of its own enabled flag - this is the
-            # one gate that distinguishes it from scrape/post_comments, which
-            # already ran unattended under the plain master+job enabled flags
-            # before auto_mode existed (Audit 36) and keep doing so unchanged.
+            # auto_cycle never fires from the unattended tick loop without
+            # auto_mode, regardless of its own enabled flag.
             # run_now() bypasses this deliberately, same as it already
             # bypasses enabled - see run_now's docstring.
-            if job_type == "generate" and not cfg.get("auto_mode"):
+            if job_type == "auto_cycle" and not cfg.get("auto_mode"):
+                continue
+            # While auto_mode is on, the cycle already runs scrape and post
+            # as its first and third stages - the standalone scrape /
+            # post_comments jobs must not ALSO fire unattended, or every
+            # cycle duplicates its own scrape and post as a second run.
+            # Their own `enabled` flag (and every other config value) is
+            # left untouched here, so turning auto_mode back off restores
+            # them exactly as configured, with no separate re-toggle.
+            # run_now() bypasses this too, for the same reason as above.
+            if job_type in ("scrape", "post_comments") and cfg.get("auto_mode"):
                 continue
             for idx, window in enumerate(job_cfg.get("windows") or []):
                 slot = self._slot(state, job_type, idx, window)
@@ -389,8 +462,7 @@ class Scheduler:
     def _profile_state(self, profile):
         st = self._state.get(profile)
         if st is None:
-            st = {"slots": {}, "last_fire": None, "recent_runs": [],
-                  "auto_mode_failures": {}}
+            st = {"slots": {}, "last_fire": None, "recent_runs": []}
             self._state[profile] = st
         return st
 
@@ -485,8 +557,8 @@ class Scheduler:
             return self._fire_post_comments(profile, job_cfg, now)
         if job_type == "scrape":
             return self._fire_scrape(profile, job_cfg, now)
-        if job_type == "generate":
-            return self._fire_generate(profile, job_cfg, now)
+        if job_type == "auto_cycle":
+            return self._fire_auto_cycle(profile, job_cfg, now)
         if job_type == "connector":
             return self._fire_connector(profile, job_cfg, now)
         return {"action": "error", "count": 0, "note": f"unknown job {job_type}"}
@@ -506,7 +578,7 @@ class Scheduler:
         if hi < lo:
             lo, hi = hi, lo
         count = min(self._rng.randint(lo, hi), len(generated))
-        comments_file = self._write_comments_file(profile, generated[:count], now)
+        comments_file = write_comments_file(profile, generated[:count], now)
 
         job_id = None
         if self._submit_post_job:
@@ -528,95 +600,60 @@ class Scheduler:
         return {"action": ACTION_FIRED, "count": max_posts, "job_id": job_id,
                 "note": None if job_id else "browser busy, not submitted"}
 
-    def _fire_generate(self, profile, job_cfg, now):
-        """Generate drafts for NEW posts, capped at ``max_comments`` per cycle.
+    def _fire_auto_cycle(self, profile, job_cfg, now):
+        """Fire the one unattended cycle (scrape -> generate -> post) as a
+        single async job - this call returns immediately, same as every
+        other ``_fire_*`` here, so the tick thread never blocks on it.
 
-        The cap is a ceiling passed to the real generate job, not a promise
-        that exactly that many get produced - the generator's own evaluator
-        can still turn posts down. ``count`` here (and in the recorded run)
-        is "how many we asked for", matching how ``_fire_scrape`` already
-        reports ``max_posts`` rather than a verified result (neither function
-        waits for its real job to finish - see the module docstring).
+        The real sequential waiting - scrape, then generate against what the
+        scrape produced, then post, stopping at the first stage that fails -
+        happens inside the executor's own job body, on its own dedicated
+        background thread (one ``run_job`` call, held ``task_type="browser"``
+        for the whole cycle: see ``run_auto_cycle`` below and
+        .dev/DECISIONS.md for why that single job holds the browser lock
+        continuously rather than taking it in turn per stage).
         """
-        store = post_store.load_synced_store(profile)
-        new_posts = store.by_status(post_store.NEW)
-        if not new_posts:
-            logger.info("Scheduler[%s] generate: No NEW posts, "
-                        "skipping scheduled run", profile)
-            return {"action": ACTION_QUEUE_EMPTY, "count": 0,
-                    "note": "no NEW posts"}
-
-        cap = int(job_cfg.get("max_comments", GENERATE_DEFAULT_CAP))
-        count = min(cap, len(new_posts))
-
         job_id = None
-        if self._submit_generate_job:
-            job_id = self._submit_generate_job(profile, count)
-        logger.info("Scheduler[%s] generate FIRED: cap=%s new_posts=%s job=%s",
-                    profile, count, len(new_posts), job_id)
-        return {"action": ACTION_FIRED, "count": count, "job_id": job_id,
-                "note": None if job_id else "not submitted"}
+        if self._submit_cycle_job:
+            job_id = self._submit_cycle_job(profile, dict(job_cfg))
+        logger.info("Scheduler[%s] auto_cycle FIRED: job=%s", profile, job_id)
+        return {"action": ACTION_FIRED, "count": 0, "job_id": job_id,
+                "note": None if job_id else "browser busy, not submitted"}
 
     # ── auto_mode circuit breaker ─────────────────────────────────────────────
     #
-    # Real scrape/generate jobs run as background subprocesses this engine
-    # does not wait on (same "never catches up" design as the rest of the
-    # file) - so unlike everything above, these two are fed a real outcome
-    # from OUTSIDE the tick/fire path, asynchronously, once the dashboard's
-    # job actually finishes. They are safe to call whether or not auto_mode
-    # is on: the circuit breaker only polices the unattended chain, so both
-    # are a no-op unless this profile's auto_mode is currently True.
+    # The real cycle runs as a background job this engine does not wait on
+    # (same "never catches up" design as the rest of the file) - so unlike
+    # everything above, this is fed a real outcome from OUTSIDE the tick/fire
+    # path, asynchronously, once the dashboard's job actually finishes. Safe
+    # to call whether or not auto_mode is on: it only polices the unattended
+    # chain, so it is a no-op unless this profile's auto_mode is currently
+    # True.
 
-    def report_generate_outcome(self, profile, success, note=None):
-        """Feed back a real (possibly async) generate job's success/failure."""
-        with self._lock:
-            cfg = merge_scheduler_config((self._config_fn(profile) or {}).get("scheduler"), profile)
-            if not cfg.get("auto_mode"):
-                return
-            self._score_auto_mode_cycle(profile, "generate", success, note)
+    def report_cycle_outcome(self, profile, success, failed_stage=None, note=None):
+        """Feed back a completed auto_cycle job's outcome.
 
-    def report_scrape_outcome(self, profile, post_count, note=None):
-        """Feed back a real (possibly async) scrape job's post count.
-
-        ``post_count <= 0`` (including a scrape that errored before ever
-        producing a count) scores as a failed cycle for the circuit breaker -
-        "scrape returns zero posts" is the dispatch's own wording, and a
-        crashed scrape produced exactly as little.
+        One failure disables auto_mode immediately - no consecutive-failure
+        counting. Dispatch 40: "one failure, not three" - the user wants to
+        look at a stopped cycle, not have it silently retried. A scrape that
+        found zero posts is not a failure (``run_auto_cycle`` never reports
+        it as one), so it never reaches here as one.
         """
         with self._lock:
             cfg = merge_scheduler_config((self._config_fn(profile) or {}).get("scheduler"), profile)
             if not cfg.get("auto_mode"):
                 return
-            success = post_count > 0
-            self._score_auto_mode_cycle(
-                profile, "scrape", success,
-                note or (None if success else "scrape returned 0 posts"))
+            if success:
+                return
+            self._disable_auto_mode(profile, failed_stage or "cycle", note)
 
-    def _score_auto_mode_cycle(self, profile, job_type, success, note):
-        """Update the per-job consecutive-failure counter; disable auto_mode
-        at the threshold. Caller already checked auto_mode is on and holds
-        ``self._lock`` (an ``RLock``, so this re-entrant acquire is fine)."""
-        state = self._profile_state(profile)
-        counters = state.setdefault("auto_mode_failures", {})
-        if success:
-            counters[job_type] = 0
-            return
-        counters[job_type] = counters.get(job_type, 0) + 1
-        count = counters[job_type]
-        logger.warning(
-            "Scheduler[%s] auto_mode: %s failed (%d/%d consecutive) - %s",
-            profile, job_type, count, self._auto_mode_threshold,
-            note or "no detail")
-        if count >= self._auto_mode_threshold:
-            self._disable_auto_mode(profile, job_type, count, note)
-
-    def _disable_auto_mode(self, profile, job_type, count, note):
+    def _disable_auto_mode(self, profile, stage, note):
         """Turn auto_mode off and persist why - the dashboard reads this back
         from config, not from the log line above. It does not loop quietly."""
         cfg = self._config_fn(profile) or {}
         sched = merge_scheduler_config(cfg.get("scheduler"), profile)
         sched["auto_mode"] = False
-        reason = f"{job_type} failed {count} consecutive cycles"
+        reason = f"{stage} failed"
         if note:
             reason += f": {note}"
         sched["auto_mode_stopped_reason"] = reason
@@ -624,7 +661,6 @@ class Scheduler:
         cfg["scheduler"] = sched
         pm.save_profile_config(profile, cfg)
         logger.error("Scheduler[%s] AUTO MODE DISABLED ITSELF: %s", profile, reason)
-        self._profile_state(profile)["auto_mode_failures"][job_type] = 0
 
     def _fire_connector(self, profile, job_cfg, now):
         """Fire a connector session; no-op if there is nothing to search with
@@ -660,28 +696,6 @@ class Scheduler:
                     profile, pages, job_id)
         return {"action": ACTION_FIRED, "count": 0, "job_id": job_id,
                 "note": None if job_id else "browser busy, not submitted"}
-
-    def _write_comments_file(self, profile, records, now):
-        """Serialize GENERATED records to a poster-readable TXT file."""
-        comments = []
-        for rec in records:
-            meta = rec.get("comment_meta") or {}
-            comments.append({
-                "url": rec.get("url", ""),
-                "author": rec.get("author", ""),
-                "post_text": rec.get("text", ""),
-                "category": rec.get("category", ""),
-                "comment": rec.get("comment", ""),
-                "word_count": meta.get("word_count"),
-                "style": meta.get("style", ""),
-                "approach": meta.get("approach", ""),
-            })
-        comments_dir = pm.get_comments_dir(profile)
-        ts = now.strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(comments_dir, f"scheduled_comments_{ts}.txt")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(comments_to_txt(comments, now.strftime("%Y-%m-%d %H:%M")))
-        return path
 
     def _record(self, state, slot, now, action, count=0, job_id=None,
                 note=None, manual=False, **_ignore):
@@ -774,14 +788,14 @@ class Scheduler:
         """Enable/disable the master switch, ``auto_mode``, or a specific job,
         persisting config.
 
-        ``auto_mode`` is "a single toggle that enables the chain" (Dispatch
-        37): turning it on also flips the master switch and all three jobs'
-        ``enabled`` flags in the same write, rather than requiring four
-        separate toggle calls. Turning it off only clears ``auto_mode``
-        itself (and any stale self-disable reason) - it does not forcibly
-        turn scrape/post_comments back off, since those have their own
-        independent toggles and may have been running before auto_mode was
-        ever touched.
+        ``auto_mode`` turns on the master switch and ``auto_cycle``'s own
+        ``enabled`` flag in the same write, rather than requiring two separate
+        toggle calls. Turning it off only clears ``auto_mode`` itself (and any
+        stale self-disable reason) - it does not forcibly turn
+        scrape/post_comments/auto_cycle back off, since scrape/post_comments
+        have their own independent toggles and may have been running before
+        auto_mode was ever touched, and a profile re-enabling auto_mode
+        expects the cycle to resume without re-flipping it.
         """
         with self._lock:
             cfg = self._config_fn(profile) or {}
@@ -792,8 +806,7 @@ class Scheduler:
                 sched["auto_mode"] = bool(enabled)
                 if enabled:
                     sched["enabled"] = True
-                    for job_type in AUTO_MODE_JOB_TYPES:
-                        sched.setdefault(job_type, {})["enabled"] = True
+                    sched.setdefault("auto_cycle", {})["enabled"] = True
                 sched.pop("auto_mode_stopped_reason", None)
                 sched.pop("auto_mode_stopped_at", None)
             elif target in JOB_TYPES:
@@ -802,26 +815,13 @@ class Scheduler:
                 raise ValueError(f"unknown toggle target {target!r}")
             cfg["scheduler"] = sched
             pm.save_profile_config(profile, cfg)
-            if target == "auto_mode":
-                # A manual flip (either direction) starts the circuit
-                # breaker's counters fresh - most relevant when re-enabling
-                # after a self-disable, so it isn't tripped again by stale
-                # counts from before the reason was even surfaced.
-                self._profile_state(profile)["auto_mode_failures"] = {}
             return sched
 
     def update_config(self, profile, patch):
-        """Deep-merge a partial scheduler config (windows/counts/etc.) and persist.
-
-        Re-checks the overlap warning against the FINAL patched windows, not
-        just the pre-patch ones ``merge_scheduler_config`` already checked -
-        an edit that introduces the overlap is visible at the moment it is
-        made, not only on the next tick/status read.
-        """
+        """Deep-merge a partial scheduler config (windows/counts/etc.) and persist."""
         with self._lock:
             cfg = self._config_fn(profile) or {}
             sched = _deep_merge(merge_scheduler_config(cfg.get("scheduler"), profile), patch or {})
-            _warn_if_generate_overlaps_scrape(sched, profile)
             cfg["scheduler"] = sched
             pm.save_profile_config(profile, cfg)
             return sched
