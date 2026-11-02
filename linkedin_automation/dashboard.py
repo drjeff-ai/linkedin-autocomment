@@ -1535,6 +1535,72 @@ def _scheduled_account(profile_name, platform):
             "problem": problem}
 
 
+def _scheduled_settings_view(profile_name, platform):
+    """Everything the Buffer-settings form needs for one (profile, platform)
+    pair: the saved values, which field(s) are missing, and whether the key
+    variable is set - NEVER the key's value.
+
+    Reads the SAVED config directly rather than depending on
+    ``resolve_scheduled`` succeeding, so an incomplete pair still shows what
+    IS saved (the whole point of a settings form) instead of nothing.
+
+    LinkedIn's ``buffer_api_key_env`` is fixed (``BUFFER_API_KEY``) and not
+    editable here - ``resolve_scheduled``'s LinkedIn branch never reads a
+    config field for it (profile_manager.py), so exposing one would be dead
+    config: it would be tuned and believed and do nothing
+    (docs/PRINCIPLES.md §2). A platform with no overlay yet behaves exactly
+    like one with every field blank, so a brand-new platform can be filled in
+    from scratch.
+    """
+    section = (pm.get_profile_config(profile_name) or {}).get("scheduled_posting")
+    section = section if isinstance(section, dict) else {}
+    is_linkedin = platform == pm.SCHEDULED_DEFAULT_PLATFORM
+
+    if is_linkedin:
+        channel_id = (section.get("buffer_channel_id") or "").strip()
+        identity_slug = (section.get("identity_slug") or "").strip()
+        api_key_env = pm.SCHEDULED_DEFAULT_KEY_ENV
+    else:
+        overlays = section.get("platforms")
+        overlay = (overlays or {}).get(platform) if isinstance(overlays, dict) else None
+        overlay = overlay if isinstance(overlay, dict) else {}
+        channel_id = (overlay.get("buffer_channel_id") or "").strip()
+        identity_slug = (overlay.get("identity_slug") or "").strip()
+        api_key_env = (overlay.get("buffer_api_key_env") or "").strip()
+
+    api_key_env_set = bool(api_key_env) and bool((os.environ.get(api_key_env) or "").strip())
+
+    missing = []
+    if not channel_id:
+        missing.append("buffer_channel_id")
+    # Same asymmetry as _scheduled_account: LinkedIn's schedule path is
+    # deliberately ungated (see .dev/BACKLOG.md), so a blank identity_slug is
+    # only a scheduling blocker off LinkedIn.
+    if not identity_slug and not is_linkedin:
+        missing.append("identity_slug")
+    # The key variable is likewise only HARD-required off LinkedIn -
+    # resolve_scheduled never raises for LinkedIn over a missing BUFFER_API_KEY
+    # (a caller that needs it gets buffer_client's own error at use time), so
+    # this mirrors that rather than inventing a stricter gate than the one
+    # that actually runs.
+    if not is_linkedin:
+        if not api_key_env:
+            missing.append("buffer_api_key_env")
+        elif not api_key_env_set:
+            missing.append("%s environment variable" % api_key_env)
+
+    return {
+        "platform": platform,
+        "buffer_channel_id": channel_id,
+        "identity_slug": identity_slug,
+        "buffer_api_key_env": api_key_env,
+        "buffer_api_key_env_editable": not is_linkedin,
+        "api_key_env_set": api_key_env_set,
+        "missing": missing,
+        "configured": not missing,
+    }
+
+
 #: Poll-on-render must not become poll-on-every-keystroke. The queue view is
 #: re-fetched on tab switches and after every action, and Buffer's free plan
 #: allows about a hundred requests a DAY, so the reconcile is shared by every
@@ -1608,6 +1674,92 @@ def _reconcile_on_render(profile_name, force=False,
     _reconcile_cache[cache_key] = {"at": _time.time(), "changed": changed,
                                    "error": error}
     return {"ran": True, "changed": changed, "error": error, "note": None}
+
+
+@app.route('/api/scheduled/<profile_name>/settings', methods=['GET'])
+def scheduled_settings_get(profile_name):
+    """GET - the Buffer settings saved for this (profile, platform) pair."""
+    try:
+        platform = _req_platform()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(_scheduled_settings_view(profile_name, platform))
+
+
+@app.route('/api/scheduled/<profile_name>/settings', methods=['POST'])
+def scheduled_settings_save(profile_name):
+    """POST - save buffer_channel_id / identity_slug / buffer_api_key_env for
+    ONE (profile, platform) pair.
+
+    Writes ONLY the keys this pair owns: the flat ``scheduled_posting.*``
+    fields for LinkedIn, ``scheduled_posting.platforms.<platform>.*`` for
+    every other platform - via the same read-merge-write
+    (``read_stored_config`` + ``_deep_merge`` + ``save_profile_config``) the
+    general config editor already uses (``update_profile_config_route``), so
+    nothing else in this profile's config, another platform's overlay, or any
+    other profile's file is ever touched.
+
+    The API key VALUE is never accepted here - only the NAME of the
+    environment variable that holds it, and that name is rejected if it does
+    not look like a variable name (``profile_manager.valid_env_var_name``).
+    """
+    try:
+        platform = _req_platform()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
+
+    channel_id = (body.get("buffer_channel_id") or "").strip()
+    identity_slug = (body.get("identity_slug") or "").strip()
+    api_key_env = (body.get("buffer_api_key_env") or "").strip()
+    is_linkedin = platform == pm.SCHEDULED_DEFAULT_PLATFORM
+
+    if api_key_env and not pm.valid_env_var_name(api_key_env):
+        return jsonify({
+            "error": "%r does not look like an environment variable name - "
+                     "it looks like a secret value. Enter the NAME of the "
+                     "variable that holds the key (e.g. BUFFER_API_KEY_%s), "
+                     "never the key itself." % (api_key_env, platform.upper())
+        }), 400
+
+    if is_linkedin:
+        if api_key_env and api_key_env != pm.SCHEDULED_DEFAULT_KEY_ENV:
+            return jsonify({
+                "error": "LinkedIn's Buffer key variable is fixed (%s) and "
+                         "cannot be changed per profile."
+                         % pm.SCHEDULED_DEFAULT_KEY_ENV}), 400
+        patch = {"scheduled_posting": {"buffer_channel_id": channel_id,
+                                       "identity_slug": identity_slug}}
+    else:
+        patch = {"scheduled_posting": {"platforms": {platform: {
+            "buffer_channel_id": channel_id,
+            "identity_slug": identity_slug,
+            "buffer_api_key_env": api_key_env}}}}
+
+    stored = pm.read_stored_config(profile_name)
+    pm.save_profile_config(profile_name, pm._deep_merge(stored, patch))
+
+    return jsonify({"ok": True,
+                    "settings": _scheduled_settings_view(profile_name, platform)})
+
+
+@app.route('/api/scheduled/<profile_name>/settings/test', methods=['POST'])
+def scheduled_settings_test(profile_name):
+    """POST - read-only Buffer connection test for the SAVED settings.
+
+    Resolves whatever is currently configured and asks Buffer who that
+    channel posts as. The only Buffer call made is ``getChannel`` - this
+    never creates a post, and never contacts Buffer at all for a pair that is
+    not fully configured (``resolve_scheduled`` raises first).
+    """
+    try:
+        platform = _req_platform()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(csv_pipeline.test_buffer_connection(profile_name, platform))
 
 
 @app.route('/api/scheduled/<profile_name>/reconcile', methods=['POST'])

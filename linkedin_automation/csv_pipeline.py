@@ -465,6 +465,42 @@ def verify_buffer_identity(expect_slug, channel_id, key=None, session=None,
     return verify_channel_identity(expect_slug, channel)
 
 
+def test_buffer_connection(profile_name, platform, fetch_channel=None):
+    """Read-only check of whatever is CURRENTLY CONFIGURED for ``(profile,
+    platform)``: resolve it, then ask Buffer who that channel actually posts
+    as. The settings panel's "Test connection" button.
+
+    The ONLY Buffer call made is ``getChannel`` - never ``createPost``, so
+    this can never create a post. An incomplete pair (missing channel, missing
+    or unset key variable, no overlay at all) fails during resolution, before
+    ``fetch_channel`` is ever called - this never falls back to guessing.
+
+    Returns ``{"ok": True, "channel_id", "handle", "service",
+    "display_name"}`` on success, or ``{"ok": False, "error"}`` with the exact
+    reason - a missing config field, or Buffer's own error - never a generic
+    "failed".
+    """
+    try:
+        resolved = pm.resolve_scheduled(profile_name, platform)
+    except pm.ScheduledConfigError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    channel_id = resolved.get("channel_id")
+    if not channel_id:
+        return {"ok": False, "error": "no Buffer channel configured"}
+
+    fetch = fetch_channel or bc.get_channel
+    try:
+        channel = fetch(channel_id, key=resolved.get("api_key"), max_age=0)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    return {"ok": True, "channel_id": channel_id,
+           "handle": channel_handle(channel),
+           "service": channel.get("service"),
+           "display_name": channel.get("displayName")}
+
+
 def verify_identity(platform, expect_slug, poster=None, channel_id=None,
                     key=None, session=None, fetch_channel=None):
     """Confirm we are about to act as the account we mean to act as.

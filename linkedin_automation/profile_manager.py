@@ -9,6 +9,7 @@ codes and ``LoginRequiredError`` used by the CLI scripts and dashboard.
 
 import os
 import json
+import re
 import time
 import logging
 import getpass
@@ -417,6 +418,31 @@ SCHEDULED_DEFAULT_KEY_ENV = "BUFFER_API_KEY"
 
 class ScheduledConfigError(RuntimeError):
     """A (profile, platform) cannot be resolved into usable settings."""
+
+
+#: Every environment variable name this codebase actually reads
+#: (BUFFER_API_KEY, BUFFER_API_KEY_X, PRODUCTION_IDENTITY_SLUGS,
+#: OPENAI_API_KEY, R2_ACCOUNT_ID, ...) is upper-snake-case: a leading letter,
+#: then letters/digits/underscores. A real Buffer or OpenAI API key is never
+#: shaped like that - it is long, mixed-case, or carries punctuation a shell
+#: variable name cannot. This is deliberately a shape check, not a secrets
+#: scanner: it exists to catch the one mistake the settings form's env-name
+#: field is built to prevent (pasting the KEY where only its NAME belongs),
+#: not to detect every possible credential.
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_ENV_VAR_NAME_MAX_LEN = 64
+
+
+def valid_env_var_name(value: str) -> bool:
+    """Does ``value`` look like an environment VARIABLE NAME, not a secret
+    pasted into the wrong field?
+
+    Used by the scheduled-posting settings form (dashboard.py) to reject an
+    API key value entered where only ``buffer_api_key_env`` - the NAME of the
+    variable holding it - belongs.
+    """
+    return bool(value) and len(value) <= _ENV_VAR_NAME_MAX_LEN and bool(
+        _ENV_VAR_NAME_RE.match(value))
 
 
 def resolve_scheduled(profile_name: str = None,

@@ -811,7 +811,12 @@ def test_still_no_commenting_route_exists():
     cannot create a post and cannot comment. The comment sweep stays on its own
     path. `rows/delete` (Dispatch 27) is the batch counterpart of `rows/<key>`:
     it deletes OUR records in a loop over the same `delete_row` the single-row
-    route uses - it cannot create a post or comment either.
+    route uses - it cannot create a post or comment either. `settings`
+    (Dispatch 44) writes only our own profile_config.json, never Buffer.
+    `settings/test` makes exactly one read-only Buffer call (getChannel) to
+    report whether the configured channel resolves - see
+    tests/test_scheduled_settings.py's test_the_test_connection_route_never_
+    creates_a_post - and creates nothing.
     """
     writes = sorted(str(r) for r in dashboard.app.url_map.iter_rules()
                     if str(r).startswith("/api/scheduled")
@@ -820,7 +825,9 @@ def test_still_no_commenting_route_exists():
                       "/api/scheduled/<profile_name>/rows",
                       "/api/scheduled/<profile_name>/rows/<key>",
                       "/api/scheduled/<profile_name>/rows/delete",
-                      "/api/scheduled/<profile_name>/schedule"], writes
+                      "/api/scheduled/<profile_name>/schedule",
+                      "/api/scheduled/<profile_name>/settings",
+                      "/api/scheduled/<profile_name>/settings/test"], writes
 
 
 # ─── Rendering: the failure every API test missed ────────────────────────────
