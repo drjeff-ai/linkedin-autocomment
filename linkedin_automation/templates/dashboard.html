@@ -1660,6 +1660,8 @@ header {
                     style="padding:0.25rem 0.7rem;border-radius:999px;font-size:0.75rem;cursor:pointer;border:1px solid var(--border)">LinkedIn</button>
             <button class="schp-plat" data-plat="x" onclick="schpSetPlatform('x')"
                     style="padding:0.25rem 0.7rem;border-radius:999px;font-size:0.75rem;cursor:pointer;border:1px solid var(--border)">X</button>
+            <button onclick="schpToggleSettings()"
+                    style="padding:0.25rem 0.7rem;border-radius:999px;font-size:0.75rem;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--text-dim)">Settings</button>
           </div>
           <div style="font-size:0.75rem;color:var(--text-dim)">Queue &amp; scheduling</div>
           <div style="font-size:0.72rem;color:var(--text-dim)" id="schpStateFile"></div>
@@ -1667,6 +1669,46 @@ header {
       </div>
       <div id="schpConfigWarn" style="display:none;margin-top:0.6rem;padding:0.6rem 0.8rem;
            border-radius:6px;background:rgba(255,170,0,0.12);color:#ffcc66;font-size:0.82rem"></div>
+    </div>
+
+    <!-- Per (profile, platform) Buffer settings. Hidden by default so the
+         queue stays the default view; opened with the "Settings" button
+         above. The API key VALUE is never entered or displayed here - only
+         the NAME of the environment variable that holds it, per platform. -->
+    <div class="schp-card" id="schpSettingsCard" style="display:none">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">Buffer connection settings</div>
+          <div class="panel-subtitle">Scoped to the selected profile and
+            platform only. The API key value is never entered or shown here -
+            only the name of the environment variable that holds it.</div>
+        </div>
+      </div>
+      <div id="schpSettingsMissing" style="display:none;margin-bottom:0.6rem;padding:0.6rem 0.8rem;
+           border-radius:6px;background:rgba(255,170,0,0.12);color:#ffcc66;font-size:0.82rem"></div>
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:0.5rem">
+        <div>
+          <div style="font-size:0.75rem;color:var(--text-dim);margin-bottom:0.25rem">Buffer channel id</div>
+          <input class="input" id="schpSetChannel" placeholder="Buffer channel id">
+        </div>
+        <div>
+          <div style="font-size:0.75rem;color:var(--text-dim);margin-bottom:0.25rem">Identity slug (the account this pair may post as)</div>
+          <input class="input" id="schpSetIdentity" placeholder="identity_slug">
+        </div>
+      </div>
+      <div style="margin-top:0.6rem">
+        <div style="font-size:0.75rem;color:var(--text-dim);margin-bottom:0.25rem">
+          Buffer API key - environment variable NAME (never the key itself)</div>
+        <div style="display:flex;gap:0.6rem;align-items:center">
+          <input class="input" id="schpSetKeyEnv" placeholder="BUFFER_API_KEY_X" style="flex:1">
+          <span id="schpSetKeyEnvStatus" style="font-size:0.75rem;white-space:nowrap"></span>
+        </div>
+      </div>
+      <div style="margin-top:0.8rem;display:flex;gap:0.5rem;align-items:center">
+        <button class="btn" onclick="schpSaveSettings()">Save settings</button>
+        <button class="btn" onclick="schpTestConnection()">Test connection</button>
+        <span id="schpSettingsMsg" style="font-size:0.8rem"></span>
+      </div>
     </div>
 
     <!-- Both inputs write PENDING rows through the same endpoint. Adding to
@@ -1960,6 +2002,10 @@ function switchProfile() {
   // selection silently ride across a profile switch at all.
   schpSelected = new Set();
   schpLastQueueData = null;
+  // Settings are scoped to (profile, platform) - a visible panel left
+  // showing the OLD profile's saved values after a switch would be exactly
+  // the stale-header bug schpSetPlatform's own reload guards against.
+  if (schpSettingsOpen) schpLoadSettings();
 
   loadExistingPosts();
   loadExistingComments();
@@ -3071,6 +3117,11 @@ function schpSetPlatform(p) {
   // Re-read rather than re-render: the two platforms are separate stores, so
   // the rows on screen belong to the other account until this returns.
   loadScheduledQueue();
+  // The settings panel is scoped to (profile, platform) too - a visible
+  // panel left showing the OTHER platform's saved values after a switch
+  // would be exactly the stale-header bug the queue re-read above exists to
+  // avoid, just one card over.
+  if (schpSettingsOpen) schpLoadSettings();
 }
 
 function schpPaintPlatform() {
@@ -3080,6 +3131,114 @@ function schpPaintPlatform() {
     b.style.color = on ? '#fff' : 'var(--text-dim)';
     b.style.fontWeight = on ? '600' : '400';
   });
+}
+
+// ─── Per (profile, platform) Buffer settings (Dispatch 44) ──────────────────
+
+let schpSettingsOpen = false;
+
+function schpToggleSettings() {
+  schpSettingsOpen = !schpSettingsOpen;
+  document.getElementById('schpSettingsCard').style.display =
+    schpSettingsOpen ? 'block' : 'none';
+  if (schpSettingsOpen) schpLoadSettings();
+}
+
+async function schpLoadSettings() {
+  if (!currentProfile) return;
+  const msg = document.getElementById('schpSettingsMsg');
+  msg.textContent = '';
+  try {
+    const res = await fetch(schpQ(`/api/scheduled/${currentProfile}/settings`));
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || 'failed to load settings');
+
+    document.getElementById('schpSetChannel').value = d.buffer_channel_id || '';
+    document.getElementById('schpSetIdentity').value = d.identity_slug || '';
+    const keyEnvInput = document.getElementById('schpSetKeyEnv');
+    keyEnvInput.value = d.buffer_api_key_env || '';
+    keyEnvInput.disabled = !d.buffer_api_key_env_editable;
+    keyEnvInput.title = d.buffer_api_key_env_editable ? '' :
+      "LinkedIn's Buffer key variable is fixed and cannot be changed per profile.";
+
+    const status = document.getElementById('schpSetKeyEnvStatus');
+    if (!d.buffer_api_key_env) {
+      status.textContent = '';
+    } else {
+      status.textContent = d.api_key_env_set ? 'set in environment' : 'NOT set in environment';
+      status.style.color = d.api_key_env_set ? '#6fd694' : '#ffcc66';
+    }
+
+    const missingBox = document.getElementById('schpSettingsMissing');
+    if (d.missing && d.missing.length) {
+      missingBox.style.display = 'block';
+      missingBox.textContent = 'Missing for ' + (schpPlatform === 'x' ? 'X' : 'LinkedIn') +
+        ': ' + d.missing.join(', ') + '. Scheduling will refuse until these are set.';
+    } else {
+      missingBox.style.display = 'none';
+      missingBox.textContent = '';
+    }
+  } catch (e) {
+    msg.textContent = 'Could not load settings: ' + e.message;
+    msg.style.color = '#ff8080';
+  }
+}
+
+async function schpSaveSettings() {
+  if (!currentProfile) return;
+  const msg = document.getElementById('schpSettingsMsg');
+  msg.textContent = 'Saving…';
+  msg.style.color = 'var(--text-dim)';
+  const body = {
+    platform: schpPlatform,
+    buffer_channel_id: document.getElementById('schpSetChannel').value.trim(),
+    identity_slug: document.getElementById('schpSetIdentity').value.trim(),
+    buffer_api_key_env: document.getElementById('schpSetKeyEnv').value.trim(),
+  };
+  try {
+    const res = await fetch(schpQ(`/api/scheduled/${currentProfile}/settings`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || 'save failed');
+    msg.textContent = '✓ Saved';
+    msg.style.color = '#6fd694';
+    await schpLoadSettings();
+    // The identity/channel header and the queue's own config block both
+    // reflect what was just saved - re-read rather than guess at the diff.
+    loadScheduledQueue();
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.style.color = '#ff8080';
+  }
+}
+
+async function schpTestConnection() {
+  if (!currentProfile) return;
+  const msg = document.getElementById('schpSettingsMsg');
+  msg.textContent = 'Testing…';
+  msg.style.color = 'var(--text-dim)';
+  try {
+    const res = await fetch(schpQ(`/api/scheduled/${currentProfile}/settings/test`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: schpPlatform }),
+    });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || 'test failed');
+    if (d.ok) {
+      msg.textContent = '✓ Connected - posts as ' + (d.handle || d.channel_id);
+      msg.style.color = '#6fd694';
+    } else {
+      msg.textContent = d.error || 'Buffer refused the connection';
+      msg.style.color = '#ff8080';
+    }
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.style.color = '#ff8080';
+  }
 }
 
 function schpEsc(v) {
