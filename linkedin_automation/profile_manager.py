@@ -459,6 +459,30 @@ def scheduled_config_str(value) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+#: The value of whatever variable ``buffer_api_key_env`` names goes to Buffer as
+#: the Bearer token, so a shape check is not enough: PATH and OPENAI_API_KEY are
+#: both well-formed names. Only a name that says it holds a Buffer key is read.
+_BUFFER_KEY_ENV_RE = re.compile(r"BUFFER_API_KEY(?:_[A-Z0-9_]+)?")
+BUFFER_KEY_ENV_RULE = "BUFFER_API_KEY or BUFFER_API_KEY_<SUFFIX>"
+
+
+def scheduled_key_env(value) -> str:
+    """The stored key variable name if it may be read, otherwise ""."""
+    name = scheduled_config_str(value)
+    if valid_env_var_name(name) and _BUFFER_KEY_ENV_RE.fullmatch(name):
+        return name
+    return ""
+
+
+def buffer_key_env_rejected(value) -> bool:
+    """Is this a name that was set but may not be read?
+
+    Blank and non-string values are not: they read as unset, and are reported
+    as that.
+    """
+    return bool(scheduled_config_str(value)) and not scheduled_key_env(value)
+
+
 def resolve_scheduled(profile_name: str = None,
                       platform: str = SCHEDULED_DEFAULT_PLATFORM,
                       env=None) -> Dict:
@@ -484,7 +508,10 @@ def resolve_scheduled(profile_name: str = None,
     **An overlaid platform is stricter, because it has no fallback.** Its key
     comes from the environment variable its overlay NAMES
     (``buffer_api_key_env``), and a missing or blank one raises here, naming the
-    variable — there is no bare default to silently land on.
+    variable — there is no bare default to silently land on. A name outside
+    ``BUFFER_KEY_ENV_RULE`` raises without the variable being read, because this
+    is the one place a config value picks what gets sent to Buffer. The error
+    does not repeat the stored value: hand-edited, it could be a pasted key.
 
     **An unknown platform raises rather than falling back to the flat fields.**
     Returning LinkedIn's channel for ``platform="x"`` because of a typo would
@@ -523,7 +550,14 @@ def resolve_scheduled(profile_name: str = None,
             % (profile_name or get_default_profile_name(), platform, platform,
                ", ".join(sorted([SCHEDULED_DEFAULT_PLATFORM] + list(overlays)))))
 
-    key_env = scheduled_config_str(overlay.get("buffer_api_key_env"))
+    if buffer_key_env_rejected(overlay.get("buffer_api_key_env")):
+        raise ScheduledConfigError(
+            "scheduled_posting.platforms.%s.buffer_api_key_env is not an allowed "
+            "name, so the variable it names was not read. That variable's value "
+            "would go to Buffer as the API key, so only %s is accepted."
+            % (platform, BUFFER_KEY_ENV_RULE))
+
+    key_env = scheduled_key_env(overlay.get("buffer_api_key_env"))
     if not key_env:
         raise ScheduledConfigError(
             "scheduled_posting.platforms.%s has no buffer_api_key_env, so there "
