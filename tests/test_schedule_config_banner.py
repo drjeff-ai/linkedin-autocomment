@@ -21,6 +21,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from linkedin_automation import csv_pipeline as cp  # noqa: E402
 from linkedin_automation import dashboard  # noqa: E402
 from linkedin_automation import profile_manager as pm  # noqa: E402
 
@@ -220,6 +221,131 @@ def test_field_names_are_escaped(client):
                                    "identity_configured": True})
     assert "<img" not in html
     assert "&lt;img src=x&gt; environment variable" in html
+
+
+# ─── a hand-edited non-string is missing, not a crash ────────────────────────
+#
+# Both key states matter for X: with the key set the resolver reaches the fields
+# and used to raise, with it unset the settings view did.
+
+NON_STRINGS = [pytest.param(12345, id="integer"),
+               pytest.param(None, id="null"),
+               pytest.param(["chan"], id="list")]
+
+
+def _set_x_key(monkeypatch, key_set):
+    if key_set:
+        monkeypatch.setenv("BUFFER_API_KEY_X", "x-key")
+    else:
+        monkeypatch.delenv("BUFFER_API_KEY_X", raising=False)
+
+
+def _config_block(client, platform):
+    res = client.get("/api/scheduled/p/queue?platform=%s" % platform)
+    assert res.status_code == 200
+    return res.get_json()["config"]
+
+
+@pytest.mark.parametrize("key_set", [True, False], ids=["key_set", "key_unset"])
+@pytest.mark.parametrize("value", NON_STRINGS)
+@pytest.mark.parametrize("field,kwarg", [("buffer_channel_id", "channel"),
+                                         ("identity_slug", "slug")])
+def test_a_non_string_x_field_is_listed_as_missing(client, monkeypatch, field, kwarg,
+                                                   value, key_set):
+    _set_x_key(monkeypatch, key_set)
+    _save(_x(**{kwarg: value}))
+    other = "identity_slug" if field == "buffer_channel_id" else "buffer_channel_id"
+    missing = _config_block(client, "x")["missing"]
+    assert field in missing
+    assert other not in missing
+
+
+@pytest.mark.parametrize("value", NON_STRINGS)
+def test_a_non_string_linkedin_channel_is_listed_as_missing(client, value):
+    _save({"buffer_channel_id": value, "identity_slug": "example-person"})
+    assert _config_block(client, "linkedin")["missing"] == ["buffer_channel_id"]
+
+
+@pytest.mark.parametrize("value", NON_STRINGS)
+def test_a_non_string_linkedin_identity_reads_as_unset(client, value):
+    """A blank LinkedIn identity is deliberately not in `missing`, because the
+    schedule path is ungated, so `identity_configured` is what carries it."""
+    _save({"buffer_channel_id": "chan_li", "identity_slug": value})
+    config = _config_block(client, "linkedin")
+    assert config["identity_configured"] is False
+    assert config["identity_slug"] == ""
+
+
+@needs_node
+@pytest.mark.parametrize("value", NON_STRINGS)
+def test_the_banner_names_a_non_string_x_channel(client, monkeypatch, value):
+    monkeypatch.setenv("BUFFER_API_KEY_X", "x-key")
+    _save(_x(channel=value))
+    display, html = _banner(client, "x")
+    assert display == "block"
+    assert "<code>buffer_channel_id</code>" in html
+    assert "<strong>Settings</strong> button" in html
+
+
+@needs_node
+@pytest.mark.parametrize("value", NON_STRINGS)
+def test_the_banner_names_a_non_string_linkedin_identity(client, value):
+    _save({"buffer_channel_id": "chan_li", "identity_slug": value})
+    display, html = _banner(client, "linkedin")
+    assert display == "block"
+    assert "<code>identity_slug</code>" in html
+
+
+@pytest.mark.parametrize("value", NON_STRINGS)
+def test_the_settings_form_loads_with_a_non_string_field(client, monkeypatch, value):
+    """The form is where the banner sends you, so it must open to fix this."""
+    monkeypatch.setenv("BUFFER_API_KEY_X", "x-key")
+    _save(_x(channel=value))
+    res = client.get("/api/scheduled/p/settings?platform=x")
+    assert res.status_code == 200
+    assert res.get_json()["buffer_channel_id"] == ""
+    assert "buffer_channel_id" in res.get_json()["missing"]
+
+
+def _buffer_calls_on_render(client, monkeypatch, channel):
+    """Queue render with a row awaiting publication. Without one the reconcile
+    exits early whatever the channel is, and this could not see a bad call."""
+    calls = []
+    monkeypatch.setattr(dashboard.buffer_client, "posts_by_status",
+                        lambda channel_id, *a, **kw: calls.append(channel_id) or {})
+    _save({"buffer_channel_id": channel, "identity_slug": "example-person"})
+    state = cp.PipelineState(profile_name="p")
+    state.rows["k"] = {"status": cp.SCHEDULED, "post_id": "p1", "text": "Waiting."}
+    state.save()
+    assert client.get("/api/scheduled/p/queue").status_code == 200
+    return calls
+
+
+@pytest.mark.parametrize("value", NON_STRINGS)
+def test_a_non_string_channel_never_reaches_buffer(client, monkeypatch, value):
+    """str(12345) would be a channel id nobody configured."""
+    assert _buffer_calls_on_render(client, monkeypatch, value) == []
+
+
+def test_a_real_channel_does_reach_buffer(client, monkeypatch):
+    """The other direction, so the test above cannot pass by never asking."""
+    assert _buffer_calls_on_render(client, monkeypatch, "chan_li") == ["chan_li"]
+
+
+@pytest.mark.parametrize("value", NON_STRINGS)
+def test_the_browser_guard_refuses_a_non_string_identity_by_name(value):
+    _save({"buffer_channel_id": "chan_li", "identity_slug": value})
+    with pytest.raises(pm.ProductionAccessRefused, match="no declared identity"):
+        pm.check_production_guard("p", allow_production=True)
+
+
+def test_a_real_string_is_still_stripped_and_kept():
+    """The other direction: this must not read every value as missing."""
+    assert pm.scheduled_config_str("  chan_li ") == "chan_li"
+    _save({"buffer_channel_id": " chan_li ", "identity_slug": " example-person "})
+    resolved = pm.resolve_scheduled("p", "linkedin")
+    assert resolved["channel_id"] == "chan_li"
+    assert resolved["identity_slug"] == "example-person"
 
 
 # ─── the page itself, no node needed ─────────────────────────────────────────

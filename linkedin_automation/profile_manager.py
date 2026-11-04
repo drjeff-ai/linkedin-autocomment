@@ -445,6 +445,19 @@ def valid_env_var_name(value: str) -> bool:
         _ENV_VAR_NAME_RE.match(value))
 
 
+def scheduled_config_str(value) -> str:
+    """A saved channel id or identity slug, stripped - or "" if it is not a string.
+
+    profile_config.json can be hand-edited, so a number or a list can arrive
+    here. Coercing one with str() would invent a channel id or identity nobody
+    configured, on a path that acts on a real account; reading it as unset
+    gives it exactly the behaviour of a blank value. That is a refusal
+    everywhere except LinkedIn's schedule path, which is deliberately ungated
+    on the identity and never reads it.
+    """
+    return value.strip() if isinstance(value, str) else ""
+
+
 def resolve_scheduled(profile_name: str = None,
                       platform: str = SCHEDULED_DEFAULT_PLATFORM,
                       env=None) -> Dict:
@@ -454,9 +467,9 @@ def resolve_scheduled(profile_name: str = None,
     drain}``.
 
     **LinkedIn resolves exactly as it did before this function existed.** Its
-    settings are the flat `scheduled_posting` fields, read with the same
-    ``(x or "").strip()`` expressions the dashboard used, and its key is the
-    bare ``BUFFER_API_KEY``. `tests/fixtures/scheduled_resolution_golden.json`
+    settings are the flat `scheduled_posting` fields, stripped as the dashboard
+    always did (a non-string reads as blank, see ``scheduled_config_str``), and
+    its key is the bare ``BUFFER_API_KEY``. `tests/fixtures/scheduled_resolution_golden.json`
     is a snapshot taken from the pre-change code and is asserted against, so a
     drift here fails rather than being argued about.
 
@@ -495,8 +508,8 @@ def resolve_scheduled(profile_name: str = None,
             "platform": platform,
             "api_key": (env.get(SCHEDULED_DEFAULT_KEY_ENV) or "").strip() or None,
             "api_key_env": SCHEDULED_DEFAULT_KEY_ENV,
-            "channel_id": (section.get("buffer_channel_id") or "").strip(),
-            "identity_slug": (section.get("identity_slug") or "").strip(),
+            "channel_id": scheduled_config_str(section.get("buffer_channel_id")),
+            "identity_slug": scheduled_config_str(section.get("identity_slug")),
             "drain": section.get("drain"),
         }
 
@@ -531,8 +544,8 @@ def resolve_scheduled(profile_name: str = None,
         "platform": platform,
         "api_key": api_key,
         "api_key_env": key_env,
-        "channel_id": (overlay.get("buffer_channel_id") or "").strip(),
-        "identity_slug": (overlay.get("identity_slug") or "").strip(),
+        "channel_id": scheduled_config_str(overlay.get("buffer_channel_id")),
+        "identity_slug": scheduled_config_str(overlay.get("identity_slug")),
         # Falls back to the flat drain so a platform that does not override it
         # still gets a usable dict rather than None.
         "drain": overlay.get("drain", section.get("drain")),
@@ -600,7 +613,7 @@ def get_identity_slug(profile_name: str) -> str:
     """
     config = get_profile_config(profile_name)
     scheduled = config.get("scheduled_posting") or {}
-    return (scheduled.get("identity_slug") or "").strip()
+    return scheduled_config_str(scheduled.get("identity_slug"))
 
 
 def _allow_production_from_env() -> bool:

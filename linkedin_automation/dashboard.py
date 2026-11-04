@@ -1557,15 +1557,15 @@ def _scheduled_settings_view(profile_name, platform):
     is_linkedin = platform == pm.SCHEDULED_DEFAULT_PLATFORM
 
     if is_linkedin:
-        channel_id = (section.get("buffer_channel_id") or "").strip()
-        identity_slug = (section.get("identity_slug") or "").strip()
+        channel_id = pm.scheduled_config_str(section.get("buffer_channel_id"))
+        identity_slug = pm.scheduled_config_str(section.get("identity_slug"))
         api_key_env = pm.SCHEDULED_DEFAULT_KEY_ENV
     else:
         overlays = section.get("platforms")
         overlay = (overlays or {}).get(platform) if isinstance(overlays, dict) else None
         overlay = overlay if isinstance(overlay, dict) else {}
-        channel_id = (overlay.get("buffer_channel_id") or "").strip()
-        identity_slug = (overlay.get("identity_slug") or "").strip()
+        channel_id = pm.scheduled_config_str(overlay.get("buffer_channel_id"))
+        identity_slug = pm.scheduled_config_str(overlay.get("identity_slug"))
         api_key_env = (overlay.get("buffer_api_key_env") or "").strip()
 
     api_key_env_set = bool(api_key_env) and bool((os.environ.get(api_key_env) or "").strip())
@@ -1846,8 +1846,10 @@ def scheduled_queue(profile_name):
             # guard, and a blank header would not say so.
             "problem": account.get("problem"),
             "configured": account.get("configured"),
-            # The field names the banner shows: the list the Settings form
-            # reports, so neither keeps its own idea of what scheduling needs.
+            # What scheduling needs: the list the Settings form reports, so
+            # neither keeps its own idea of it. The banner also names a blank
+            # LinkedIn identity, from identity_configured below; that blocks
+            # browser jobs, not scheduling, so it is deliberately not in here.
             "missing": _scheduled_settings_view(profile_name, platform)["missing"],
             # The sweeper cannot be enabled without an identity to enforce.
             # Surfaced here so the UI can disable the control and say why,
