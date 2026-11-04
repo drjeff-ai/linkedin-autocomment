@@ -1846,6 +1846,9 @@ def scheduled_queue(profile_name):
             # guard, and a blank header would not say so.
             "problem": account.get("problem"),
             "configured": account.get("configured"),
+            # The field names the banner shows: the list the Settings form
+            # reports, so neither keeps its own idea of what scheduling needs.
+            "missing": _scheduled_settings_view(profile_name, platform)["missing"],
             # The sweeper cannot be enabled without an identity to enforce.
             # Surfaced here so the UI can disable the control and say why,
             # rather than letting someone turn it on and find out later.
