@@ -339,6 +339,180 @@ def test_the_browser_guard_refuses_a_non_string_identity_by_name(value):
         pm.check_production_guard("p", allow_production=True)
 
 
+# ─── the same for the key variable's name, on X ──────────────────────────────
+
+NON_STRING_KEY_ENVS = [pytest.param(12345, id="integer"),
+                       pytest.param(["BUFFER_API_KEY_X"], id="list"),
+                       pytest.param({"name": "BUFFER_API_KEY_X"}, id="dict")]
+
+
+@pytest.mark.parametrize("value", NON_STRING_KEY_ENVS)
+def test_a_non_string_key_variable_is_named_by_the_queue(client, value):
+    _save(_x(key_env=value))
+    missing = _config_block(client, "x")["missing"]
+    assert "buffer_api_key_env" in missing
+
+
+@pytest.mark.parametrize("value", NON_STRING_KEY_ENVS)
+def test_a_non_string_key_variable_leaves_settings_open_to_repair_it(client, value):
+    _save(_x(key_env=value))
+    res = client.get("/api/scheduled/p/settings?platform=x")
+    assert res.status_code == 200
+    body = res.get_json()
+    assert "buffer_api_key_env" in body["missing"]
+    assert body["buffer_api_key_env"] == ""
+    assert body["buffer_channel_id"] == "chan_x"
+
+
+@needs_node
+@pytest.mark.parametrize("value", NON_STRING_KEY_ENVS)
+def test_the_banner_names_a_non_string_key_variable(client, value):
+    _save(_x(key_env=value))
+    display, html = _banner(client, "x")
+    assert display == "block"
+    assert "<code>buffer_api_key_env</code>" in html
+    assert "<strong>Settings</strong> button" in html
+    _assert_no_config_file_talk(html)
+
+
+@pytest.mark.parametrize("value", NON_STRING_KEY_ENVS)
+def test_the_resolver_refuses_a_non_string_key_variable(value):
+    _save(_x(key_env=value))
+    with pytest.raises(pm.ScheduledConfigError, match="no buffer_api_key_env"):
+        pm.resolve_scheduled("p", "x")
+
+
+# ─── PINNED: a non-string LinkedIn identity behaves exactly as a blank one ───
+#
+# Blank, not a crash and not a special case: scheduling proceeds, because that
+# path is deliberately ungated and never reads the slug, and browser jobs refuse.
+
+NON_STRING_IDENTITIES = [pytest.param(12345, id="integer"),
+                         pytest.param(["slug"], id="list"),
+                         pytest.param({"slug": "x"}, id="dict"),
+                         pytest.param(None, id="null")]
+
+
+def _save_linkedin_identity(value):
+    _save({"buffer_channel_id": "chan_li", "identity_slug": value})
+
+
+class _SpyChrome:
+    built = []
+
+    def __init__(self, *a, **kw):
+        _SpyChrome.built.append(self)
+
+    def set_page_load_timeout(self, seconds):
+        pass
+
+    def maximize_window(self):
+        pass
+
+    def execute_script(self, *a):
+        return None
+
+
+@pytest.fixture
+def browser_factory(monkeypatch, tmp_path):
+    """Everything create_driver needs except the guard, which stays real and
+    reads the real saved config. Chrome is a spy."""
+    _SpyChrome.built = []
+    monkeypatch.setattr(pm.webdriver, "Chrome", _SpyChrome)
+    monkeypatch.setattr(pm, "Service", lambda *a, **kw: None)
+    monkeypatch.setattr(pm, "ChromeDriverManager",
+                        lambda: type("M", (), {"install": lambda self: "x"})())
+    monkeypatch.setattr(pm, "auto_migrate_from_env", lambda: None)
+    monkeypatch.setattr(pm, "get_profile", lambda name: {
+        "username": "u", "session_dir": str(tmp_path)})
+    monkeypatch.setattr(pm, "session_exists", lambda path: True)
+    monkeypatch.setattr(pm, "update_last_used", lambda name: None)
+    return _SpyChrome
+
+
+@pytest.mark.parametrize("value", NON_STRING_IDENTITIES)
+def test_the_config_block_is_identical_to_a_blank_identity(client, value):
+    _save_linkedin_identity("")
+    blank = _config_block(client, "linkedin")
+    _save_linkedin_identity(value)
+    config = _config_block(client, "linkedin")
+    assert config == blank
+    assert config["identity_configured"] is False
+    assert config["identity_slug"] == ""
+
+
+@needs_node
+@pytest.mark.parametrize("value", NON_STRING_IDENTITIES)
+def test_the_banner_names_it_and_does_not_claim_scheduling_refuses(client, value):
+    _save_linkedin_identity(value)
+    display, html = _banner(client, "linkedin")
+    assert display == "block"
+    assert "<code>identity_slug</code>" in html
+    assert "Browser jobs, including the first-comment pass, refuse" in html
+    assert "Scheduling" not in html
+
+
+@pytest.mark.parametrize("value", NON_STRING_IDENTITIES)
+def test_the_browser_factory_refuses_before_building_a_browser(browser_factory, value):
+    """allow_production=True is what the dashboard always passes, so this is
+    the refusal a real job meets. The spy is the assertion: no browser at all."""
+    _save_linkedin_identity(value)
+    with pytest.raises(pm.ProductionAccessRefused, match="no declared identity"):
+        pm.create_driver("p", allow_production=True)
+    assert browser_factory.built == []
+
+
+def test_the_browser_factory_builds_for_a_real_identity(browser_factory):
+    """The other direction, so the spy above cannot pass by never being reachable."""
+    _save_linkedin_identity("example-person")
+    pm.create_driver("p", allow_production=True)
+    assert len(browser_factory.built) == 1
+
+
+@pytest.mark.parametrize("value", NON_STRING_IDENTITIES)
+def test_the_first_comment_pass_never_starts_its_browser_process(monkeypatch, value):
+    def boom(job_id, cmd):
+        pytest.fail("the first-comment subprocess must not start")
+    monkeypatch.setattr(dashboard, "run_subprocess", boom)
+    _save_linkedin_identity(value)
+    with pytest.raises(RuntimeError, match="no identity_slug"):
+        dashboard._first_comment_drain_job("job", "p")
+
+
+@pytest.mark.parametrize("value", NON_STRING_IDENTITIES + [pytest.param("", id="blank")])
+def test_scheduling_proceeds_to_create_post(client, monkeypatch, value):
+    """The real route and the real schedule_pass; only Buffer's edge is faked."""
+    created = []
+
+    def fake_create(channel_id, body, image_url, when, key=None, session=None):
+        created.append(channel_id)
+        return {"id": "post1", "status": "scheduled", "dueAt": when}
+
+    monkeypatch.setattr(cp.bc, "create_post", fake_create)
+    monkeypatch.setattr(dashboard.buffer_client, "scheduled_slots",
+                        lambda *a, **kw: {"used": 0, "limit": 10, "free": 10})
+    jobs = []
+    monkeypatch.setattr(dashboard, "run_job",
+                        lambda job_id, func, *a, **kw: jobs.append((job_id, func, a)))
+
+    _save_linkedin_identity(value)
+    row = {"date": "2036-11-02", "time_window": "morning",
+           "post_text": "A short post.", "topic": "t"}
+    state = cp.PipelineState(profile_name="p")
+    state.rows[cp.row_key(row)] = {"status": cp.PENDING, "row": row}
+    state.save()
+
+    res = client.post("/api/scheduled/p/schedule")
+    assert res.status_code == 200
+    assert len(jobs) == 1
+
+    job_id, func, args = jobs[0]
+    outcome = func(job_id, *args)
+    assert created == ["chan_li"]
+    assert outcome["scheduled"] == 1
+    assert not outcome.get("error")
+
+
 def test_a_real_string_is_still_stripped_and_kept():
     """The other direction: this must not read every value as missing."""
     assert pm.scheduled_config_str("  chan_li ") == "chan_li"

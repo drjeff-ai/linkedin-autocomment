@@ -1566,7 +1566,7 @@ def _scheduled_settings_view(profile_name, platform):
         overlay = overlay if isinstance(overlay, dict) else {}
         channel_id = pm.scheduled_config_str(overlay.get("buffer_channel_id"))
         identity_slug = pm.scheduled_config_str(overlay.get("identity_slug"))
-        api_key_env = (overlay.get("buffer_api_key_env") or "").strip()
+        api_key_env = pm.scheduled_config_str(overlay.get("buffer_api_key_env"))
 
     api_key_env_set = bool(api_key_env) and bool((os.environ.get(api_key_env) or "").strip())
 

@@ -446,7 +446,8 @@ def valid_env_var_name(value: str) -> bool:
 
 
 def scheduled_config_str(value) -> str:
-    """A saved channel id or identity slug, stripped - or "" if it is not a string.
+    """A saved channel id, identity slug or key variable name, stripped - or ""
+    if it is not a string.
 
     profile_config.json can be hand-edited, so a number or a list can arrive
     here. Coercing one with str() would invent a channel id or identity nobody
@@ -522,7 +523,7 @@ def resolve_scheduled(profile_name: str = None,
             % (profile_name or get_default_profile_name(), platform, platform,
                ", ".join(sorted([SCHEDULED_DEFAULT_PLATFORM] + list(overlays)))))
 
-    key_env = (overlay.get("buffer_api_key_env") or "").strip()
+    key_env = scheduled_config_str(overlay.get("buffer_api_key_env"))
     if not key_env:
         raise ScheduledConfigError(
             "scheduled_posting.platforms.%s has no buffer_api_key_env, so there "
