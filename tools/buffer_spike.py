@@ -32,7 +32,9 @@ createPost against a connected channel schedules a real post on a real account.
 
 The Buffer key comes from the environment (.env) — by default BUFFER_API_KEY,
 or whichever variable --key-env names, so a second Buffer account is a second
-variable rather than a second checkout. It is never printed, never logged, and
+variable rather than a second checkout. Only BUFFER_API_KEY or
+BUFFER_API_KEY_<SUFFIX> is accepted, because the value goes to Buffer as the
+Bearer token. It is never printed, never logged, and
 never committed. buffer_client.api_key() is NOT touched: that is shared
 production code on the LinkedIn scheduling path.
 """
@@ -41,6 +43,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -55,6 +58,24 @@ API_URL = "https://api.buffer.com/graphql"
 #: itself. Set by main() from --key-env so a 401 names the variable the operator
 #: actually passed rather than the default they may not be using.
 KEY_ENV_VAR = "BUFFER_API_KEY"
+
+#: The --key-env value is sent to Buffer as the Bearer token, so only a name
+#: that says it holds a Buffer key is read: the same rule as
+#: profile_manager.scheduled_key_env, except that the flag is not stripped, so
+#: a padded name is refused rather than accepted. Copied rather than imported because this
+#: spike runs as a plain script, where linkedin_automation is not importable
+#: unless --image-file is used. tests/test_buffer_spike_key_env.py checks that
+#: the two agree.
+KEY_ENV_RE = re.compile(r"BUFFER_API_KEY(?:_[A-Z0-9_]+)?")
+KEY_ENV_MAX_LEN = 64
+KEY_ENV_RULE = "BUFFER_API_KEY or BUFFER_API_KEY_<SUFFIX>"
+
+
+def key_env_allowed(name):
+    return (isinstance(name, str) and len(name) <= KEY_ENV_MAX_LEN
+            and KEY_ENV_RE.fullmatch(name) is not None)
+
+
 USAGE_LOG = "api_usage.jsonl"
 TRANSCRIPT = ".harvest/buffer_spike_transcript.jsonl"
 
@@ -649,7 +670,8 @@ def main():
                          "CREATED - createPost schedules on a real account.")
     ap.add_argument("--key-env", default="BUFFER_API_KEY", metavar="VAR",
                     help="environment variable holding the Buffer key "
-                         "(default BUFFER_API_KEY). One Buffer account per "
+                         "(default BUFFER_API_KEY). Must be BUFFER_API_KEY or "
+                         "BUFFER_API_KEY_<SUFFIX>. One Buffer account per "
                          "variable, so a second account is a second variable "
                          "in .env rather than a second checkout.")
     ap.add_argument("--service", default="linkedin",
@@ -714,6 +736,14 @@ def main():
         print("--image-url and --image-file are mutually exclusive: one is a "
               "URL used as given, the other is a local file to upload. Pass "
               "exactly one.")
+        return 2
+
+    # Checked before the variable is read. The name is not echoed: a key
+    # pasted into the flag by mistake would otherwise be printed.
+    if not key_env_allowed(args.key_env):
+        print("--key-env is not an allowed name. Its value is sent to Buffer as "
+              "the API key, so only %s can be used. Nothing was sent."
+              % KEY_ENV_RULE)
         return 2
 
     global KEY_ENV_VAR

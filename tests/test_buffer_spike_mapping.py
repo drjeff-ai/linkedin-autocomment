@@ -272,24 +272,24 @@ def test_a_missing_key_variable_fails_loudly_and_names_itself(capsys, monkeypatc
     using the default, and "BUFFER_API_KEY is not set" would send them to the
     wrong line of .env."""
     import tools.buffer_spike as spike
-    monkeypatch.delenv("X_BUFFER_API_KEY", raising=False)
+    monkeypatch.delenv("BUFFER_API_KEY_X", raising=False)
     monkeypatch.setattr("sys.argv", ["buffer_spike.py", "--key-env",
-                                     "X_BUFFER_API_KEY"])
+                                     "BUFFER_API_KEY_X"])
     rc = spike.main()
     out = capsys.readouterr().out
     assert rc == 2
-    assert "X_BUFFER_API_KEY is not set" in out
+    assert "BUFFER_API_KEY_X is not set" in out
     assert "BUFFER_API_KEY" in out           # still points at the default
 
 
 def test_an_empty_key_variable_is_treated_as_missing(capsys, monkeypatch):
     """A variable present but blank is the same failure, not a 401 later."""
     import tools.buffer_spike as spike
-    monkeypatch.setenv("X_BUFFER_API_KEY", "   ")
+    monkeypatch.setenv("BUFFER_API_KEY_X", "   ")
     monkeypatch.setattr("sys.argv", ["buffer_spike.py", "--key-env",
-                                     "X_BUFFER_API_KEY"])
+                                     "BUFFER_API_KEY_X"])
     assert spike.main() == 2
-    assert "X_BUFFER_API_KEY is not set" in capsys.readouterr().out
+    assert "BUFFER_API_KEY_X is not set" in capsys.readouterr().out
 
 
 # ─── --image-file: the real local -> R2 -> Buffer path ───────────────────────

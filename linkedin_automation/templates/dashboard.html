@@ -1698,7 +1698,7 @@ header {
       </div>
       <div style="margin-top:0.6rem">
         <div style="font-size:0.75rem;color:var(--text-dim);margin-bottom:0.25rem">
-          Buffer API key - environment variable NAME (never the key itself)</div>
+          Buffer API key - environment variable NAME, BUFFER_API_KEY or BUFFER_API_KEY_&lt;SUFFIX&gt; (never the key itself)</div>
         <div style="display:flex;gap:0.6rem;align-items:center">
           <input class="input" id="schpSetKeyEnv" placeholder="BUFFER_API_KEY_X" style="flex:1">
           <span id="schpSetKeyEnvStatus" style="font-size:0.75rem;white-space:nowrap"></span>
@@ -3173,7 +3173,8 @@ async function schpLoadSettings() {
     if (d.missing && d.missing.length) {
       missingBox.style.display = 'block';
       missingBox.textContent = 'Missing for ' + (schpPlatform === 'x' ? 'X' : 'LinkedIn') +
-        ': ' + d.missing.join(', ') + '. Scheduling will refuse until these are set.';
+        ': ' + d.missing.join(', ') + '. Scheduling will refuse until these are set.' +
+        (d.key_env_problem ? ' ' + d.key_env_problem : '');
     } else {
       missingBox.style.display = 'none';
       missingBox.textContent = '';
@@ -3636,6 +3637,45 @@ async function schpAwaitJob(jobId, out) {
   }
 }
 
+// Fail-closed, and SAID so, before the schedule button is pressed. Names come
+// from config.missing, the list the Settings form reports, never from
+// config.problem: that prose is written for logs and names raw config paths.
+function schpPaintConfigWarn(warn, platform, config) {
+  const label = platform === 'x' ? 'X' : 'LinkedIn';
+  const missing = config.missing || [];
+  const isEnvVar = f => / environment variable$/.test(f);
+  // LinkedIn's schedule path does not need an identity, so a blank one is not
+  // in `missing` - but check_production_guard refuses every browser job without it.
+  const blankLinkedInIdentity = platform === 'linkedin' && !config.identity_configured;
+
+  if (!missing.length && !blankLinkedInIdentity) {
+    warn.style.display = 'none';
+    warn.innerHTML = '';
+    return;
+  }
+
+  const code = f => '<code>' + schpEsc(f) + '</code>';
+  const lines = [];
+  if (missing.length) {
+    lines.push(label + ' is missing ' + missing.map(code).join(', ') +
+      '. Scheduling refuses until ' + (missing.length > 1 ? 'these are' : 'this is') + ' set.');
+  }
+  if (config.key_env_problem) lines.push(schpEsc(config.key_env_problem));
+  if (blankLinkedInIdentity) {
+    lines.push('LinkedIn has no ' + code('identity_slug') +
+      '. Browser jobs, including the first-comment pass, refuse until it is set.');
+  }
+  if (blankLinkedInIdentity || missing.some(f => !isEnvVar(f))) {
+    lines.push('Fix this with the <strong>Settings</strong> button at the top right of this panel.');
+  }
+  if (missing.some(isEnvVar)) {
+    lines.push('Set that environment variable outside this dashboard. ' +
+      '<strong>Settings</strong> holds only its name, never the key.');
+  }
+  warn.style.display = 'block';
+  warn.innerHTML = lines.join('<br>');
+}
+
 async function loadScheduledQueue() {
   if (!currentProfile) return;
   const box = document.getElementById('schpQueue');
@@ -3653,29 +3693,17 @@ async function loadScheduledQueue() {
 
     // Identity, always visible - this section acts on a real account.
     const idLine = document.getElementById('schpIdentityLine');
-    const warn = document.getElementById('schpConfigWarn');
     const platLabel = schpPlatform === 'x' ? 'X' : 'LinkedIn';
+    schpPaintConfigWarn(document.getElementById('schpConfigWarn'), schpPlatform, d.config);
     if (d.config.identity_configured) {
       idLine.innerHTML = 'On <strong>' + schpEsc(platLabel) + '</strong>, acts as ' +
         '<strong style="color:#7fd0ff">' + schpEsc(d.config.identity_slug) +
         '</strong>' +
         (d.config.buffer_channel_id
           ? ' · Buffer channel ' + schpEsc(d.config.buffer_channel_id) : '');
-      warn.style.display = 'none';
     } else {
-      // Fail-closed, and SAID so. A blank header would look like "nothing set
-      // yet"; the guard will actually refuse to schedule, and that is worth
-      // knowing before the button is pressed rather than after.
       idLine.innerHTML = '<span style="color:#ffcc66">' + schpEsc(platLabel) +
         ' — no identity configured</span>';
-      warn.style.display = 'block';
-      warn.innerHTML = schpEsc(d.config.problem ||
-        (platLabel + ' is not configured — scheduling will refuse.')) +
-        '<br>Set <code>scheduled_posting' +
-        (schpPlatform === 'linkedin' ? '' : '.platforms.' + schpEsc(schpPlatform)) +
-        '.identity_slug</code> and <code>buffer_channel_id</code> in this ' +
-        'profile\'s config. Until they are set, the identity guard refuses the ' +
-        'run rather than posting to an unverified account.';
     }
     document.getElementById('schpStateFile').textContent = d.state_file || '';
 

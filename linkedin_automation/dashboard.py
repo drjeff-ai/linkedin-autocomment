@@ -487,6 +487,13 @@ def update_profile_config_route(name):
     body = request.json
     if not isinstance(body, dict):
         return jsonify({"error": "Request body must be a JSON object"}), 400
+    # This editor can write the same field as the Buffer settings form.
+    section = body.get("scheduled_posting")
+    overlays = section.get("platforms") if isinstance(section, dict) else None
+    for overlay in (overlays.values() if isinstance(overlays, dict) else ()):
+        key_env = overlay.get("buffer_api_key_env") if isinstance(overlay, dict) else None
+        if pm.buffer_key_env_rejected(key_env):
+            return jsonify({"error": _key_env_refusal(key_env)}), 400
     stored = pm.read_stored_config(name)
     pm.save_profile_config(name, pm._deep_merge(stored, body))
     # Return the effective (default-merged) config so the client sees the result.
@@ -1557,16 +1564,24 @@ def _scheduled_settings_view(profile_name, platform):
     is_linkedin = platform == pm.SCHEDULED_DEFAULT_PLATFORM
 
     if is_linkedin:
-        channel_id = (section.get("buffer_channel_id") or "").strip()
-        identity_slug = (section.get("identity_slug") or "").strip()
+        channel_id = pm.scheduled_config_str(section.get("buffer_channel_id"))
+        identity_slug = pm.scheduled_config_str(section.get("identity_slug"))
         api_key_env = pm.SCHEDULED_DEFAULT_KEY_ENV
+        key_env_problem = None
     else:
         overlays = section.get("platforms")
         overlay = (overlays or {}).get(platform) if isinstance(overlays, dict) else None
         overlay = overlay if isinstance(overlay, dict) else {}
-        channel_id = (overlay.get("buffer_channel_id") or "").strip()
-        identity_slug = (overlay.get("identity_slug") or "").strip()
-        api_key_env = (overlay.get("buffer_api_key_env") or "").strip()
+        channel_id = pm.scheduled_config_str(overlay.get("buffer_channel_id"))
+        identity_slug = pm.scheduled_config_str(overlay.get("identity_slug"))
+        # A name resolve_scheduled would refuse reads as blank here too, so its
+        # variable is not even checked for being set, and the form never shows it.
+        api_key_env = pm.scheduled_key_env(overlay.get("buffer_api_key_env"))
+        key_env_problem = None
+        if pm.buffer_key_env_rejected(overlay.get("buffer_api_key_env")):
+            key_env_problem = ("The saved buffer_api_key_env is not allowed, so it "
+                               "is ignored and nothing is sent to Buffer. Only %s "
+                               "can be used." % pm.BUFFER_KEY_ENV_RULE)
 
     api_key_env_set = bool(api_key_env) and bool((os.environ.get(api_key_env) or "").strip())
 
@@ -1596,6 +1611,7 @@ def _scheduled_settings_view(profile_name, platform):
         "buffer_api_key_env": api_key_env,
         "buffer_api_key_env_editable": not is_linkedin,
         "api_key_env_set": api_key_env_set,
+        "key_env_problem": key_env_problem,
         "missing": missing,
         "configured": not missing,
     }
@@ -1686,6 +1702,12 @@ def scheduled_settings_get(profile_name):
     return jsonify(_scheduled_settings_view(profile_name, platform))
 
 
+def _key_env_refusal(name):
+    return ("%r cannot be used as the Buffer key variable. Its value would be "
+            "sent to Buffer as the API key, so only %s is accepted."
+            % (name, pm.BUFFER_KEY_ENV_RULE))
+
+
 @app.route('/api/scheduled/<profile_name>/settings', methods=['POST'])
 def scheduled_settings_save(profile_name):
     """POST - save buffer_channel_id / identity_slug / buffer_api_key_env for
@@ -1701,7 +1723,8 @@ def scheduled_settings_save(profile_name):
 
     The API key VALUE is never accepted here - only the NAME of the
     environment variable that holds it, and that name is rejected if it does
-    not look like a variable name (``profile_manager.valid_env_var_name``).
+    not look like a variable name (``profile_manager.valid_env_var_name``) or
+    is outside ``profile_manager.BUFFER_KEY_ENV_RULE``.
     """
     try:
         platform = _req_platform()
@@ -1734,6 +1757,8 @@ def scheduled_settings_save(profile_name):
         patch = {"scheduled_posting": {"buffer_channel_id": channel_id,
                                        "identity_slug": identity_slug}}
     else:
+        if pm.buffer_key_env_rejected(api_key_env):
+            return jsonify({"error": _key_env_refusal(api_key_env)}), 400
         patch = {"scheduled_posting": {"platforms": {platform: {
             "buffer_channel_id": channel_id,
             "identity_slug": identity_slug,
@@ -1811,6 +1836,7 @@ def scheduled_queue(profile_name):
     # account header exists to prevent.
     account = _scheduled_account(profile_name, platform)
     identity = account.get("identity_slug") or ""
+    settings_view = _scheduled_settings_view(profile_name, platform)
     return jsonify({
         "counts": counts,
         "order": list(_SCHEDULED_STATE_ORDER),
@@ -1846,6 +1872,12 @@ def scheduled_queue(profile_name):
             # guard, and a blank header would not say so.
             "problem": account.get("problem"),
             "configured": account.get("configured"),
+            # What scheduling needs: the list the Settings form reports, so
+            # neither keeps its own idea of it. The banner also names a blank
+            # LinkedIn identity, from identity_configured below; that blocks
+            # browser jobs, not scheduling, so it is deliberately not in here.
+            "missing": settings_view["missing"],
+            "key_env_problem": settings_view["key_env_problem"],
             # The sweeper cannot be enabled without an identity to enforce.
             # Surfaced here so the UI can disable the control and say why,
             # rather than letting someone turn it on and find out later.
@@ -2118,7 +2150,10 @@ def scheduled_schedule(profile_name):
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    channel_id = _scheduled_channel_id(profile_name, platform)
+    try:
+        channel_id = _scheduled_channel_id(profile_name, platform)
+    except pm.ScheduledConfigError as exc:
+        return jsonify({"error": str(exc)}), 400
     if not channel_id:
         return jsonify({"error": "No Buffer channel configured for this "
                                  "profile. Set scheduled_posting."

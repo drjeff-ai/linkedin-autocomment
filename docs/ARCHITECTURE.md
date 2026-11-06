@@ -915,7 +915,9 @@ fail on an unrelated variable). **Every other platform requires its own
 `scheduled_posting.platforms.<platform>` overlay** naming its own
 `buffer_api_key_env`, and raises `ScheduledConfigError` if the overlay, the key
 variable name, or the variable's value is missing — there is no fallback to
-LinkedIn's flat fields. An unknown platform with no overlay is an error, not a
+LinkedIn's flat fields. The named variable's value goes to Buffer as the Bearer
+token, so only `BUFFER_API_KEY` or `BUFFER_API_KEY_<SUFFIX>` is ever read: any
+other name raises here, whether it came through the dashboard or a hand edit. An unknown platform with no overlay is an error, not a
 silent LinkedIn default: returning LinkedIn's channel for a typo'd platform
 name would publish X content to LinkedIn, unrecoverably and silently.
 

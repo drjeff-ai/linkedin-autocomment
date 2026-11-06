@@ -445,6 +445,44 @@ def valid_env_var_name(value: str) -> bool:
         _ENV_VAR_NAME_RE.match(value))
 
 
+def scheduled_config_str(value) -> str:
+    """A saved channel id, identity slug or key variable name, stripped - or ""
+    if it is not a string.
+
+    profile_config.json can be hand-edited, so a number or a list can arrive
+    here. Coercing one with str() would invent a channel id or identity nobody
+    configured, on a path that acts on a real account; reading it as unset
+    gives it exactly the behaviour of a blank value. That is a refusal
+    everywhere except LinkedIn's schedule path, which is deliberately ungated
+    on the identity and never reads it.
+    """
+    return value.strip() if isinstance(value, str) else ""
+
+
+#: The value of whatever variable ``buffer_api_key_env`` names goes to Buffer as
+#: the Bearer token, so a shape check is not enough: PATH and OPENAI_API_KEY are
+#: both well-formed names. Only a name that says it holds a Buffer key is read.
+_BUFFER_KEY_ENV_RE = re.compile(r"BUFFER_API_KEY(?:_[A-Z0-9_]+)?")
+BUFFER_KEY_ENV_RULE = "BUFFER_API_KEY or BUFFER_API_KEY_<SUFFIX>"
+
+
+def scheduled_key_env(value) -> str:
+    """The stored key variable name if it may be read, otherwise ""."""
+    name = scheduled_config_str(value)
+    if valid_env_var_name(name) and _BUFFER_KEY_ENV_RE.fullmatch(name):
+        return name
+    return ""
+
+
+def buffer_key_env_rejected(value) -> bool:
+    """Is this a name that was set but may not be read?
+
+    Blank and non-string values are not: they read as unset, and are reported
+    as that.
+    """
+    return bool(scheduled_config_str(value)) and not scheduled_key_env(value)
+
+
 def resolve_scheduled(profile_name: str = None,
                       platform: str = SCHEDULED_DEFAULT_PLATFORM,
                       env=None) -> Dict:
@@ -454,9 +492,9 @@ def resolve_scheduled(profile_name: str = None,
     drain}``.
 
     **LinkedIn resolves exactly as it did before this function existed.** Its
-    settings are the flat `scheduled_posting` fields, read with the same
-    ``(x or "").strip()`` expressions the dashboard used, and its key is the
-    bare ``BUFFER_API_KEY``. `tests/fixtures/scheduled_resolution_golden.json`
+    settings are the flat `scheduled_posting` fields, stripped as the dashboard
+    always did (a non-string reads as blank, see ``scheduled_config_str``), and
+    its key is the bare ``BUFFER_API_KEY``. `tests/fixtures/scheduled_resolution_golden.json`
     is a snapshot taken from the pre-change code and is asserted against, so a
     drift here fails rather than being argued about.
 
@@ -470,7 +508,10 @@ def resolve_scheduled(profile_name: str = None,
     **An overlaid platform is stricter, because it has no fallback.** Its key
     comes from the environment variable its overlay NAMES
     (``buffer_api_key_env``), and a missing or blank one raises here, naming the
-    variable — there is no bare default to silently land on.
+    variable — there is no bare default to silently land on. A name outside
+    ``BUFFER_KEY_ENV_RULE`` raises without the variable being read, because this
+    is the one place a config value picks what gets sent to Buffer. The error
+    does not repeat the stored value: hand-edited, it could be a pasted key.
 
     **An unknown platform raises rather than falling back to the flat fields.**
     Returning LinkedIn's channel for ``platform="x"`` because of a typo would
@@ -495,8 +536,8 @@ def resolve_scheduled(profile_name: str = None,
             "platform": platform,
             "api_key": (env.get(SCHEDULED_DEFAULT_KEY_ENV) or "").strip() or None,
             "api_key_env": SCHEDULED_DEFAULT_KEY_ENV,
-            "channel_id": (section.get("buffer_channel_id") or "").strip(),
-            "identity_slug": (section.get("identity_slug") or "").strip(),
+            "channel_id": scheduled_config_str(section.get("buffer_channel_id")),
+            "identity_slug": scheduled_config_str(section.get("identity_slug")),
             "drain": section.get("drain"),
         }
 
@@ -509,7 +550,14 @@ def resolve_scheduled(profile_name: str = None,
             % (profile_name or get_default_profile_name(), platform, platform,
                ", ".join(sorted([SCHEDULED_DEFAULT_PLATFORM] + list(overlays)))))
 
-    key_env = (overlay.get("buffer_api_key_env") or "").strip()
+    if buffer_key_env_rejected(overlay.get("buffer_api_key_env")):
+        raise ScheduledConfigError(
+            "scheduled_posting.platforms.%s.buffer_api_key_env is not an allowed "
+            "name, so the variable it names was not read. That variable's value "
+            "would go to Buffer as the API key, so only %s is accepted."
+            % (platform, BUFFER_KEY_ENV_RULE))
+
+    key_env = scheduled_key_env(overlay.get("buffer_api_key_env"))
     if not key_env:
         raise ScheduledConfigError(
             "scheduled_posting.platforms.%s has no buffer_api_key_env, so there "
@@ -531,8 +579,8 @@ def resolve_scheduled(profile_name: str = None,
         "platform": platform,
         "api_key": api_key,
         "api_key_env": key_env,
-        "channel_id": (overlay.get("buffer_channel_id") or "").strip(),
-        "identity_slug": (overlay.get("identity_slug") or "").strip(),
+        "channel_id": scheduled_config_str(overlay.get("buffer_channel_id")),
+        "identity_slug": scheduled_config_str(overlay.get("identity_slug")),
         # Falls back to the flat drain so a platform that does not override it
         # still gets a usable dict rather than None.
         "drain": overlay.get("drain", section.get("drain")),
@@ -600,7 +648,7 @@ def get_identity_slug(profile_name: str) -> str:
     """
     config = get_profile_config(profile_name)
     scheduled = config.get("scheduled_posting") or {}
-    return (scheduled.get("identity_slug") or "").strip()
+    return scheduled_config_str(scheduled.get("identity_slug"))
 
 
 def _allow_production_from_env() -> bool:
