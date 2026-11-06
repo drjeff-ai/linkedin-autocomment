@@ -94,10 +94,18 @@ def test_the_default_still_reaches_the_request(sent, monkeypatch):
     "PATH", "OPENAI_API_KEY", "path", "buffer_api_key_x", "XBUFFER_API_KEY",
     "BUFFER_API_KEYS", "BUFFER_API_KEY_", "BUFFER_API_KEY_x", "BUFFER_API_KEY-X",
     "BUFFER_API_KEY\nPATH", "BUFFER_API_KEY_" + "A" * 49, "BUFFER_API_KEY_" + "A" * 50,
-    "",
+    "BUFFER_API_KEY_١", "BUFFER_API_KEY_Ａ", "",
 ])
 def test_the_spike_copy_of_the_rule_agrees_with_profile_manager(name):
     """The spike copies the rule so it can run as a plain script. This keeps
     the copy from drifting."""
     assert spike.key_env_allowed(name) == bool(pm.scheduled_key_env(name))
     assert spike.KEY_ENV_RULE == pm.BUFFER_KEY_ENV_RULE
+
+
+@pytest.mark.parametrize("name", ["BUFFER_API_KEY_X ", " BUFFER_API_KEY", "BUFFER_API_KEY\n"])
+def test_the_spike_refuses_padding_that_stored_config_strips(name):
+    """The one deliberate difference: a flag is not stripped, so the spike is
+    stricter here, never looser."""
+    assert pm.scheduled_key_env(name)
+    assert not spike.key_env_allowed(name)

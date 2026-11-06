@@ -61,7 +61,8 @@ KEY_ENV_VAR = "BUFFER_API_KEY"
 
 #: The --key-env value is sent to Buffer as the Bearer token, so only a name
 #: that says it holds a Buffer key is read: the same rule as
-#: profile_manager.scheduled_key_env. Copied rather than imported because this
+#: profile_manager.scheduled_key_env, except that the flag is not stripped, so
+#: a padded name is refused rather than accepted. Copied rather than imported because this
 #: spike runs as a plain script, where linkedin_automation is not importable
 #: unless --image-file is used. tests/test_buffer_spike_key_env.py checks that
 #: the two agree.
