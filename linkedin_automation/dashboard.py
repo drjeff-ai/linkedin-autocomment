@@ -1583,7 +1583,7 @@ def _scheduled_settings_view(profile_name, platform):
                                "is ignored and nothing is sent to Buffer. Only %s "
                                "can be used." % pm.BUFFER_KEY_ENV_RULE)
 
-    api_key_env_set =bool(api_key_env) and bool((os.environ.get(api_key_env) or "").strip())
+    api_key_env_set = bool(api_key_env) and bool((os.environ.get(api_key_env) or "").strip())
 
     missing = []
     if not channel_id:

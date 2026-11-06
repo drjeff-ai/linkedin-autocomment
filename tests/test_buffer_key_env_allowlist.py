@@ -314,6 +314,64 @@ def test_the_schedule_route_refuses_with_the_reason_not_a_500(client, jobs):
     assert jobs == []
 
 
+# ─── the schedule job's own refusal ──────────────────────────────────────────
+#
+# The route refuses first, so the tests above never reach the job's own check.
+# It still matters: the job runs on a thread after the route returns, so the
+# config can change in between, and a key of None in scheduled_slots or
+# schedule_pass falls back to BUFFER_API_KEY. These call the job itself.
+
+@pytest.fixture
+def schedule_pass_calls(monkeypatch):
+    calls = []
+    real = cp.schedule_pass
+
+    def spy(*a, **kw):
+        calls.append(kw.get("key"))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(cp, "schedule_pass", spy)
+    return calls
+
+
+@pytest.mark.parametrize("name", OUTSIDE_NAMES)
+def test_the_schedule_job_refuses_a_hand_edited_name_before_any_buffer_call(
+        sent, schedule_pass_calls, name):
+    _save(name)
+    _seed_rows()
+    out = dashboard._scheduled_schedule_job("job1", "p", "chan_x", platform="x")
+    assert sent == []                   # no header at all: not even BUFFER_API_KEY
+    assert schedule_pass_calls == []
+    assert "not an allowed name" in out["error"]
+    assert LEAK not in json.dumps(out)
+
+
+def test_a_name_edited_after_the_route_accepted_it_still_sends_nothing(
+        client, sent, jobs, schedule_pass_calls):
+    _save("BUFFER_API_KEY_X")
+    _seed_rows()
+    assert client.post("/api/scheduled/p/schedule?platform=x").status_code == 200
+    assert len(jobs) == 1
+    _save("OPENAI_API_KEY")             # hand-edited while the job is queued
+    del sent[:]
+    job_id, func, args = jobs[0]
+    out = func(job_id, *args)
+    assert sent == []
+    assert schedule_pass_calls == []
+    assert "not an allowed name" in out["error"]
+
+
+@pytest.mark.parametrize("name,value", ALLOWED)
+def test_the_schedule_job_sends_a_name_inside_the_rule(
+        sent, schedule_pass_calls, name, value):
+    """The other direction, so the refusal tests cannot pass by never asking."""
+    _save(name)
+    _seed_rows()
+    dashboard._scheduled_schedule_job("job1", "p", "chan_x", platform="x")
+    assert sent and set(sent) == {"Bearer %s" % value}
+    assert schedule_pass_calls == [value]
+
+
 def test_a_pasted_key_in_the_stored_field_is_not_repeated_anywhere(client, sent, jobs):
     """Hand-edited, the field could hold the key itself, and these responses
     reach the page and the logs."""
