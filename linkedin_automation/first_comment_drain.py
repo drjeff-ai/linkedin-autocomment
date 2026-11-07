@@ -293,7 +293,11 @@ class FirstCommentDrain:
         return timedelta(minutes=delay_minutes + jitter)
 
     def _tick_profile(self, profile, now):
-        cfg = first_comment_drain_config(self._config_fn(profile) or {})
+        full_config = self._config_fn(profile) or {}
+        # The per-profile master switch, ahead of the drain's own flag.
+        if not pm.automations_enabled(full_config):
+            return
+        cfg = first_comment_drain_config(full_config)
         if not cfg.get("enabled"):
             return
         state = self._profile_state(profile)
@@ -401,7 +405,8 @@ class FirstCommentDrain:
         many rows are waiting, last/next check, recent runs."""
         with self._lock:
             now = self._now()
-            cfg = first_comment_drain_config(self._config_fn(profile) or {})
+            full_config = self._config_fn(profile) or {}
+            cfg = first_comment_drain_config(full_config)
             state = self._profile_state(profile)
             interval = self._interval(cfg)
             last_check = state["last_check"]
@@ -419,6 +424,7 @@ class FirstCommentDrain:
 
             return {
                 "running": self.is_running(),
+                "automations_enabled": pm.automations_enabled(full_config),
                 "enabled": bool(cfg.get("enabled")),
                 "interval_minutes": cfg.get("interval_minutes"),
                 "delay_minutes": cfg.get("delay_minutes"),
@@ -433,8 +439,15 @@ class FirstCommentDrain:
             }
 
     def run_now(self, profile):
-        """Check immediately, ignoring the interval. Returns the outcome dict."""
+        """Check immediately, ignoring the interval. Returns the outcome dict.
+
+        Ignores the interval, never the per-profile master switch.
+        """
         with self._lock:
+            if not pm.automations_enabled(self._config_fn(profile) or {}):
+                return {"action": pm.AUTOMATIONS_DISABLED_ACTION, "waiting": 0,
+                        "ready": 0,
+                        "note": pm.automations_disabled_message(profile)}
             now = self._now()
             state = self._profile_state(profile)
             result = self._check(profile, state, now, manual=True)

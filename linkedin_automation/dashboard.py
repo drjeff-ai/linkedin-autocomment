@@ -348,7 +348,22 @@ def _auto_cycle_job(job_id, profile_name, job_cfg):
         except Exception as exc:
             return {"error": str(exc), "count": 0}
 
+    def switched_off(stage):
+        """The master switch, re-read between stages. A cycle already running
+        when automations are turned off stops before its next stage. That
+        is not reported as an error: an error trips the auto_mode circuit
+        breaker, which would write scheduler.auto_mode, and the switch never
+        writes an individual flag."""
+        if pm.profile_automations_enabled(profile_name):
+            return None
+        log_job(job_id, "Automations were turned off for this profile; "
+                        "skipping the %s stage." % stage)
+        return {"error": None, "note": "automations disabled, %s skipped" % stage}
+
     def run_generate():
+        skipped = switched_off("generate")
+        if skipped:
+            return dict(skipped, generated=0)
         try:
             result = _generate_job(job_id, profile_name, cap)
             return {"error": None, "generated": result.get("generated", 0)}
@@ -356,6 +371,9 @@ def _auto_cycle_job(job_id, profile_name, job_cfg):
             return {"error": str(exc), "generated": 0}
 
     def run_post():
+        skipped = switched_off("post")
+        if skipped:
+            return dict(skipped, posted=0)
         try:
             store = post_store.load_synced_store(profile_name)
             generated = store.by_status(post_store.GENERATED)
@@ -494,6 +512,11 @@ def update_profile_config_route(name):
         key_env = overlay.get("buffer_api_key_env") if isinstance(overlay, dict) else None
         if pm.buffer_key_env_rejected(key_env):
             return jsonify({"error": _key_env_refusal(key_env)}), 400
+    # The master switch has its own route. A stale editor copy (a second tab,
+    # or a modal opened before the header was toggled) posting the whole
+    # config back must not silently turn automations on again, so the editor
+    # neither sets nor clears it: the stored value is kept as it is.
+    body = {k: v for k, v in body.items() if k != pm.AUTOMATIONS_ENABLED_KEY}
     stored = pm.read_stored_config(name)
     pm.save_profile_config(name, pm._deep_merge(stored, body))
     # Return the effective (default-merged) config so the client sees the result.
@@ -504,6 +527,56 @@ def update_profile_config_route(name):
 def reset_profile_config_route(name):
     """POST /api/profiles/<name>/config/reset — regenerate the config from defaults."""
     return jsonify({"ok": True, "config": pm.reset_profile_config(name)})
+
+
+# ─── Per-profile master switch ───────────────────────────────────────────────
+#
+# ``automations_enabled`` (top level of profile_config.json) stops everything
+# for one profile: the scheduler's four jobs and both drains (each engine's
+# _tick_profile and run_now read it), and every route below that starts a job.
+# Each feature's own flag stays untouched underneath, so turning this back on
+# restores exactly what was configured.
+
+def _automations_refusal(profile_name):
+    """None while the profile's master switch is on, else the 409 to return.
+
+    Every route that starts a job calls this FIRST, before any side effect
+    (writing a poster input file, advancing the connector's URL rotation,
+    reading Buffer), so a refused request leaves nothing behind.
+    """
+    if pm.profile_automations_enabled(profile_name):
+        return None
+    return jsonify({"error": pm.automations_disabled_message(profile_name),
+                    "automations_enabled": False}), 409
+
+
+@app.route('/api/profiles/<name>/automations', methods=['GET'])
+def get_automations_route(name):
+    """GET — the profile's master switch: ``{"enabled": bool}``."""
+    if not pm.get_profile(name):
+        return jsonify({"error": f"Profile '{name}' not found"}), 404
+    return jsonify({"enabled": pm.profile_automations_enabled(name)})
+
+
+@app.route('/api/profiles/<name>/automations', methods=['POST'])
+def set_automations_route(name):
+    """POST — turn the profile's master switch on or off. Body: ``{"enabled": bool}``.
+
+    Writes only ``automations_enabled``; no individual flag is read back or
+    rewritten. A job already running is not stopped by this.
+    """
+    if not pm.get_profile(name):
+        return jsonify({"error": f"Profile '{name}' not found"}), 404
+    body = request.json if request.is_json else None
+    enabled = body.get("enabled") if isinstance(body, dict) else None
+    if not isinstance(enabled, bool):
+        return jsonify({"error": "enabled (true or false) is required"}), 400
+    try:
+        pm.set_automations_enabled(name, enabled)
+    except (OSError, ValueError) as exc:
+        return jsonify({"error": "Could not read this profile's config, so the "
+                                 "switch was not written: %s" % exc}), 500
+    return jsonify({"ok": True, "enabled": pm.profile_automations_enabled(name)})
 
 
 # ─── API: Posts ───────────────────────────────────────────────────────────────
@@ -566,6 +639,9 @@ def get_posts(profile_name):
 @app.route('/api/posts/<profile_name>/scrape', methods=['POST'])
 def scrape_posts(profile_name):
     """Start a post scraping job."""
+    refused = _automations_refusal(profile_name)
+    if refused:
+        return refused
     body = request.json or {}
     max_posts = body.get('max_posts', 50)
     min_quality = body.get('min_quality', 10)
@@ -801,6 +877,9 @@ def generate_comments(profile_name):
     bypassed this whole endpoint for three weeks. The genuine advanced path is
     the CLI: ``python -m linkedin_automation.comment_generator <file>``.
     """
+    refused = _automations_refusal(profile_name)
+    if refused:
+        return refused
     body = request.json or {}
     model = body.get('model', 'gpt-4o-mini')
     # Optional cap. None/blank/<=0 means "generate for all engaging posts" — there
@@ -973,6 +1052,9 @@ def post_comments(profile_name):
     user's edits), exactly like the scheduler's posting job. An explicit
     ``comments_file`` still overrides for a hand-built file.
     """
+    refused = _automations_refusal(profile_name)
+    if refused:
+        return refused
     body = request.json or {}
     comments_file = body.get('comments_file', '')
     count = body.get('count', 1)
@@ -1009,6 +1091,9 @@ def selector_health(profile_name):
     plus per-selector counts) that the selector-health module writes; poll
     /api/jobs/<job_id> for it.
     """
+    refused = _automations_refusal(profile_name)
+    if refused:
+        return refused
     job_id = f"health_{profile_name}_{int(time.time())}"
 
     def do_health(jid, pname):
@@ -1055,6 +1140,10 @@ def start_connector(profile_name):
     ``connector.search_urls`` rotation is used (and the rotation pointer
     advances); an explicit URL is used as-is and never advances it.
     """
+    # Before resolve_search_url: that call advances the rotation pointer.
+    refused = _automations_refusal(profile_name)
+    if refused:
+        return refused
     from .auto_connector import resolve_search_url
     body = request.json or {}
     explicit_url = body.get('search_url') or None
@@ -1165,6 +1254,9 @@ def poster_queue(profile_name):
 @app.route('/api/poster/<profile_name>/generate', methods=['POST'])
 def poster_generate(profile_name):
     """Generate thought leadership post(s)."""
+    refused = _automations_refusal(profile_name)
+    if refused:
+        return refused
     body = request.json or {}
     count = body.get('count', 1)
     style = body.get('style', None)
@@ -1197,6 +1289,9 @@ def poster_generate(profile_name):
 @app.route('/api/poster/<profile_name>/article', methods=['POST'])
 def poster_article(profile_name):
     """Generate a post from an article URL."""
+    refused = _automations_refusal(profile_name)
+    if refused:
+        return refused
     body = request.json or {}
     url = body.get('url', '')
     model = body.get('model', 'gpt-4o-mini')
@@ -1224,6 +1319,9 @@ def poster_article(profile_name):
 @app.route('/api/poster/<profile_name>/post', methods=['POST'])
 def poster_publish(profile_name):
     """Publish a post to LinkedIn."""
+    refused = _automations_refusal(profile_name)
+    if refused:
+        return refused
     body = request.json or {}
     post_id = body.get('id', None)
 
@@ -2145,6 +2243,9 @@ def scheduled_schedule(profile_name):
     pending_rows, and schedule_pass refuses it again on its own - two
     independent guards against the one thing that must never happen.
     """
+    refused = _automations_refusal(profile_name)
+    if refused:
+        return refused
     try:
         platform = _req_platform()
     except ValueError as exc:
@@ -2550,6 +2651,9 @@ def drain_config_route(profile_name):
 @app.route('/api/drain/<profile_name>/run-now', methods=['POST'])
 def drain_run_now(profile_name):
     """POST - run one drain check immediately, ignoring the interval."""
+    refused = _automations_refusal(profile_name)
+    if refused:
+        return refused
     result = drain_engine.run_now(profile_name)
     return jsonify({"ok": True, "result": result})
 
@@ -2684,6 +2788,9 @@ def first_comment_drain_config_route(profile_name):
 def first_comment_drain_run_now(profile_name):
     """POST - run one first-comment-drain check immediately, ignoring the
     interval (the delay still applies - this does not bypass it)."""
+    refused = _automations_refusal(profile_name)
+    if refused:
+        return refused
     result = first_comment_drain_engine.run_now(profile_name)
     return jsonify({"ok": True, "result": result})
 
@@ -2733,8 +2840,12 @@ def scheduler_run_now(profile_name):
     Body: ``{"job": "post_comments"|"scrape"|"auto_cycle"|"connector"}``.
     Bypasses the auto_mode gate on purpose, same as it already bypasses each
     job's own ``enabled`` flag - this is an explicit manual action, not the
-    unattended tick loop auto_mode polices.
+    unattended tick loop auto_mode polices. It does NOT bypass the
+    per-profile master switch.
     """
+    refused = _automations_refusal(profile_name)
+    if refused:
+        return refused
     body = request.json or {}
     job = body.get("job")
     if job not in scheduler_mod.JOB_TYPES:
