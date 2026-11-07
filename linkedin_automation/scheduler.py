@@ -428,7 +428,12 @@ class Scheduler:
                     logger.exception("Scheduler: profile %s tick failed", profile)
 
     def _tick_profile(self, profile, now):
-        cfg = merge_scheduler_config((self._config_fn(profile) or {}).get("scheduler"), profile)
+        full_config = self._config_fn(profile) or {}
+        # The per-profile master switch, ahead of every scheduler flag: while
+        # it is off, no job rolls, records or fires for this profile.
+        if not pm.automations_enabled(full_config):
+            return
+        cfg = merge_scheduler_config(full_config.get("scheduler"), profile)
         if not cfg.get("enabled"):
             return
         state = self._profile_state(profile)
@@ -722,7 +727,9 @@ class Scheduler:
         today's rolled fire time + skip flag, count ranges, and recent runs."""
         with self._lock:
             now = self._now()
-            cfg = merge_scheduler_config((self._config_fn(profile) or {}).get("scheduler"), profile)
+            full_config = self._config_fn(profile) or {}
+            automations = pm.automations_enabled(full_config)
+            cfg = merge_scheduler_config(full_config.get("scheduler"), profile)
             state = self._profile_state(profile)
             jobs = {}
             for job_type in JOB_TYPES:
@@ -730,7 +737,9 @@ class Scheduler:
                 windows = []
                 for idx, window in enumerate(job_cfg.get("windows") or []):
                     slot = self._slot(state, job_type, idx, window)
-                    if cfg.get("enabled") and job_cfg.get("enabled"):
+                    # No rolling while the master switch is off: a roll can
+                    # record a MISSED run, and nothing runs at all here.
+                    if automations and cfg.get("enabled") and job_cfg.get("enabled"):
                         self._ensure_rolled(profile, state, slot, job_cfg, now)
                     windows.append({
                         "index": idx,
@@ -756,6 +765,7 @@ class Scheduler:
                 }
             return {
                 "running": self.is_running(),
+                "automations_enabled": automations,
                 "enabled": cfg.get("enabled", False),
                 "auto_mode": cfg.get("auto_mode", False),
                 "auto_mode_stopped_reason": cfg.get("auto_mode_stopped_reason"),
@@ -771,12 +781,19 @@ class Scheduler:
 
         The browser lock still applies via the executor: if it is held the
         submit returns no job id and the result note says so.
+
+        The per-profile master switch is NOT bypassed: while it is off this
+        fires nothing and records nothing.
         """
         if job_type not in JOB_TYPES:
             return {"action": "error", "count": 0, "note": f"unknown job {job_type}"}
         with self._lock:
             now = self._now()
-            cfg = merge_scheduler_config((self._config_fn(profile) or {}).get("scheduler"), profile)
+            full_config = self._config_fn(profile) or {}
+            if not pm.automations_enabled(full_config):
+                return {"action": pm.AUTOMATIONS_DISABLED_ACTION, "count": 0,
+                        "note": pm.automations_disabled_message(profile)}
+            cfg = merge_scheduler_config(full_config.get("scheduler"), profile)
             result = self._fire(profile, job_type, cfg.get(job_type, {}), now)
             state = self._profile_state(profile)
             slot = {"job_type": job_type, "window_index": -1,

@@ -1001,6 +1001,15 @@ header {
       <button class="btn-icon" onclick="openAddProfile()" title="Add profile">+</button>
       <button class="btn-icon" onclick="openConfigModal()" title="Edit profile config">⚙</button>
       <button class="btn-icon" onclick="setDefaultProfile()" title="Set as default profile">★</button>
+      <!-- Per-profile master switch (automations_enabled). Stops the
+           scheduler's jobs, both drains, Run Now and every manual job button
+           for THIS profile; each feature's own switch is kept underneath. -->
+      <label class="feeder-switch" id="automationsMasterLabel"
+             title="Master switch for this profile: when off, nothing runs for it - no scheduled job, no drain, no manual job button">
+        <input type="checkbox" id="automationsMaster" onchange="automationsToggle(this.checked)">
+        <strong>Automations</strong>
+        <span id="automationsMasterState" class="trash-reason">…</span>
+      </label>
     </div>
   </header>
 
@@ -1423,6 +1432,12 @@ header {
       </div>
     </div>
 
+    <div id="schedAutomationsOff" class="error-box" style="display:none;margin-bottom:1rem">
+      Automations are disabled for this profile. No scheduled job will run,
+      and Run Now is refused, until you turn <strong>Automations</strong> back
+      on in the header. Each job's own settings are kept as they were.
+    </div>
+
     <div id="schedBody">
       <!-- Auto mode: the single toggle that enables the one-job scrape ->
            generate -> post cycle, unattended. Default off for every profile. -->
@@ -1782,6 +1797,10 @@ header {
           <div id="drainRunning" class="trash-reason" style="margin-top:0.4rem">status unknown</div>
         </div>
       </div>
+      <div id="drainAutomationsOff" class="error-box" style="display:none;margin-top:0.4rem">
+        Automations are disabled for this profile: the post drain will not run,
+        and Check now is refused. Its own switch is kept as it was.
+      </div>
       <div class="feeder-status" id="drainStatus">Loading…</div>
       <div style="display:flex;gap:0.6rem;align-items:flex-end;flex-wrap:wrap;margin-top:0.6rem">
         <div class="form-group" style="margin:0;max-width:130px">
@@ -1817,6 +1836,10 @@ header {
           </label>
           <div id="fcDrainRunning" class="trash-reason" style="margin-top:0.4rem">status unknown</div>
         </div>
+      </div>
+      <div id="fcDrainAutomationsOff" class="error-box" style="display:none;margin-top:0.4rem">
+        Automations are disabled for this profile: the first-comment drain will
+        not run, and Check now is refused. Its own switch is kept as it was.
       </div>
       <div class="feeder-status" id="fcDrainStatus">Loading…</div>
       <div style="display:flex;gap:0.6rem;align-items:flex-end;flex-wrap:wrap;margin-top:0.6rem">
@@ -2010,6 +2033,68 @@ function switchProfile() {
   loadExistingPosts();
   loadExistingComments();
   loadLifecycle();
+  loadAutomations();
+  // Every automation panel re-reads for the new profile, so none keeps
+  // showing the previous profile's jobs (or its "off" banner).
+  loadScheduler();
+  loadDrain(false);
+  loadFirstCommentDrain();
+}
+
+// ─── Per-profile master switch (automations_enabled) ───────────────────
+//
+// The server is the authority: every engine status endpoint also reports
+// automations_enabled, and each panel renders from that, so a stale header
+// cannot leave a panel showing schedulable jobs for a profile that is off.
+
+function applyAutomationsState(enabled) {
+  const box = document.getElementById('automationsMaster');
+  if (box) box.checked = !!enabled;
+  const st = document.getElementById('automationsMasterState');
+  if (st) {
+    st.textContent = enabled ? 'on' : 'OFF - nothing runs for this profile';
+    st.style.color = enabled ? '' : '#ff8a8a';
+  }
+}
+
+async function loadAutomations() {
+  if (!currentProfile) return;
+  const profile = currentProfile;
+  try {
+    const res = await fetch(`/api/profiles/${profile}/automations`);
+    const d = await res.json();
+    if (profile !== currentProfile) return;   // a late answer for the old profile
+    if (res.ok) applyAutomationsState(d.enabled);
+    else document.getElementById('automationsMasterState').textContent = 'state unknown';
+  } catch (e) {
+    document.getElementById('automationsMasterState').textContent = 'state unknown';
+    console.error('Automations switch load error:', e);
+  }
+}
+
+async function automationsToggle(enabled) {
+  if (!currentProfile) return;
+  try {
+    const res = await fetch(`/api/profiles/${currentProfile}/automations`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: enabled}),
+    });
+    const d = await res.json();
+    if (!res.ok) {
+      // Put the switch back: it did NOT take effect.
+      applyAutomationsState(!enabled);
+      alert(d.error || 'Could not change the Automations switch.');
+      return;
+    }
+    applyAutomationsState(d.enabled);
+  } catch (e) {
+    applyAutomationsState(!enabled);
+    alert(String(e));
+  }
+  // Every panel re-reads, so none keeps showing the old state.
+  loadScheduler();
+  loadDrain(false);
+  loadFirstCommentDrain();
 }
 
 // Read the store's NEW bin. Always assigns — an empty result must be able to
@@ -3944,17 +4029,28 @@ function fmtWhen(iso) {
 async function loadDrain(withSlots) {
   if (!currentProfile) return;
   try {
+    const profile = currentProfile;
     const res = await fetch(
-      `/api/drain/${currentProfile}/status${withSlots ? '?slots=1' : ''}`);
+      `/api/drain/${profile}/status${withSlots ? '?slots=1' : ''}`);
     const d = await res.json();
+    if (profile !== currentProfile) return;   // a late answer for the old profile
 
+    const automationsOn = d.automations_enabled !== false;
+    document.getElementById('drainAutomationsOff').style.display = automationsOn ? 'none' : 'block';
     document.getElementById('drainEnabled').checked = !!d.enabled;
     document.getElementById('drainInterval').value = d.interval_minutes ?? 15;
     document.getElementById('drainRunning').textContent =
       (d.running ? '● thread running' : '○ thread stopped') +
-      (d.enabled ? '' : ' · switched off');
+      (!automationsOn ? ' · automations off for this profile' : d.enabled ? '' : ' · switched off');
 
     const bits = [];
+    if (!automationsOn) {
+      bits.push(`<b>${d.held_count}</b> held`);
+      bits.push('automations are off for this profile - nothing is drained');
+      document.getElementById('drainStatus').innerHTML = bits.join(' &middot; ');
+      renderDrainRuns(d.recent_runs || []);
+      return;
+    }
     bits.push(`<b>${d.held_count}</b> held`);
     if (d.slots) {
       bits.push(`<b>${d.slots.free}</b> of ${d.slots.limit} Buffer slots free`);
@@ -4048,6 +4144,10 @@ async function drainRunNow() {
     const res = await fetch(`/api/drain/${currentProfile}/run-now`,
                             {method: 'POST'});
     const d = await res.json();
+    if (!res.ok) {
+      out.innerHTML = `<div class="error-box">${esc(d.error || 'Check refused.')}</div>`;
+      return;
+    }
     const r = d.result || {};
     const fn = DRAIN_ACTION_TEXT[r.action] || (x => x.action || 'done');
     out.innerHTML = `<div style="font-size:0.82rem">${esc(fn(r))}</div>`;
@@ -4077,20 +4177,26 @@ const FC_DRAIN_ACTION_TEXT = {
 async function loadFirstCommentDrain() {
   if (!currentProfile) return;
   try {
-    const res = await fetch(`/api/first-comment-drain/${currentProfile}/status`);
+    const profile = currentProfile;
+    const res = await fetch(`/api/first-comment-drain/${profile}/status`);
     const d = await res.json();
+    if (profile !== currentProfile) return;   // a late answer for the old profile
 
+    const automationsOn = d.automations_enabled !== false;
+    document.getElementById('fcDrainAutomationsOff').style.display = automationsOn ? 'none' : 'block';
     document.getElementById('fcDrainEnabled').checked = !!d.enabled;
     document.getElementById('fcDrainInterval').value = d.interval_minutes ?? 15;
     document.getElementById('fcDrainDelay').value = d.delay_minutes ?? 5;
     document.getElementById('fcDrainJitter').value = d.jitter_minutes ?? 3;
     document.getElementById('fcDrainRunning').textContent =
       (d.running ? '● thread running' : '○ thread stopped') +
-      (d.enabled ? '' : ' · switched off');
+      (!automationsOn ? ' · automations off for this profile' : d.enabled ? '' : ' · switched off');
 
     const bits = [];
     bits.push(`<b>${d.waiting_count}</b> waiting on a first comment`);
-    if (d.enabled) {
+    if (!automationsOn) {
+      bits.push('automations are off for this profile - no first comment is placed');
+    } else if (d.enabled) {
       bits.push(`last checked ${fmtWhen(d.last_check_at)}`);
       bits.push(`next ${fmtWhen(d.next_check_at)}`);
       if (d.last_run_at) bits.push(`last ran ${fmtWhen(d.last_run_at)}`);
@@ -4186,6 +4292,10 @@ async function fcDrainRunNow() {
     const res = await fetch(`/api/first-comment-drain/${currentProfile}/run-now`,
                             {method: 'POST'});
     const d = await res.json();
+    if (!res.ok) {
+      out.innerHTML = `<div class="error-box">${esc(d.error || 'Check refused.')}</div>`;
+      return;
+    }
     const r = d.result || {};
     const fn = FC_DRAIN_ACTION_TEXT[r.action] || (x => x.action || 'done');
     out.innerHTML = `<div style="font-size:0.82rem">${esc(fn(r))}</div>`;
@@ -4210,11 +4320,21 @@ function fmtLastRun(job) {
 async function loadScheduler() {
   if (!currentProfile) return;
   try {
-    const res = await fetch(`/api/scheduler/${currentProfile}/status`);
+    const profile = currentProfile;
+    const res = await fetch(`/api/scheduler/${profile}/status`);
     const s = await res.json();
+    if (profile !== currentProfile) return;   // a late answer for the old profile
+
+    // Master switch off: say so instead of showing schedulable jobs.
+    const automationsOn = s.automations_enabled !== false;
+    applyAutomationsState(automationsOn);
+    document.getElementById('schedAutomationsOff').style.display = automationsOn ? 'none' : 'block';
+    document.getElementById('schedBody').style.display = automationsOn ? '' : 'none';
+    document.getElementById('schedMaster').disabled = !automationsOn;
 
     document.getElementById('schedRunning').textContent =
-      (s.running ? '● running' : '○ stopped') + (s.enabled ? '' : ' (disabled)');
+      (s.running ? '● running' : '○ stopped') +
+      (!automationsOn ? ' (automations off for this profile)' : s.enabled ? '' : ' (disabled)');
     document.getElementById('schedMaster').checked = !!s.enabled;
 
     document.getElementById('schedAutoMode').checked = !!s.auto_mode;
@@ -4451,6 +4571,11 @@ async function schedRunNow(job) {
       body: JSON.stringify({job}),
     });
     const data = await res.json();
+    if (!res.ok) {
+      alert(data.error || `Run ${job} refused.`);
+      loadScheduler();
+      return;
+    }
     const r = data.result || {};
     alert(`Ran ${job}: ${r.action}${r.count ? ' (' + r.count + ')' : ''}${r.note ? ' — ' + r.note : ''}`);
     loadScheduler();

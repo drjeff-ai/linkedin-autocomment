@@ -205,7 +205,11 @@ class PostDrain:
         return last is None or (now - last) >= self._interval(cfg)
 
     def _tick_profile(self, profile, now):
-        cfg = drain_config(self._config_fn(profile) or {})
+        full_config = self._config_fn(profile) or {}
+        # The per-profile master switch, ahead of the drain's own flag.
+        if not pm.automations_enabled(full_config):
+            return
+        cfg = drain_config(full_config)
         if not cfg.get("enabled"):
             return
         state = self._profile_state(profile)
@@ -306,7 +310,9 @@ class PostDrain:
         """
         with self._lock:
             now = self._now()
-            cfg = drain_config(self._config_fn(profile) or {})
+            full_config = self._config_fn(profile) or {}
+            automations = pm.automations_enabled(full_config)
+            cfg = drain_config(full_config)
             state = self._profile_state(profile)
             interval = self._interval(cfg)
             last_check = state["last_check"]
@@ -320,7 +326,7 @@ class PostDrain:
                                  profile)
 
             slots = None
-            if include_slots and cfg.get("enabled"):
+            if include_slots and automations and cfg.get("enabled"):
                 channel_id = self._channel_fn(profile)
                 if channel_id and self._slots_fn:
                     try:
@@ -331,6 +337,7 @@ class PostDrain:
 
             return {
                 "running": self.is_running(),
+                "automations_enabled": automations,
                 "enabled": bool(cfg.get("enabled")),
                 "interval_minutes": cfg.get("interval_minutes"),
                 "now": now.isoformat(),
@@ -344,8 +351,15 @@ class PostDrain:
             }
 
     def run_now(self, profile):
-        """Check immediately, ignoring the interval. Returns the outcome dict."""
+        """Check immediately, ignoring the interval. Returns the outcome dict.
+
+        Ignores the interval, never the per-profile master switch: while that
+        is off nothing is checked, so not even Buffer's slot count is read.
+        """
         with self._lock:
+            if not pm.automations_enabled(self._config_fn(profile) or {}):
+                return {"action": pm.AUTOMATIONS_DISABLED_ACTION, "count": 0,
+                        "note": pm.automations_disabled_message(profile)}
             now = self._now()
             state = self._profile_state(profile)
             result = self._check(profile, state, now, manual=True)

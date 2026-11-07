@@ -786,6 +786,27 @@ silent pass and never as a failure. The gate flags are `requires_menu_open`,
   call into `check_production_guard`, so LinkedIn's guard and its exact-message
   tests are untouched by a change on a path LinkedIn doesn't use. Rationale in
   `.dev/DECISIONS.md`'s 2026-09-29 entry.
+- **Per-profile master switch (`automations_enabled`).** A top-level key in
+  `profile_config.json`, not under `scheduler` or `scheduled_posting`, because it
+  governs both. While it is off, nothing acts for that profile:
+  - **The background loops.** `pm.automations_enabled(config)` is the first check
+    in each engine's `_tick_profile` (`scheduler.py`, `post_drain.py`,
+    `first_comment_drain.py`), ahead of every feature flag, and in each engine's
+    `run_now`.
+  - **Manual jobs.** `dashboard._automations_refusal` is the first statement of
+    every route that calls `run_job` or an engine's `run_now`. Those routes return
+    409 with the reason before any side effect.
+
+  `tests/test_automations_master_switch.py` fails any new job route that lacks
+  the guard. An absent key is on, so a profile that never set it behaves as before.
+  A present key is on only when it is `true`, so a value that does not clearly
+  mean on stops things. The switch never writes an individual flag, so turning it
+  back on restores exactly what was configured.
+
+  **What it cannot stop:**
+  - a job that is already running;
+  - anything outside the dashboard process (CLI and `tools/` runs, another
+    dashboard process).
 - **Field naming.** `comment_fields.normalize_comment_fields` maps both historical
   conventions (`post_url`/`url`, `post_author`/`author`) to one canonical shape.
   Anything consuming a comment dict calls it.

@@ -395,6 +395,91 @@ def reset_profile_config(profile_name: str = None) -> Dict:
     return default
 
 
+# ─── Per-profile master switch for every automation ──────────────────────────
+#
+# One top-level flag, not under scheduler or scheduled_posting, because it
+# governs both: the scheduler's four jobs, the post drain, the first-comment
+# drain, and every manual job route in the dashboard. Each of those keeps its
+# own flag underneath, untouched; this one only decides whether any of them may
+# act for the profile at all.
+
+AUTOMATIONS_ENABLED_KEY = "automations_enabled"
+#: The ``action`` an engine's run_now returns when the switch refused it.
+AUTOMATIONS_DISABLED_ACTION = "automations_disabled"
+
+
+def automations_enabled(config) -> bool:
+    """Whether a merged profile config lets automations act.
+
+    An absent key is ON, so a profile that never set it behaves exactly as it
+    did before the switch existed. A present key is ON only when it is the
+    JSON value ``true``. Anything else (``false``, ``"false"``, ``0``,
+    ``null``) is OFF: a hand-edited value that does not clearly mean "on" stops
+    things rather than letting them run.
+    """
+    if not isinstance(config, dict) or AUTOMATIONS_ENABLED_KEY not in config:
+        return True
+    return config[AUTOMATIONS_ENABLED_KEY] is True
+
+
+def _profile_config_file(profile_name: str) -> str:
+    """The config path for a named profile, WITHOUT creating its directory.
+
+    get_config_path goes through get_data_dir, which makes the directory. A
+    guard that only reads must not leave a data/<name>/ behind for a profile
+    name that was never registered.
+    """
+    return os.path.join(DATA_ROOT, profile_name, "profile_config.json")
+
+
+def profile_automations_enabled(profile_name: str) -> bool:
+    """The master switch for one profile, read from its merged config.
+
+    Reads the stored file and merges it over the default template (the same
+    merged view the engines see) without creating anything on disk. An
+    unreadable file reads as the default, which is what every engine already
+    does with it.
+    """
+    stored = {}
+    path = _profile_config_file(profile_name)
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                stored = loaded
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"profile_config.json unreadable ({e}); reading the master switch as default")
+    return automations_enabled(_deep_merge(load_default_config(), stored))
+
+
+def automations_disabled_message(profile_name: str) -> str:
+    """The refusal every gated route and run_now gives while the switch is off."""
+    return (f"Automations are disabled for profile '{profile_name}'. Nothing was "
+            f"started. Turn automations back on for this profile to run it.")
+
+
+def set_automations_enabled(profile_name: str, enabled: bool) -> Dict:
+    """Write the master switch, and nothing else, into the stored config.
+
+    The stored file is the base (not the merged config), so no default key is
+    baked in and every other byte of the profile's settings is left as it was.
+    A config file that exists but cannot be read raises instead of being
+    replaced: writing a fresh {"automations_enabled": ...} over it would throw
+    away every setting the profile had.
+    """
+    path = _profile_config_file(profile_name)
+    stored = {}
+    if os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as f:
+            stored = json.load(f)
+        if not isinstance(stored, dict):
+            raise ValueError("profile_config.json is not a JSON object")
+    stored[AUTOMATIONS_ENABLED_KEY] = bool(enabled)
+    save_profile_config(profile_name, stored)
+    return stored
+
+
 # ─── Scheduled-posting settings, per (profile, platform) ─────────────────────
 #
 # ONE resolver, so there is one answer to "which channel, which key, which
