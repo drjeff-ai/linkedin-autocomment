@@ -1,4 +1,4 @@
-"""Golden corpus for the platform refactor (.dev/PLATFORM_REFACTOR.md §10, P1).
+"""Golden corpus for the platform refactor (.dev/PLATFORM_REFACTOR.md Â§10, P1).
 
 Every row in ``tests/fixtures/platform_golden/rows.json`` (real scheduled-post
 rows from three profiles, scrubbed) plus the synthetic rows below is run
@@ -10,11 +10,17 @@ test records:
 * the validation result (``validate_row``)
 * a full ``schedule_pass``: status, stage, errors, whether the Buffer identity
   check ran, and the exact createPost ``input`` that reached the transport
-* the Buffer statuses ``reconcile_published`` asks for
+and, once per probe name, the paths that read config or have no row: the
+state-file path, reconcile's Buffer statuses, the declared-production gate,
+``verify_identity`` with nothing to check against, ``resolve_scheduled``, and
+the dashboard's settings view and account header.
 
-and compares the whole thing, as bytes, against ``expected.json``. That file
-was captured from ``main`` BEFORE the refactor touched anything, so a refactor
-that changes any of these outputs fails here.
+"Every channel" is linkedin and x plus the names a refactor could quietly
+start treating differently (None, "", case and whitespace variants, and an
+undeclared "pinterest"). The rendered JSON is compared exactly against
+``expected.json`` (line endings aside). That file was captured from
+``main``'s code BEFORE the refactor touched anything, so a refactor that
+changes any of these outputs fails here.
 
 Clock, seed, timezone, upload and Buffer are all pinned. Nothing leaves the
 machine: the Buffer session is a fake that records what it is handed.
@@ -43,9 +49,36 @@ FIXTURE_DIR = os.path.join(REPO_ROOT, "tests", "fixtures", "platform_golden")
 ROWS_FILE = os.path.join(FIXTURE_DIR, "rows.json")
 EXPECTED_FILE = os.path.join(FIXTURE_DIR, "expected.json")
 
-#: Every channel the publishing path knows today. Literal on purpose: the
-#: corpus must not shrink because a registry did.
-CHANNELS = ("linkedin", "x")
+#: Every channel the publishing path knows today, plus the names a refactor
+#: could quietly start treating differently: no name, an empty one, case and
+#: whitespace variants, and a channel nothing declares. Literal on purpose:
+#: the corpus must not shrink because a registry did.
+CHANNELS = ("linkedin", "x", None, "", "LinkedIn", "X", " x", "linkedin ",
+            "pinterest")
+
+#: The profile the config-reading probes resolve. It lives in a temporary
+#: DATA_ROOT, never under data/.
+PROFILE = "golden"
+PROFILE_CONFIG = {"scheduled_posting": {
+    "buffer_channel_id": "chan_li_golden", "identity_slug": "li-golden",
+    "platforms": {
+        "x": {"buffer_channel_id": "chan_x_golden", "identity_slug": "x-golden",
+              "buffer_api_key_env": "BUFFER_API_KEY_X"},
+        "pinterest": {"buffer_channel_id": "chan_pin_golden",
+                      "identity_slug": "pin-golden",
+                      "buffer_api_key_env": "BUFFER_API_KEY_PIN"}}}}
+ENV_KEYS = {"BUFFER_API_KEY": "golden-li-key", "BUFFER_API_KEY_X": "golden-x-key",
+            "BUFFER_API_KEY_PIN": "golden-pin-key"}
+
+
+def channel_label(channel):
+    """A JSON key for a probe name, keeping case and whitespace visible."""
+    return "<None>" if channel is None else "<%s>" % channel
+
+
+def _file_tag(channel):
+    """A filename-safe tag for a probe name (Windows refuses < and >)."""
+    return "c%d" % CHANNELS.index(channel)
 
 NOW = datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
 TIMEZONE = "America/Los_Angeles"
@@ -148,7 +181,15 @@ def _compose(row, channel):
         return "ERROR: %s" % exc
 
 
-def _schedule(row, channel, workdir):
+def _outcome(fn):
+    """Call ``fn``; a refusal is an output too, so record what was raised."""
+    try:
+        return {"returned": fn()}
+    except Exception as exc:
+        return {"raised": "%s: %s" % (type(exc).__name__, exc)}
+
+
+def _schedule(row, channel, workdir, allow_production=True):
     session = _Session()
     fetches = []
 
@@ -157,13 +198,13 @@ def _schedule(row, channel, workdir):
         return {"id": channel_id, "name": HANDLE}
 
     state = csv_pipeline.PipelineState(
-        path=os.path.join(workdir, "state_%s.json" % channel))
+        path=os.path.join(workdir, "state_%s.json" % _file_tag(channel)))
     try:
         results = csv_pipeline.schedule_pass(
             [dict(row)], CHANNEL_ID, state, rng=random.Random(SEED), key=KEY,
             session=session, upload=_upload, generate=_generate, now=NOW,
             platform=channel, identity_slug=HANDLE,
-            fetch_channel=fetch_channel, allow_production=True)
+            fetch_channel=fetch_channel, allow_production=allow_production)
         result = results[0]
         out = {"status": result.get("status"), "stage": result.get("stage"),
                "errors": result.get("errors") or [],
@@ -183,17 +224,82 @@ def _reconcile_statuses(channel, workdir):
         return {}
 
     state = csv_pipeline.PipelineState(
-        path=os.path.join(workdir, "reconcile_%s.json" % channel))
+        path=os.path.join(workdir, "reconcile_%s.json" % _file_tag(channel)))
     state.update("k", status=csv_pipeline.SCHEDULED, post_id="p1")
     csv_pipeline.reconcile_published(state, CHANNEL_ID, fetch=fetch,
                                      platform=channel)
     return asked
 
 
+def _state_path(channel):
+    """Where the state file goes with no explicit path: the state_path branch."""
+    path = csv_pipeline.PipelineState(profile_name=PROFILE, platform=channel).path
+    return os.path.relpath(path, pm.DATA_ROOT).replace(os.sep, "/")
+
+
+def _production_gate(channel, workdir):
+    """The same row, with HANDLE declared production and no authorization."""
+    os.environ[pm.PRODUCTION_IDENTITY_SLUGS_ENV] = HANDLE
+    try:
+        return _schedule(SYNTHETIC[0][1], channel,
+                         os.path.join(workdir, "prod"), allow_production=False)
+    finally:
+        os.environ.pop(pm.PRODUCTION_IDENTITY_SLUGS_ENV, None)
+
+
+def _resolved(channel):
+    resolved = pm.resolve_scheduled(PROFILE, channel)
+    # "drain" is whatever default_profile_config.json says, not routing.
+    return {k: v for k, v in resolved.items() if k != "drain"}
+
+
+def _probes(channel, workdir):
+    from linkedin_automation import dashboard
+    os.makedirs(os.path.join(workdir, "prod"), exist_ok=True)
+    return {
+        "state_path": _outcome(lambda: _state_path(channel)),
+        "reconcile_statuses": _outcome(lambda: _reconcile_statuses(channel, workdir)),
+        "production_gate": _production_gate(channel, workdir),
+        "verify_identity_with_nothing": _outcome(
+            lambda: list(csv_pipeline.verify_identity(channel, HANDLE))),
+        "resolve_scheduled": _outcome(lambda: _resolved(channel)),
+        "settings_view": _outcome(
+            lambda: dashboard._scheduled_settings_view(PROFILE, channel)),
+        "account": _outcome(lambda: dashboard._scheduled_account(PROFILE, channel)),
+    }
+
+
+class _PinnedDataAndKeys(object):
+    """A temporary DATA_ROOT holding PROFILE's config, and dummy Buffer keys.
+    Restores both on exit, so nothing outside the temp dir is read or written."""
+
+    def __init__(self, workdir):
+        self.root = os.path.join(workdir, "data")
+
+    def __enter__(self):
+        self.saved_root = pm.DATA_ROOT
+        self.saved_env = {k: os.environ.get(k) for k in ENV_KEYS}
+        pm.DATA_ROOT = self.root
+        os.makedirs(os.path.join(self.root, PROFILE))
+        with open(os.path.join(self.root, PROFILE, "profile_config.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(PROFILE_CONFIG, f)
+        os.environ.update(ENV_KEYS)
+        return self
+
+    def __exit__(self, *exc):
+        pm.DATA_ROOT = self.saved_root
+        for k, v in self.saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def compute():
     """The whole corpus's outputs. Caller pins cwd and environment."""
-    out = {"rows": {}, "reconcile_statuses": {}}
-    with tempfile.TemporaryDirectory() as workdir:
+    out = {"rows": {}, "probes": {}}
+    with tempfile.TemporaryDirectory() as workdir, _PinnedDataAndKeys(workdir):
         for row_id, row in _load_rows():
             entry = {"row_key": csv_pipeline.row_key(row), "channels": {}}
             for channel in CHANNELS:
@@ -203,7 +309,7 @@ def compute():
                 # random picks the minute quoted in a past-date message. Seed
                 # it, or that message differs on every run.
                 random.seed(SEED)
-                entry["channels"][channel] = {
+                entry["channels"][channel_label(channel)] = {
                     "compose": _compose(row, channel),
                     "validate": csv_pipeline.validate_row(
                         row, now=NOW, tz=bc.posting_timezone(),
@@ -212,8 +318,8 @@ def compute():
                 }
             out["rows"][row_id] = entry
         for channel in CHANNELS:
-            out["reconcile_statuses"][channel] = _reconcile_statuses(
-                channel, workdir)
+            random.seed(SEED)
+            out["probes"][channel_label(channel)] = _probes(channel, workdir)
     return out
 
 
@@ -231,15 +337,18 @@ def test_publishing_outputs_are_byte_identical_to_the_golden_capture(monkeypatch
     monkeypatch.chdir(REPO_ROOT)
     _pin_environment(monkeypatch.setenv,
                      lambda name: monkeypatch.delenv(name, raising=False))
-    with open(EXPECTED_FILE, "rb") as f:
-        expected = f.read().decode("utf-8")
+    # Text mode on purpose: git may check the fixture out with CRLF on
+    # Windows. All content is compared exactly; only the line ending is not.
+    with open(EXPECTED_FILE, encoding="utf-8") as f:
+        expected = f.read()
     actual = render(compute())
     if actual != expected:
         exp, act = json.loads(expected), json.loads(actual)
-        changed = sorted(k for k in set(exp["rows"]) | set(act["rows"])
-                         if exp["rows"].get(k) != act["rows"].get(k))
-        if exp["reconcile_statuses"] != act["reconcile_statuses"]:
-            changed.append("reconcile_statuses")
+        changed = []
+        for section in ("rows", "probes"):
+            changed += ["%s/%s" % (section, k)
+                        for k in sorted(set(exp[section]) | set(act[section]))
+                        if exp[section].get(k) != act[section].get(k)]
         raise AssertionError("golden corpus changed for: %s" % ", ".join(changed))
 
 
@@ -248,12 +357,13 @@ def test_the_corpus_covers_every_branch_it_exists_to_pin():
     actually contains each case the refactor could break."""
     with open(EXPECTED_FILE, encoding="utf-8") as f:
         exp = json.load(f)
-    rows = exp["rows"]
+    rows, probes = exp["rows"], exp["probes"]
     real = [k for k in rows if not k.startswith("syn-")]
     assert {k.split("-")[0] for k in real} == {"dev", "jeff", "xtest"}
     assert len(real) == 33
-    x = {k: v["channels"]["x"] for k, v in rows.items()}
-    li = {k: v["channels"]["linkedin"] for k, v in rows.items()}
+    assert set(probes) == {channel_label(c) for c in CHANNELS}
+    x = {k: v["channels"]["<x>"] for k, v in rows.items()}
+    li = {k: v["channels"]["<linkedin>"] for k, v in rows.items()}
     # X puts the link in the body; LinkedIn keeps it out.
     assert LINK in x["syn-x-link"]["compose"]
     assert LINK not in li["syn-x-link"]["compose"]
@@ -266,8 +376,23 @@ def test_the_corpus_covers_every_branch_it_exists_to_pin():
     assert x["syn-li-link"]["schedule"]["identity_fetches"] == 1
     assert li["syn-li-link"]["schedule"]["identity_fetches"] == 0
     assert li["syn-li-link"]["schedule"]["payloads"][0]["assets"]
-    assert exp["reconcile_statuses"] == {"linkedin": [["sent"]],
-                                         "x": [["sent", "error"]]}
+    # Each probe reaches the branch it is there for.
+    assert probes["<linkedin>"]["reconcile_statuses"]["returned"] == [["sent"]]
+    assert probes["<x>"]["reconcile_statuses"]["returned"] == [["sent", "error"]]
+    assert probes["<linkedin>"]["state_path"]["returned"] == \
+        "golden/scheduled_posts_state.json"
+    assert probes["<x>"]["state_path"]["returned"] == \
+        "golden/x/scheduled_posts_state.json"
+    assert "ProductionAccessRefused" in probes["<x>"]["production_gate"]["raised"]
+    assert probes["<linkedin>"]["production_gate"]["status"] == "scheduled"
+    assert probes["<linkedin>"]["resolve_scheduled"]["returned"]["api_key_env"] \
+        == "BUFFER_API_KEY"
+    assert probes["<x>"]["resolve_scheduled"]["returned"]["channel_id"] \
+        == "chan_x_golden"
+    assert probes["<linkedin>"]["settings_view"]["returned"][
+        "buffer_api_key_env_editable"] is False
+    assert probes["<x>"]["settings_view"]["returned"][
+        "buffer_api_key_env_editable"] is True
 
 
 if __name__ == "__main__":
