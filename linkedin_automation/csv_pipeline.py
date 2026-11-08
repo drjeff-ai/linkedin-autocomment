@@ -34,9 +34,10 @@ import re
 from datetime import datetime, timezone
 
 from . import buffer_client as bc
+from . import channels
 from . import first_comment as fc
 from . import image_host
-from . import platform_policy
+from . import platforms
 from . import profile_manager as pm
 
 from urllib.parse import unquote, urlparse
@@ -45,9 +46,10 @@ logger = logging.getLogger(__name__)
 
 STATE_NAME = "scheduled_posts_state.json"
 
-#: The platform whose behaviour is the historical default everywhere
-#: here. Mirrors post_store.X / platform_policy.PLATFORMS.
-X_PLATFORM = "x"
+#: Kept for callers that import it. The id itself lives in platforms.py, and
+#: nothing in this module branches on it: X's behaviour is its declaration in
+#: channels.py.
+X_PLATFORM = platforms.X
 
 COLUMNS = ("date", "time_window", "post_text", "topic", "tags", "image_path",
            "first_comment_link")
@@ -186,8 +188,9 @@ class IdentityRefused(RuntimeError):
 
 #: Every link on X is rewritten to a t.co shortlink of FIXED width, so a URL
 #: costs the same however long it is. Counting the raw URL would reject posts
-#: that fit and accept ones that do not.
-X_URL_COST = 23
+#: that fit and accept ones that do not. Declared on X's channel; kept here
+#: for callers that import it.
+X_URL_COST = channels.X.text_limit.url_cost
 
 #: Anything link-shaped. Deliberately loose: over-counting a non-link is a
 #: rejected row a human can look at, while under-counting produces a post
@@ -195,11 +198,19 @@ X_URL_COST = 23
 _URL_RE = re.compile(r"https?://\S+|\bwww\.\S+", re.IGNORECASE)
 
 
-def x_counted_length(text):
-    """Length as X counts it, with every URL charged at :data:`X_URL_COST`."""
+def counted_length(text, url_cost=None):
+    """Length as a channel counts it: every URL charged at ``url_cost`` when
+    the channel fixes one, otherwise at its real length."""
     if not text:
         return 0
-    return len(_URL_RE.sub("u" * X_URL_COST, text))
+    if url_cost is None:
+        return len(text)
+    return len(_URL_RE.sub("u" * url_cost, text))
+
+
+def x_counted_length(text):
+    """Length as X counts it, with every URL charged at :data:`X_URL_COST`."""
+    return counted_length(text, X_URL_COST)
 
 
 def compose_for_platform(text, tags, link=None, platform=None):
@@ -207,19 +218,21 @@ def compose_for_platform(text, tags, link=None, platform=None):
 
     WHERE THE LINK GOES IS A PLATFORM DECISION, not a new CSV column. The same
     row means "put this link with the post"; what differs is how each site lets
-    you do that.
+    you do that. It is the channel's ``link_placement`` (channels.py):
 
-    * **linkedin** — the link goes in a FIRST COMMENT, posted by the browser
-      pass after publication. Buffer's ``firstComment`` is paywalled on the free
-      plan and rejects the whole post, so the browser owns that half.
-    * **x** — the link goes in the BODY, one tweet carrying image, text and
-      link together. X's threaded self-reply (``metadata.twitter.thread``) is
-      free, but Phase 1's live run showed it DROPS THE BASE POST'S IMAGE, and
-      trading the image for a threaded reply is the wrong trade here.
+    * **first_comment** (LinkedIn) — the link stays out of the body and is
+      posted as a FIRST COMMENT by the browser pass after publication.
+      Buffer's ``firstComment`` is paywalled on the free plan and rejects the
+      whole post, so the browser owns that half.
+    * **body** (X) — the link goes in the BODY, one tweet carrying image, text
+      and link together. X's threaded self-reply (``metadata.twitter.thread``)
+      is free, but Phase 1's live run showed it DROPS THE BASE POST'S IMAGE,
+      and trading the image for a threaded reply is the wrong trade here.
     """
     body = bc.compose_text(text, tags)
     link = (link or "").strip()
-    if link and (platform or "").lower() == X_PLATFORM:
+    channel = channels.resolve((platform or "").lower())
+    if link and channel.link_placement == channels.BODY:
         body = "%s\n\n%s" % (body, link)
     return body
 
@@ -253,27 +266,33 @@ def validate_row(row, now=None, tz=None, platform=None):
             except image_host.ImageHostError as exc:
                 problems.append(str(exc))
 
-    # X is the only platform with a POSTABLE hard limit. platform_policy says
-    # so directly: X counts characters with hard_max_is_postable_limit=True,
-    # while LinkedIn's hard_max is 70 WORDS with that flag False - a style
-    # guide, not a rule Buffer enforces. So LinkedIn stays unbounded here and
-    # nothing about its validation changes.
+    # Only a channel that declares a text_limit has one checked here: a limit
+    # the channel itself enforces, so a post over it cannot go out (X: 280
+    # characters, the same number platform_policy marks
+    # hard_max_is_postable_limit=True). LinkedIn's 70 words is a style guide,
+    # not a rule Buffer enforces, so LinkedIn declares none and stays
+    # unbounded here.
     #
     # Rejected, never truncated: a post cut mid-sentence is worse than one that
     # did not go out, and the link is at the END, so truncation would silently
     # drop the thing the row exists to share.
-    if (platform or "").lower() == X_PLATFORM and text:
-        policy = platform_policy.policy_for(X_PLATFORM)
-        limit = policy.length.hard_max
+    channel_id = (platform or "").lower()
+    channel = channels.resolve(channel_id)
+    limit = channel.text_limit
+    if limit is not None and text:
         body = compose_for_platform(text, row.get("tags"),
-                                    row.get("first_comment_link"), X_PLATFORM)
-        used = x_counted_length(body)
-        if used > limit:
+                                    row.get("first_comment_link"), channel_id)
+        used = counted_length(body, limit.url_cost)
+        if used > limit.maximum:
+            how_links_count = (
+                " (every link counts as %d, whatever its real length)"
+                % limit.url_cost if limit.url_cost is not None else "")
             problems.append(
-                "too long for X: %d characters against a %d limit (every link "
-                "counts as %d, whatever its real length). Shorten post_text, "
-                "tags or the link - this is never truncated automatically."
-                % (used, limit, X_URL_COST))
+                "too long for %s: %d %s against a %d limit%s. Shorten "
+                "post_text, tags or the link - this is never truncated "
+                "automatically."
+                % (channel.label, used, limit.unit_word, limit.maximum,
+                   how_links_count))
     return problems
 
 
@@ -285,10 +304,10 @@ class PipelineState:
         # splits its stores: a row keyed the same way on both would let an X
         # run read LinkedIn's progress and decide a post already exists.
         # LinkedIn keeps the path it has always had, so nothing migrates.
-        self.platform = (platform or pm.SCHEDULED_DEFAULT_PLATFORM).lower()
+        self.platform = (platform or platforms.DEFAULT).lower()
         if path:
             self.path = path
-        elif self.platform == pm.SCHEDULED_DEFAULT_PLATFORM:
+        elif channels.resolve(self.platform).state_path == channels.LEGACY:
             # LinkedIn's call is UNCHANGED, down to the argument count, so its
             # path cannot move and nothing needs migrating.
             self.path = os.path.join(pm.get_data_dir(profile_name), STATE_NAME)
@@ -528,9 +547,9 @@ def verify_identity(platform, expect_slug, poster=None, channel_id=None,
                        "scheduled_posting.identity_slug (or the platform's "
                        "overlay) for this profile.")
 
-    platform = (platform or pm.SCHEDULED_DEFAULT_PLATFORM).strip().lower()
+    platform = (platform or platforms.DEFAULT).strip().lower()
 
-    if platform != pm.SCHEDULED_DEFAULT_PLATFORM:
+    if channels.resolve(platform).identity_check == channels.BUFFER_HANDLE:
         if not channel_id:
             return False, ("no Buffer channel to check the %s identity against "
                            "- refusing" % platform)
@@ -879,7 +898,7 @@ def reconcile_published(state, channel_id, key=None, session=None, fetch=None,
     if not waiting:
         return []
 
-    platform = (platform or pm.SCHEDULED_DEFAULT_PLATFORM).lower()
+    platform = (platform or platforms.DEFAULT).lower()
 
     # CREATE-SUCCESS IS NOT PUBLISH-SUCCESS ON X (Phase 1, live). A post that
     # createPost accepted can still fail at publish time - the picsum run came
@@ -887,11 +906,10 @@ def reconcile_published(state, channel_id, key=None, session=None, fetch=None,
     # A reconcile that only asks about `sent` never learns that, and the row
     # sits reading "scheduled" forever while the truth is that it failed.
     #
-    # So X asks about errors too. LinkedIn's query is untouched: adding a
-    # status to it would change which posts the production path reconciles.
-    statuses = ("sent",)
-    if platform != pm.SCHEDULED_DEFAULT_PLATFORM:
-        statuses = ("sent", "error")
+    # So X's declaration asks about errors too. LinkedIn's query is untouched:
+    # adding a status to it would change which posts the production path
+    # reconciles.
+    statuses = channels.resolve(platform).reconcile_statuses
 
     fetch = fetch or bc.posts_by_status
     sent = fetch(channel_id, statuses=statuses, limit=limit, key=key,
@@ -955,7 +973,7 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
     """
     results = []
     tz = bc.posting_timezone()
-    platform = (platform or pm.SCHEDULED_DEFAULT_PLATFORM).lower()
+    platform = (platform or platforms.DEFAULT).lower()
 
     # THE IDENTITY GUARD LIVES HERE, not in the CLI.
     #
@@ -968,8 +986,9 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
     # Once per CALL, not per row: one request, before anything is created.
     #
     # LinkedIn is deliberately not gated here - see .dev/BACKLOG.md. Its
-    # schedule path is byte-identical, this branch simply does not run.
-    if platform != pm.SCHEDULED_DEFAULT_PLATFORM:
+    # declaration's identity_check is UNGATED, so this branch simply does not
+    # run and its schedule path is byte-identical.
+    if channels.resolve(platform).identity_check == channels.BUFFER_HANDLE:
         # PRODUCTION GATE, before verify_identity - which itself is a live
         # Buffer call. verify_identity answers "is this the right channel";
         # this answers "did the caller declare authorization to touch a
@@ -1112,7 +1131,7 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
 
 def comment_pass(state, key=None, session=None, poster=None, ledger=None,
                  profile_name=None, expect_slug=None, wait=False,
-                 wait_timeout=1800, platform=pm.SCHEDULED_DEFAULT_PLATFORM,
+                 wait_timeout=1800, platform=platforms.DEFAULT,
                  allow_production=False):
     """Sweep for published posts and add their first comments.
 

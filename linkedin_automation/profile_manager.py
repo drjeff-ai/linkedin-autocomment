@@ -31,6 +31,9 @@ from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 from dotenv import load_dotenv
 
+from . import channels
+from . import platforms
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -492,13 +495,15 @@ def set_automations_enabled(profile_name: str, enabled: bool) -> Dict:
 # nothing migrates and LinkedIn's resolution is the expression it always was.
 # Another platform gets an entry under `scheduled_posting.platforms.<name>`.
 
-#: The platform whose settings live in the flat fields, for historical reasons.
-SCHEDULED_DEFAULT_PLATFORM = "linkedin"
+#: The platform a scheduled-posting call means when it names none. Kept for
+#: callers that import it; the id is platforms.DEFAULT.
+SCHEDULED_DEFAULT_PLATFORM = platforms.DEFAULT
 
-#: Where LinkedIn's Buffer key comes from. Matches buffer_client.api_key(), and
-#: is the fallback recorded in the resolved dict so a caller can say which
-#: variable it wanted if the key turns out to be missing.
-SCHEDULED_DEFAULT_KEY_ENV = "BUFFER_API_KEY"
+#: Where LinkedIn's Buffer key comes from: its channel declares the key fixed.
+#: Matches buffer_client.api_key(), and is the fallback recorded in the
+#: resolved dict so a caller can say which variable it wanted if the key turns
+#: out to be missing.
+SCHEDULED_DEFAULT_KEY_ENV = channels.FIXED_BUFFER_KEY_ENV
 
 
 class ScheduledConfigError(RuntimeError):
@@ -569,7 +574,7 @@ def buffer_key_env_rejected(value) -> bool:
 
 
 def resolve_scheduled(profile_name: str = None,
-                      platform: str = SCHEDULED_DEFAULT_PLATFORM,
+                      platform: str = platforms.DEFAULT,
                       env=None) -> Dict:
     """Resolve the scheduled-posting settings for one ``(profile, platform)``.
 
@@ -605,22 +610,24 @@ def resolve_scheduled(profile_name: str = None,
     no overlay is an error.
     """
     env = os.environ if env is None else env
-    platform = (platform or SCHEDULED_DEFAULT_PLATFORM).strip().lower()
+    platform = (platform or platforms.DEFAULT).strip().lower()
 
     section = (get_profile_config(profile_name) or {}).get("scheduled_posting")
     section = section if isinstance(section, dict) else {}
     overlays = section.get("platforms")
     overlays = overlays if isinstance(overlays, dict) else {}
     overlay = overlays.get(platform)
+    channel = channels.resolve(platform)
 
-    if platform == SCHEDULED_DEFAULT_PLATFORM:
+    if channel.config_layout == channels.FLAT:
         # The legacy path, unchanged. Note it reads the FLAT fields even if a
         # "linkedin" overlay were added later: moving LinkedIn under the
         # overlay is a migration, and this function does not perform one.
+        # A flat channel's key variable is fixed by its declaration.
         return {
             "platform": platform,
-            "api_key": (env.get(SCHEDULED_DEFAULT_KEY_ENV) or "").strip() or None,
-            "api_key_env": SCHEDULED_DEFAULT_KEY_ENV,
+            "api_key": (env.get(channel.key_env) or "").strip() or None,
+            "api_key_env": channel.key_env,
             "channel_id": scheduled_config_str(section.get("buffer_channel_id")),
             "identity_slug": scheduled_config_str(section.get("identity_slug")),
             "drain": section.get("drain"),
@@ -633,7 +640,7 @@ def resolve_scheduled(profile_name: str = None,
             "fields: those are LinkedIn's, and using them here would publish to "
             "LinkedIn. Known platforms: %s"
             % (profile_name or get_default_profile_name(), platform, platform,
-               ", ".join(sorted([SCHEDULED_DEFAULT_PLATFORM] + list(overlays)))))
+               ", ".join(sorted(channels.flat_config_ids() + list(overlays)))))
 
     if buffer_key_env_rejected(overlay.get("buffer_api_key_env")):
         raise ScheduledConfigError(

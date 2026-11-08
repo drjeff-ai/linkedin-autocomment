@@ -36,11 +36,11 @@ text for X rather than by raising.
 from dataclasses import dataclass, field
 from typing import Tuple
 
-# Platform identifiers. These MUST match ``post_store``'s constants — a store
-# addressed as "x" and a policy addressed as "twitter" would silently diverge.
-# ``test_platform_policy.py`` asserts they are identical rather than trusting it.
-LINKEDIN = "linkedin"
-X = "x"
+# Platform identifiers, from the one module that defines them. A store
+# addressed as "x" and a policy addressed as "twitter" would silently diverge,
+# so neither spells its own. ``test_platform_policy.py`` still asserts the two
+# agree.
+from .platforms import LINKEDIN, X  # noqa: E402
 
 # Length units.
 WORDS = "words"

@@ -63,9 +63,9 @@ STATUSES = (NEW, GENERATED, COMMENTED, TRASH, UNAVAILABLE)
 # LinkedIn is the default everywhere a platform is accepted, so every existing
 # caller keeps the store it has always had. A new platform is a new value here
 # plus its own subdirectory — nothing in the record schema changes, because a
-# platform is a separate store rather than a field on a shared one.
-LINKEDIN = "linkedin"
-X = "x"
+# platform is a separate store rather than a field on a shared one. The ids
+# themselves come from platforms.py, the one place any platform is spelled.
+from .platforms import LINKEDIN, X  # noqa: E402, F401  (X: re-exported, post_store.X)
 
 # Trash reasons.
 REASON_AD = "ad"

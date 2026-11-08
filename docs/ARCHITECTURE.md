@@ -874,8 +874,8 @@ LinkedIn only today) the automatic drain. `buffer_client.create_post()`
 (`buffer_client.py:431`) is the sole GraphQL mutation that actually creates a
 post; `schedule_pass` is its only live caller.
 
-**Where the link goes is a platform decision** (`compose_for_platform`,
-`csv_pipeline.py:205`), not a CSV column: LinkedIn's `first_comment_link` is
+**Where the link goes is a platform decision** (`compose_for_platform`, reading
+the channel's `link_placement`, §10.9), not a CSV column: LinkedIn's `first_comment_link` is
 posted as a first comment by the browser pass (Buffer's `firstComment` field is
 paywalled and rejects the whole post on the free plan); X has no comment pass
 at all, so the link is appended to the tweet body instead.
@@ -889,15 +889,14 @@ at all, so the link is appended to the tweet body instead.
 > `tools/buffer_spike.py` as the evidence for that decision, not as a path
 > production takes.
 
-**Validation is platform-aware.** `validate_row()` (`csv_pipeline.py:227`)
-enforces X's hard character limit only when `platform == X_PLATFORM`, via
-`platform_policy.policy_for(X).length.hard_max` and `x_counted_length()`
-(`csv_pipeline.py:198`, which counts every URL as X's fixed t.co cost, not its
-literal length). `PipelineState` (`csv_pipeline.py:280`) takes a `platform=`
-argument and keeps LinkedIn's on-disk state file path completely unchanged
-(`platform == SCHEDULED_DEFAULT_PLATFORM` is the one branch that returns the
-legacy path verbatim) while giving every other platform its own file — the
-same "isolation is the path" pattern the post store uses (§1.10).
+**Validation is platform-aware.** `validate_row()` enforces a body limit only
+for a channel that declares a `text_limit` (§10.9): X's 280 characters, the
+same number as `platform_policy.policy_for(X).length.hard_max`, counted by
+`counted_length()` with every URL charged at X's fixed t.co cost, not its
+literal length. `PipelineState` takes a `platform=` argument. A channel whose
+`state_path` is `legacy` (LinkedIn) keeps the original on-disk state file path
+verbatim, while every other platform gets its own file — the same "isolation
+is the path" pattern the post store uses (§1.10).
 
 **`comment_pass()` refuses outright for any platform but LinkedIn** — X has no
 comment pass, because the link already rode in the body; asking it to comment
@@ -985,3 +984,57 @@ the X work — it documents the LinkedIn CSV/Buffer flow only. It has not yet
 been extended for X's CSV shape, the `--platform` flag, or the
 `--allow-production` flag on the schedule pass; treat it as LinkedIn-only until
 it is.
+
+### 10.9 Platform ids and the channel registry
+
+**One spelling of every platform id.** `linkedin_automation/platforms.py`
+defines `LINKEDIN`, `X`, `ALL` and `DEFAULT`. The older names
+(`platform_policy.LINKEDIN/X`, `post_store.LINKEDIN/X`,
+`csv_pipeline.X_PLATFORM`, `profile_manager.SCHEDULED_DEFAULT_PLATFORM`) are
+imports of it, not second definitions.
+
+**A publishing channel is a declaration in `linkedin_automation/channels.py`.**
+Shared publishing code reads the declaration's fields and never asks which
+channel it is. The fields are:
+
+| Field | LinkedIn | X | Read by |
+|---|---|---|---|
+| `label` | LinkedIn | X | validation and settings messages |
+| `link_placement` | `first_comment` | `body` | `compose_for_platform`, the queue's `first_comment` flag, the CLI's comment pass |
+| `text_limit` | none | 280 chars, a URL counts 23 | `validate_row` |
+| `identity_check` | `ungated` (the browser checks the account at comment time) | `buffer_handle` | `verify_identity`, `schedule_pass`'s production gate and identity guard, the dashboard's account header, settings view and schedule job |
+| `config_layout` | `flat` | `overlay` | `resolve_scheduled`, the settings view and save |
+| `key_env` | fixed `BUFFER_API_KEY` | each profile's overlay names it | `resolve_scheduled`, the settings view and save |
+| `state_path` | `legacy` | `platform_dir` | `PipelineState` |
+| `reconcile_statuses` | `sent` | `sent`, `error` | `reconcile_published` |
+
+**Only fields something reads are declared.** The rest of the design
+(`media`, `extra_columns`, `lookups`, `build_metadata`, `drain`) arrives with
+the phase that first reads it; see `.dev/PLATFORM_REFACTOR.md`.
+
+`config_layout` and `key_env` are checked against each other when a channel is
+declared: a flat channel must fix its key, and an overlay channel must not.
+
+**An undeclared name gets the old non-LinkedIn branch.** `channels.resolve()`
+returns the declaration, or for any other name `channels.undeclared()`. That
+reproduces what every site's `else` did before the registry existed, so routing
+through it changed nothing.
+
+The dashboard's `_req_platform` validates against `channels.REGISTRY`, not the
+comment generator's `platform_policy.PLATFORMS`. A channel that is only
+published to never needs a voice.
+
+**Two tests hold this:**
+- `tests/test_channel_registry.py` parses `linkedin_automation/` and `tools/`
+  and fails on any branch on a platform id outside `platforms.py` and
+  `channels.py`. A branch means a comparison, a `case`, `startswith`, or a
+  dict-literal dispatch keyed by ids. It allows three named exemptions:
+  - `post_store.py`, the engagement store;
+  - `tools/x_dump.py`, X discovery;
+  - `tools/buffer_spike.py`, the spike.
+
+  It also fails if an exemption goes stale.
+- `tests/test_platform_golden.py` runs real scheduled-post rows (scrubbed) and
+  synthetic rows through the publishing path, under each declared and
+  undeclared name. It compares the output against a capture taken from the
+  code before the registry existed.
