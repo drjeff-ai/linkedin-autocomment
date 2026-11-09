@@ -91,7 +91,7 @@ linkedin-automation/
 ├── tests/                              # pytest suite (no browser/network/OpenAI)
 ├── default_profile_config.json         # Per-profile config template
 ├── requirements.txt
-├── requirements-dev.txt                # pytest, pytest-cov, ruff (pinned)
+├── requirements-dev.txt                # pytest, pytest-cov, ruff, pre-commit (pinned)
 ├── conftest.py                         # puts project root on sys.path for tests
 ├── setup.bat / run.bat
 ├── .env                                # Your API keys (create from .env.example)
@@ -374,6 +374,7 @@ of a cryptic failure.
 
 ```bash
 uv pip install -r requirements-dev.txt
+.venv\Scripts\python.exe -m pre_commit install   # ruff and staged tests on each commit
 uv run pytest tests/ -v        # full suite (no browser, network, or OpenAI)
 uv run ruff check .            # lint
 ```

@@ -1,0 +1,15 @@
+# Local hooks only: no network at commit time, no tool version outside
+# requirements-dev.txt. This does not replace the full-suite gate. DEC-003.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check (staged Python)
+        entry: .venv\\Scripts\\python.exe -m ruff check --force-exclude
+        language: system
+        types: [python]
+      - id: pytest-staged
+        name: pytest (staged test files)
+        entry: .venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider
+        language: system
+        files: ^tests/test_[^/]*\.py$
