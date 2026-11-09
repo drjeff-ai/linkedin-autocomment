@@ -86,6 +86,20 @@ class TextLimit:
 
 
 @dataclass(frozen=True)
+class ExtraColumn:
+    """An optional CSV column one channel reads beyond the base seven.
+
+    ``required`` means a row for this channel must carry a non-empty value.
+    ``limit`` is a character count the stripped value may not exceed; a longer
+    one is rejected at queue time, never trimmed.
+    """
+
+    name: str
+    required: bool = False
+    limit: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class Channel:
     """Everything shared publishing code needs to know about one channel."""
 
@@ -104,8 +118,17 @@ class Channel:
     state_path: str
     #: The Buffer post statuses ``reconcile_published`` asks about.
     reconcile_statuses: Tuple[str, ...]
+    #: Optional CSV columns this channel reads, validated for it alone and
+    #: hashed into the row's identity when filled. Last, with a default, so a
+    #: declaration that predates it still constructs.
+    extra_columns: Tuple[ExtraColumn, ...] = ()
 
     def __post_init__(self):
+        names = [column.name for column in self.extra_columns]
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            raise ValueError("%s: extra column declared twice: %s"
+                             % (self.id, ", ".join(duplicates)))
         # The fields are not independent, and a declaration that breaks one of
         # these would fail somewhere far from here: a flat channel reads
         # env.get(key_env), so it needs a fixed one, and an overlay channel

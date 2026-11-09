@@ -875,10 +875,18 @@ LinkedIn only today) the automatic drain. `buffer_client.create_post()`
 post; `schedule_pass` is its only live caller.
 
 **Where the link goes is a platform decision** (`compose_for_platform`, reading
-the channel's `link_placement`, §10.9), not a CSV column: LinkedIn's `first_comment_link` is
+the channel's `link_placement`, §10.9), not a CSV column: LinkedIn's link is
 posted as a first comment by the browser pass (Buffer's `firstComment` field is
 paywalled and rejects the whole post on the free plan); X has no comment pass
 at all, so the link is appended to the tweet body instead.
+
+**`link` is the canonical name of the link slot; `first_comment_link` is an
+accepted alias, forever.** `csv_pipeline.row_link(row)` reads either (the older
+name wins), and every place that read `first_comment_link` — validation, the
+queue, `schedule_pass`, the state entry — goes through it. `link` is not in
+`COLUMNS`, because `row_key` iterates `COLUMNS` and adding it would move every
+key. A row that fills both names with different values is rejected on every
+channel rather than letting one win.
 
 > **Measured, 2026-09-19 (`.dev/DECISIONS.md`).** X's `metadata.twitter.thread`
 > field — a free threaded self-reply — is not paywalled the way LinkedIn's
@@ -893,7 +901,12 @@ at all, so the link is appended to the tweet body instead.
 for a channel that declares a `text_limit` (§10.9): X's 280 characters, the
 same number as `platform_policy.policy_for(X).length.hard_max`, counted by
 `counted_length()` with every URL charged at X's fixed t.co cost, not its
-literal length. `PipelineState` takes a `platform=` argument. A channel whose
+literal length. **`queue_rows()` validates for the row's own channel**
+(`state.platform`), so an over-limit X row is rejected at queue time and written
+nowhere; before P2 it validated with no channel, queued the row, and failed it
+later in `schedule_pass`. A row already in state that is over the limit now
+reads as `rejected` rather than `skipped`, because validation runs before the
+duplicate check. `PipelineState` takes a `platform=` argument. A channel whose
 `state_path` is `legacy` (LinkedIn) keeps the original on-disk state file path
 verbatim, while every other platform gets its own file — the same "isolation
 is the path" pattern the post store uses (§1.10).
@@ -902,6 +915,10 @@ is the path" pattern the post store uses (§1.10).
 comment pass, because the link already rode in the body; asking it to comment
 would imply a browser action that makes no sense for this platform. The CLI
 names this explicitly rather than trying and failing.
+
+*Verification anchor (10.2): 2026-11-08, branch `platform-p2-row-identity`;
+`tests/test_channel_extras.py` carries the CSV-to-createPost `link` proof and the
+X queue-time limit.*
 
 ### 10.3 Two identity guards, answering two different questions
 
@@ -1007,13 +1024,35 @@ channel it is. The fields are:
 | `key_env` | fixed `BUFFER_API_KEY` | each profile's overlay names it | `resolve_scheduled`, the settings view and save |
 | `state_path` | `legacy` | `platform_dir` | `PipelineState` |
 | `reconcile_statuses` | `sent` | `sent`, `error` | `reconcile_published` |
+| `extra_columns` | none | none | `row_key`, `unknown_columns`, `validate_row`, the dashboard form route |
 
 **Only fields something reads are declared.** The rest of the design
-(`media`, `extra_columns`, `lookups`, `build_metadata`, `drain`) arrives with
+(`media`, `lookups`, `build_metadata`, `drain`) arrives with
 the phase that first reads it; see `.dev/PLATFORM_REFACTOR.md`.
 
 `config_layout` and `key_env` are checked against each other when a channel is
 declared: a flat channel must fix its key, and an overlay channel must not.
+
+**Extra columns and row identity.** `extra_columns` is a tuple of
+`ExtraColumn(name, required=False, limit=None)`; a duplicate name is refused at
+declaration. No shipped channel declares one yet (Pinterest, the first, is not in
+the registry). For a channel that does:
+- `validate_row` rejects a missing or whitespace-only required value, and a
+  stripped value longer than `limit` characters, naming the channel, column,
+  length and limit. It is never truncated.
+- `unknown_columns` does not report `link` or the channel's declared extras;
+  everything else is still reported, and an undeclared column never affects a key.
+- `row_key(row, platform)` hashes the seven base slots exactly as before (the
+  link slot through `row_link`), then appends `\x1e` and the sorted
+  `name=value` pairs of the non-empty extras, and only if there is at least one.
+  Every existing LinkedIn and X row therefore keeps its key; rows with every
+  extra empty equal their base key; declaration order does not matter. A caller
+  must pass the channel for the key to include extras: `queue_rows` and
+  `schedule_pass` do. The dispatch left the seven other no-platform sites (the
+  dashboard's `PipelineState(profile_name=...)` constructions and
+  `first_comment_drain.py`) to P4.
+- The dashboard form route stores exactly `COLUMNS`, plus `link` and the route
+  channel's extras only when the request body fills them.
 
 **An undeclared name gets the old non-LinkedIn branch.** `channels.resolve()`
 returns the declaration, or for any other name `channels.undeclared()`. That
@@ -1037,4 +1076,8 @@ published to never needs a voice.
 - `tests/test_platform_golden.py` runs real scheduled-post rows (scrubbed) and
   synthetic rows through the publishing path, under each declared and
   undeclared name. It compares the output against a capture taken from the
-  code before the registry existed.
+  code before the registry existed. `tests/test_channel_extras.py` additionally
+  recomputes every golden row's `row_key` with and without a channel.
+
+*Verification anchor (10.9): 2026-11-08, branch `platform-p2-row-identity`; the
+golden fixture is unchanged from P1.*

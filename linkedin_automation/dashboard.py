@@ -2027,8 +2027,16 @@ def scheduled_add_rows(profile_name):
         if not isinstance(body, dict):
             return jsonify({"error": "Request body must be a JSON object"}), 400
         # Only the known columns, so a stray field cannot change a row's
-        # identity hash and silently create a duplicate.
-        rows = [{c: (body.get(c) or "") for c in csv_pipeline.COLUMNS}]
+        # identity hash and silently create a duplicate. `link` and this
+        # channel's declared extras are known too, but are kept only when the
+        # body fills them, so a row without them stores exactly COLUMNS.
+        row = {c: (body.get(c) or "") for c in csv_pipeline.COLUMNS}
+        optional = (csv_pipeline.LINK_COLUMN,) + tuple(
+            c.name for c in channels.resolve(platform).extra_columns)
+        for name in optional:
+            if body.get(name):
+                row[name] = body[name]
+        rows = [row]
         source = "form"
 
     if not rows:
