@@ -113,33 +113,72 @@ def row_image_path(row):
     return ""
 
 
-def unknown_columns(row):
+#: The canonical name of the link slot. ``first_comment_link`` is the older
+#: name and stays accepted forever; both fill the same slot. It is deliberately
+#: NOT in COLUMNS, because row_key iterates COLUMNS and a new entry there would
+#: move every existing key.
+LINK_COLUMN = "link"
+
+
+def row_link(row):
+    """The row's link, under either of its accepted names.
+
+    ``first_comment_link`` wins when both are filled; validate_row rejects a
+    row where they disagree, so the choice only matters for a row that is
+    already refused.
+    """
+    return (str(row.get("first_comment_link") or "").strip()
+            or str(row.get(LINK_COLUMN) or "").strip())
+
+
+def unknown_columns(row, platform=None):
     """Columns present in the row that the pipeline does not read.
 
     Reported rather than ignored. A column the pipeline has never heard of is
     usually a rename - `asset_path` for `image_path` - and silently dropping it
-    turns a wrong result into one that looks right.
+    turns a wrong result into one that looks right. ``link`` and the extra
+    columns the row's channel declares are read, so they are not reported.
     """
-    known = set(COLUMNS) | set(IMAGE_PATH_COLUMNS)
+    extras = {c.name for c in channels.resolve((platform or "").lower()).extra_columns}
+    known = set(COLUMNS) | set(IMAGE_PATH_COLUMNS) | {LINK_COLUMN} | extras
     return sorted(k for k in row if k and k not in known)
 
 
-def row_key(row):
+def row_key(row, platform=None):
     """A stable identity for a row, independent of its position in the file.
 
     Content-hashed rather than row-numbered on purpose: inserting a row at the
     top of a CSV must not renumber every later row and make the whole calendar
     look unpublished. Editing a row's content does make it a new row, which is
     the honest reading - different text is a different post.
+
+    The base seven slots hash exactly as they always have, so no existing row's
+    key moves. A channel that declares extra columns adds them to the hash
+    input only when at least one is filled, so two rows that differ only in an
+    extra are different posts and a row with every extra empty is its base key.
     """
     parts = []
     for c in COLUMNS:
         # The image is hashed by its RESOLVED path, so the same picture under
         # `image_path` or `asset_path` is recognised as the same row rather
-        # than queued twice.
-        parts.append(row_image_path(row) if c == "image_path"
-                     else str(row.get(c) or "").strip())
-    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
+        # than queued twice. The link slot is hashed through row_link, so
+        # `link` and `first_comment_link` are one slot.
+        if c == "image_path":
+            parts.append(row_image_path(row))
+        elif c == "first_comment_link":
+            parts.append(row_link(row))
+        else:
+            parts.append(str(row.get(c) or "").strip())
+    material = "\x1f".join(parts)
+    channel = channels.resolve((platform or "").lower())
+    pairs = []
+    for extra in channel.extra_columns:
+        value = str(row.get(extra.name) or "").strip()
+        if value:
+            pairs.append("%s=%s" % (extra.name, value))
+    if pairs:
+        material += "\x1e" + "\x1f".join(sorted(pairs))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
 def row_preview(row, limit=160):
@@ -278,10 +317,34 @@ def validate_row(row, now=None, tz=None, platform=None):
     # drop the thing the row exists to share.
     channel_id = (platform or "").lower()
     channel = channels.resolve(channel_id)
+
+    # The two names of the link slot may both be present. If they differ there
+    # is no right answer, so the row is refused rather than one name winning.
+    first_comment = str(row.get("first_comment_link") or "").strip()
+    alias = str(row.get(LINK_COLUMN) or "").strip()
+    if first_comment and alias and first_comment != alias:
+        problems.append(
+            "first_comment_link and link are both set and differ; they are "
+            "two names for one link. Keep one of them.")
+
+    # Extra columns are checked only for the channel that declares them. A
+    # value over its limit is rejected, never trimmed: a cut title is a
+    # different post from the one the row describes.
+    for extra in channel.extra_columns:
+        value = str(row.get(extra.name) or "").strip()
+        if extra.required and not value:
+            problems.append("%s requires %s, and it is empty"
+                            % (channel.label, extra.name))
+        elif extra.limit is not None and len(value) > extra.limit:
+            problems.append(
+                "%s %s is %d characters against a %d limit. It is never "
+                "truncated automatically."
+                % (channel.label, extra.name, len(value), extra.limit))
+
     limit = channel.text_limit
     if limit is not None and text:
-        body = compose_for_platform(text, row.get("tags"),
-                                    row.get("first_comment_link"), channel_id)
+        body = compose_for_platform(text, row.get("tags"), row_link(row),
+                                    channel_id)
         used = counted_length(body, limit.url_cost)
         if used > limit.maximum:
             how_links_count = (
@@ -622,7 +685,7 @@ def queue_rows(rows, state, now=None, tz=None):
     warnings = []
 
     if rows:
-        unknown = unknown_columns(rows[0])
+        unknown = unknown_columns(rows[0], state.platform)
         if unknown:
             warnings.append(
                 "These columns are not read by the pipeline and were ignored: %s. "
@@ -638,11 +701,11 @@ def queue_rows(rows, state, now=None, tz=None):
 
     checked = []
     for index, row in enumerate(rows, start=1):
-        problems = validate_row(row, now=now, tz=tz)
+        problems = validate_row(row, now=now, tz=tz, platform=state.platform)
         checked.append((index, row, problems))
 
     for index, row, problems in checked:
-        rkey = row_key(row)
+        rkey = row_key(row, state.platform)
         if problems:
             rejected.append({"index": index, "key": rkey,
                              "preview": row_preview(row), "errors": problems})
@@ -666,7 +729,7 @@ def queue_rows(rows, state, now=None, tz=None):
 
         state.update(rkey, status=PENDING, row=dict(row),
                      text=row_preview(row),
-                     first_comment_link=(row.get("first_comment_link") or "").strip(),
+                     first_comment_link=row_link(row),
                      errors=[])
         accepted.append({"index": index, "key": rkey,
                          "preview": row_preview(row)})
@@ -1013,7 +1076,7 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
     created = 0
     held = 0
     for row in rows:
-        rkey = row_key(row)
+        rkey = row_key(row, platform)
         entry = state.get(rkey)
         result = {"key": rkey, "row": row, "status": entry.get("status")}
 
@@ -1061,8 +1124,7 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
             # On X the link rides in the body; on LinkedIn it stays out and
             # the browser pass comments it. Same row, different placement.
             body = compose_for_platform(text, row.get("tags"),
-                                        row.get("first_comment_link"),
-                                        platform)
+                                        row_link(row), platform)
 
             image_url = None
             image = row_image_path(row)
@@ -1117,8 +1179,7 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
         state.update(rkey, status=SCHEDULED, hold_reason=None,
                      post_id=post.get("id"),
                      due_at=post.get("dueAt") or when, image_url=image_url,
-                     text=body, first_comment_link=(row.get("first_comment_link")
-                                                    or "").strip(), errors=[])
+                     text=body, first_comment_link=row_link(row), errors=[])
         result.update(status=SCHEDULED, post_id=post.get("id"),
                       due_at=post.get("dueAt") or when, image_url=image_url)
         results.append(result)

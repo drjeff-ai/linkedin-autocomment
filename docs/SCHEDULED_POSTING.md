@@ -71,7 +71,7 @@ cron.
 ## The CSV
 
 ```csv
-date,time_window,post_text,topic,tags,image_path,first_comment_link
+date,time_window,post_text,topic,tags,image_path,link
 2026-09-14,morning,"Most teams adopting AI agents start by asking what they can automate.
 
 I think that's the wrong first question.",,#AI #FutureOfWork,S:\content\img\agents.png,https://example.com/the-article
@@ -86,7 +86,8 @@ I think that's the wrong first question.",,#AI #FutureOfWork,S:\content\img\agen
 | `topic` | Only used when `post_text` is blank. |
 | `tags` | Appended after a blank line. Hashtags inline in `post_text` also work. |
 | `image_path` | A **local** path. Uploaded to R2 automatically. Leave blank for a text-only post. |
-| `first_comment_link` | Posted as the first comment. Leave blank for no comment. |
+| `link` | The post's link, and the canonical name. LinkedIn posts it as the first comment; X puts it in the post. Leave blank for no link. |
+| `first_comment_link` | An accepted alias for `link`, kept forever; the two fill the same slot. Setting both to different values is rejected. |
 
 ### Time windows
 
