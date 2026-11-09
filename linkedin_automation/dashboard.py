@@ -23,7 +23,8 @@ from dotenv import load_dotenv
 from .comment_fields import normalize_comment_fields, comments_to_txt
 # Profile manager calls load_dotenv() on import; importing it here (before our
 # own load_dotenv) is intentional and order-independent.
-from . import platform_policy
+from . import channels
+from . import platforms
 from . import profile_manager as pm
 from . import post_store
 from . import scheduler as scheduler_mod
@@ -1583,14 +1584,17 @@ def _req_platform():
     rather than passed through: `resolve_scheduled` refuses an unknown platform
     (it will not fall back to LinkedIn's channel), and a 400 here says so in
     one place instead of surfacing as a 500 from six routes.
+
+    "Known" means a declared publishing CHANNEL (channels.REGISTRY), not a
+    comment-generator voice: this section only publishes.
     """
     raw_value = request.args.get("platform")
     if raw_value is None and request.method in ("POST", "DELETE"):
         raw_value = (request.get_json(silent=True) or {}).get("platform")
-    platform = str(raw_value or pm.SCHEDULED_DEFAULT_PLATFORM).strip().lower()
-    if platform not in platform_policy.PLATFORMS:
+    platform = str(raw_value or platforms.DEFAULT).strip().lower()
+    if platform not in channels.REGISTRY:
         raise ValueError("unknown platform %r - known: %s"
-                         % (platform, ", ".join(sorted(platform_policy.PLATFORMS))))
+                         % (platform, ", ".join(sorted(channels.REGISTRY))))
     return platform
 
 
@@ -1624,10 +1628,10 @@ def _scheduled_account(profile_name, platform):
     missing = []
     if not channel_id:
         missing.append("no Buffer channel")
-    # The identity guard only runs for non-default platforms (LinkedIn's
-    # schedule path is deliberately ungated - see .dev/BACKLOG.md), so a blank
-    # slug is only a scheduling blocker off LinkedIn.
-    if not slug and platform != pm.SCHEDULED_DEFAULT_PLATFORM:
+    # The identity guard only runs for a channel whose identity_check is the
+    # Buffer handle (LinkedIn's schedule path is deliberately ungated - see
+    # .dev/BACKLOG.md), so a blank slug is only a scheduling blocker there.
+    if not slug and channels.resolve(platform).identity_check == channels.BUFFER_HANDLE:
         missing.append("no identity_slug")
 
     problem = None
@@ -1659,12 +1663,12 @@ def _scheduled_settings_view(profile_name, platform):
     """
     section = (pm.get_profile_config(profile_name) or {}).get("scheduled_posting")
     section = section if isinstance(section, dict) else {}
-    is_linkedin = platform == pm.SCHEDULED_DEFAULT_PLATFORM
+    channel = channels.resolve(platform)
 
-    if is_linkedin:
+    if channel.config_layout == channels.FLAT:
         channel_id = pm.scheduled_config_str(section.get("buffer_channel_id"))
         identity_slug = pm.scheduled_config_str(section.get("identity_slug"))
-        api_key_env = pm.SCHEDULED_DEFAULT_KEY_ENV
+        api_key_env = channel.key_env
         key_env_problem = None
     else:
         overlays = section.get("platforms")
@@ -1688,15 +1692,15 @@ def _scheduled_settings_view(profile_name, platform):
         missing.append("buffer_channel_id")
     # Same asymmetry as _scheduled_account: LinkedIn's schedule path is
     # deliberately ungated (see .dev/BACKLOG.md), so a blank identity_slug is
-    # only a scheduling blocker off LinkedIn.
-    if not identity_slug and not is_linkedin:
+    # only a scheduling blocker for a channel checked by its Buffer handle.
+    if not identity_slug and channel.identity_check == channels.BUFFER_HANDLE:
         missing.append("identity_slug")
-    # The key variable is likewise only HARD-required off LinkedIn -
-    # resolve_scheduled never raises for LinkedIn over a missing BUFFER_API_KEY
-    # (a caller that needs it gets buffer_client's own error at use time), so
-    # this mirrors that rather than inventing a stricter gate than the one
-    # that actually runs.
-    if not is_linkedin:
+    # The key variable is likewise only HARD-required where each profile names
+    # its own - resolve_scheduled never raises for LinkedIn's fixed
+    # BUFFER_API_KEY being missing (a caller that needs it gets buffer_client's
+    # own error at use time), so this mirrors that rather than inventing a
+    # stricter gate than the one that actually runs.
+    if channel.key_env_editable:
         if not api_key_env:
             missing.append("buffer_api_key_env")
         elif not api_key_env_set:
@@ -1707,7 +1711,7 @@ def _scheduled_settings_view(profile_name, platform):
         "buffer_channel_id": channel_id,
         "identity_slug": identity_slug,
         "buffer_api_key_env": api_key_env,
-        "buffer_api_key_env_editable": not is_linkedin,
+        "buffer_api_key_env_editable": channel.key_env_editable,
         "api_key_env_set": api_key_env_set,
         "key_env_problem": key_env_problem,
         "missing": missing,
@@ -1740,7 +1744,7 @@ def _reconcile_on_render(profile_name, force=False,
     """
     import time as _time
 
-    platform = platform or pm.SCHEDULED_DEFAULT_PLATFORM
+    platform = platform or platforms.DEFAULT
     try:
         resolved = pm.resolve_scheduled(profile_name, platform)
     except pm.ScheduledConfigError as exc:
@@ -1836,7 +1840,7 @@ def scheduled_settings_save(profile_name):
     channel_id = (body.get("buffer_channel_id") or "").strip()
     identity_slug = (body.get("identity_slug") or "").strip()
     api_key_env = (body.get("buffer_api_key_env") or "").strip()
-    is_linkedin = platform == pm.SCHEDULED_DEFAULT_PLATFORM
+    channel = channels.resolve(platform)
 
     if api_key_env and not pm.valid_env_var_name(api_key_env):
         return jsonify({
@@ -1846,12 +1850,12 @@ def scheduled_settings_save(profile_name):
                      "never the key itself." % (api_key_env, platform.upper())
         }), 400
 
-    if is_linkedin:
-        if api_key_env and api_key_env != pm.SCHEDULED_DEFAULT_KEY_ENV:
+    if channel.config_layout == channels.FLAT:
+        if api_key_env and api_key_env != channel.key_env:
             return jsonify({
-                "error": "LinkedIn's Buffer key variable is fixed (%s) and "
+                "error": "%s's Buffer key variable is fixed (%s) and "
                          "cannot be changed per profile."
-                         % pm.SCHEDULED_DEFAULT_KEY_ENV}), 400
+                         % (channel.label, channel.key_env)}), 400
         patch = {"scheduled_posting": {"buffer_channel_id": channel_id,
                                        "identity_slug": identity_slug}}
     else:
@@ -1944,8 +1948,9 @@ def scheduled_queue(profile_name):
         "platform": platform,
         # X carries its link in the post BODY - there is no first-comment step
         # and no browser. Told to the UI rather than inferred there, so the two
-        # cannot drift.
-        "first_comment": platform == pm.SCHEDULED_DEFAULT_PLATFORM,
+        # cannot drift. The answer is the channel's link_placement.
+        "first_comment": (channels.resolve(platform).link_placement
+                          == channels.FIRST_COMMENT),
         "reconcile": {
             "ran": reconcile.get("ran"),
             "changed": len(reconcile.get("changed") or []),
@@ -2042,7 +2047,7 @@ def scheduled_add_rows(profile_name):
     })
 
 
-def _scheduled_channel_id(profile_name, platform=pm.SCHEDULED_DEFAULT_PLATFORM):
+def _scheduled_channel_id(profile_name, platform=platforms.DEFAULT):
     """The Buffer channel this (profile, platform) posts to.
 
     Still the single config read for the dashboard AND the drain — the drain
@@ -2133,7 +2138,7 @@ def scheduled_preflight(profile_name):
 def _scheduled_schedule_job(job_id, profile_name, channel_id,
                             platform=None):
     """Run the proven schedule pass. Nothing here is a reimplementation."""
-    platform = platform or pm.SCHEDULED_DEFAULT_PLATFORM
+    platform = platform or platforms.DEFAULT
     resolved = {}
     try:
         resolved = pm.resolve_scheduled(profile_name, platform)
@@ -2157,7 +2162,7 @@ def _scheduled_schedule_job(job_id, profile_name, channel_id,
     # call, not just before create_post (docs/ARCHITECTURE.md §9). A declared-
     # production identity WITH allow_production=True (always true here) would
     # proceed either way, so this only changes the unresolvable-identity case.
-    if platform != pm.SCHEDULED_DEFAULT_PLATFORM:
+    if channels.resolve(platform).identity_check == channels.BUFFER_HANDLE:
         try:
             pm.check_declared_production(
                 resolved.get("identity_slug"),
@@ -2675,7 +2680,7 @@ def _first_comment_drain_job(job_id, profile_name):
     in-process call from the Flask thread.
     """
     try:
-        resolved = pm.resolve_scheduled(profile_name, pm.SCHEDULED_DEFAULT_PLATFORM)
+        resolved = pm.resolve_scheduled(profile_name, platforms.DEFAULT)
     except pm.ScheduledConfigError as exc:
         log_job(job_id, "REFUSED: %s" % exc)
         raise RuntimeError(str(exc))
@@ -2762,7 +2767,7 @@ def first_comment_drain_toggle(profile_name):
         # light and do nothing at all - same guard the post drain's toggle
         # applies for its own Buffer channel requirement.
         try:
-            resolved = pm.resolve_scheduled(profile_name, pm.SCHEDULED_DEFAULT_PLATFORM)
+            resolved = pm.resolve_scheduled(profile_name, platforms.DEFAULT)
         except pm.ScheduledConfigError as exc:
             return jsonify({"error": str(exc)}), 400
         if not resolved.get("identity_slug"):

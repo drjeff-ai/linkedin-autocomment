@@ -30,7 +30,9 @@ if _sys_path not in sys.path:
 
 from dotenv import load_dotenv  # noqa: E402
 
+from linkedin_automation import channels  # noqa: E402
 from linkedin_automation import csv_pipeline as cp  # noqa: E402
+from linkedin_automation import platforms  # noqa: E402
 from linkedin_automation import profile_manager as pm  # noqa: E402
 
 load_dotenv()
@@ -66,7 +68,7 @@ def main():
                     help="Buffer channel id. Defaults to the resolved "
                          "value for --profile/--platform; pass it only "
                          "to override.")
-    ap.add_argument("--platform", default=pm.SCHEDULED_DEFAULT_PLATFORM,
+    ap.add_argument("--platform", default=platforms.DEFAULT,
                     help="which platform's settings to resolve "
                          "(default linkedin)")
     ap.add_argument("--profile", default=None,
@@ -142,8 +144,10 @@ def main():
 
     # Checked FIRST, because it is the more specific answer. Asking an X run
     # to set an identity_slug sends the operator to fix a config field that
-    # would not have helped: X has no comment pass at all.
-    if args.platform != pm.SCHEDULED_DEFAULT_PLATFORM:
+    # would not have helped: X has no comment pass at all. Only a channel whose
+    # link_placement is first_comment has one.
+    if (channels.resolve(args.platform).link_placement
+            != channels.FIRST_COMMENT):
         print("REFUSING: the comment pass is LinkedIn-only. On %s the link "
               "rides in the post body, so there is nothing left to comment "
               "and no browser to comment with." % args.platform)
@@ -161,7 +165,7 @@ def main():
 
     try:
         results = cp.comment_pass(state, profile_name=args.profile,
-                                  platform=pm.SCHEDULED_DEFAULT_PLATFORM,
+                                  platform=args.platform,
                                   expect_slug=expect_identity,
                                   wait=args.wait,
                                   allow_production=args.allow_production)
