@@ -869,8 +869,8 @@ fixture path to check an X selector through the shipped tool today; logged in
 X posts through Buffer's API; nothing on this path constructs a `webdriver`.
 `csv_pipeline.schedule_pass()` (`csv_pipeline.py:776`) is the one chokepoint
 every platform's Buffer write passes through, reached by the dashboard's manual
-"Schedule" route, the CLI (`tools/run_scheduled_posts.py`), and (for
-LinkedIn only today) the automatic drain. `buffer_client.create_post()`
+"Schedule" route, the CLI (`tools/run_scheduled_posts.py`), and the automatic
+drain, per channel (§10.7). `buffer_client.create_post()`
 (`buffer_client.py:431`) is the sole GraphQL mutation that actually creates a
 post; `schedule_pass` is its only live caller.
 
@@ -906,7 +906,17 @@ literal length. **`queue_rows()` validates for the row's own channel**
 nowhere; before P2 it validated with no channel, queued the row, and failed it
 later in `schedule_pass`. A row already in state that is over the limit now
 reads as `rejected` rather than `skipped`, because validation runs before the
-duplicate check. `PipelineState` takes a `platform=` argument. A channel whose
+duplicate check.
+
+**A topic-only row is refused on a channel with a `text_limit`** (X1):
+`X needs post_text: topic generation writes LinkedIn-length posts and is not
+supported on X.` The generator has one voice, and its prompt is out of bounds
+(DEC-005), so this is refused at queue time while a person is looking. A
+topic-only LinkedIn row is unchanged. As a last check, `schedule_pass` runs
+`text_limit_problem()` on the body as it will actually be sent, after
+composing and before any image upload or Buffer call. A body over the limit is
+`FAILED` at stage `validate`, never trimmed. `validate_row` uses the same
+function, so the two checks cannot disagree. `PipelineState` takes a `platform=` argument. A channel whose
 `state_path` is `legacy` (LinkedIn) keeps the original on-disk state file path
 verbatim, while every other platform gets its own file — the same "isolation
 is the path" pattern the post store uses (§1.10).
@@ -916,9 +926,10 @@ comment pass, because the link already rode in the body; asking it to comment
 would imply a browser action that makes no sense for this platform. The CLI
 names this explicitly rather than trying and failing.
 
-*Verification anchor (10.2): 2026-11-08, branch `platform-p2-row-identity`;
+*Verification anchor (10.2): 2026-11-11, branch `x1-x-csv-drain`;
 `tests/test_channel_extras.py` carries the CSV-to-createPost `link` proof and the
-X queue-time limit.*
+X queue-time limit, and `tests/test_x_drain.py` covers the topic-only refusal
+and the send-time length check.*
 
 ### 10.3 Two identity guards, answering two different questions
 
@@ -982,25 +993,54 @@ every automated gate on the way out. This is the same "refuse rather than
 default" shape `resolve_scheduled` (§10.4) and the identity guards (§10.3) all
 share.
 
-### 10.7 The post drain is LinkedIn-only today
+### 10.7 The post drain covers every channel (X1)
 
-`post_drain.py` and its dashboard job body (`dashboard.py:1956`,
-`_drain_feed_job`) never reference `platform` at all (zero matches) — every
-automatic drain resolves to `platform="linkedin"` inside `schedule_pass`
-regardless of what a profile is configured for. X rows are never fed
-automatically; only the manual "Schedule" route (`dashboard.py:1724`,
-`_scheduled_schedule_job`, which threads `platform=`/`identity_slug=`
-correctly) and the CLI schedule the X write path today. Logged in
-`.dev/BACKLOG.md` as a gap for whoever makes X draining work, not a design
-decision.
+The drain (`post_drain.py`) feeds HELD rows, never PENDING ones, into Buffer as
+slots free up. **One check covers every channel in `channels.REGISTRY`** that
+holds rows for the profile, and each channel uses its own state file
+(`_drain_held_rows(profile, platform)`), its own Buffer channel
+(`_scheduled_channel_id(profile, platform)`) and its own key. The switch, the
+interval, the busy check and the master switch stay per *profile*.
+
+**The gate runs before any Buffer call, the slot read included.** For each
+channel with held rows, the check calls `gate_fn` (`dashboard._drain_gate`):
+`pm.resolve_scheduled(profile, platform)`, then `_production_gate`, the same
+`check_declared_production(..., allow_production=True)` the Schedule button
+applies to `BUFFER_HANDLE` channels. Only then does it read slots with that
+channel's key. Missing settings, a missing key variable, or an empty identity
+are recorded as an `error` run naming the platform, and nothing goes to Buffer.
+A declared-production identity proceeds, exactly as it does through the
+Schedule button (DEC-013): the dashboard is production doing its job (§9).
+
+**One feed job per profile, not per channel.** Every channel with room goes
+into one `submit_feed(profile, feeds)` call, so one `post_drain` job
+(`_drain_feed_profile_job`) runs `_drain_feed_job` for each channel in turn. A
+job per channel would be refused by the per-profile busy check, and the second
+channel would wait out a whole interval. Each channel re-reads its slot count
+(`max_age=0`) before its pass, so two channels in one Buffer organisation never
+over-send. One channel failing does not stop the next.
+
+**`_drain_feed_job` is the Schedule button's steps for HELD rows.** It resolves,
+builds `PipelineState(profile_name=..., platform=...)`, applies
+`_production_gate`, reads slots, and calls `_gated_schedule_pass`, the helper
+`_scheduled_schedule_job` also uses. That helper is `schedule_pass(...,
+platform=, identity_slug=, key=, allow_production=True)`, with the same
+refusals. There is one copy of the gate, not two.
+
+`recent_runs` entries carry `platform`; `status()["held_count"]` is the total
+across channels; the panel's slot count is read for the first channel holding
+rows, gated the same way. The toggle accepts a profile whose only configured
+channel is X.
+
+*Verification anchor (10.7): 2026-11-11, branch `x1-x-csv-drain`;
+`tests/test_x_drain.py` asserts channel and key on the recorded Buffer calls.*
 
 ### 10.8 What is not covered here
 
-`docs/SCHEDULED_POSTING.md` is the operator runbook for this path and predates
-the X work — it documents the LinkedIn CSV/Buffer flow only. It has not yet
-been extended for X's CSV shape, the `--platform` flag, or the
-`--allow-production` flag on the schedule pass; treat it as LinkedIn-only until
-it is.
+`docs/SCHEDULED_POSTING.md` is the operator runbook for this path. It predates
+most of the X work. It now covers X's `post_text` requirement, X's length
+limit and the drain feeding X, but not yet the CLI's `--platform` or
+`--allow-production` flags on the schedule pass.
 
 ### 10.9 Platform ids and the channel registry
 
@@ -1018,7 +1058,7 @@ channel it is. The fields are:
 |---|---|---|---|
 | `label` | LinkedIn | X | validation and settings messages |
 | `link_placement` | `first_comment` | `body` | `compose_for_platform`, the queue's `first_comment` flag, the CLI's comment pass |
-| `text_limit` | none | 280 chars, a URL counts 23 | `validate_row` |
+| `text_limit` | none | 280 chars, a URL counts 23 | `validate_row` (length, and refusing topic-only rows), `schedule_pass`'s send-time check, both through `text_limit_problem` |
 | `identity_check` | `ungated` (the browser checks the account at comment time) | `buffer_handle` | `verify_identity`, `schedule_pass`'s production gate and identity guard, the dashboard's account header, settings view and schedule job |
 | `config_layout` | `flat` | `overlay` | `resolve_scheduled`, the settings view and save |
 | `key_env` | fixed `BUFFER_API_KEY` | each profile's overlay names it | `resolve_scheduled`, the settings view and save |
