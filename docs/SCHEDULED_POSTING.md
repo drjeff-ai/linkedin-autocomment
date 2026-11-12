@@ -82,8 +82,8 @@ I think that's the wrong first question.",,#AI #FutureOfWork,S:\content\img\agen
 |---|---|
 | `date` | `YYYY-MM-DD`. Must be in the future. |
 | `time_window` | `morning`, `afternoon` or `evening`. |
-| `post_text` | The body. Leave **blank** to generate from `topic`. Quote it if it contains commas or line breaks. |
-| `topic` | Only used when `post_text` is blank. |
+| `post_text` | The body. Quote it if it contains commas or line breaks. On LinkedIn, leave it **blank** to generate from `topic`. **On X it is required**: a topic-only X row is refused, because topic generation writes LinkedIn-length posts. |
+| `topic` | Only used when `post_text` is blank, and only on LinkedIn. |
 | `tags` | Appended after a blank line. Hashtags inline in `post_text` also work. |
 | `image_path` | A **local** path. Uploaded to R2 automatically. Leave blank for a text-only post. |
 | `link` | The post's link, and the canonical name. LinkedIn posts it as the first comment; X puts it in the post. Leave blank for no link. |
@@ -133,6 +133,8 @@ not touch it (verified), but the comment is yours to finish.
 | `unknown time_window 'x'` | not one of the three | fix the cell |
 | `... resolves to ... which is in the past` | the window already passed today | move the date forward |
 | `post_text and topic are both empty` | nothing to post | fill one |
+| `X needs post_text: topic generation writes LinkedIn-length posts and is not supported on X.` | an X row with only a `topic` | write the post in `post_text` |
+| `too long for X: N characters against a 280 limit ...` | the body, tags and link together are over X's limit (every link counts as 23) | shorten it. Never trimmed automatically; checked when queued and again just before sending |
 | `image_path does not exist` | wrong path | fix the path |
 | `... is not a PNG, JPEG, GIF or WEBP` | file is not an image | replace it |
 | `Image could not be read from its URL` | Buffer could not fetch the R2 image | check the bucket is public |
@@ -280,6 +282,19 @@ looked, and when it will look next. **Check now** runs a check immediately.
 Each check: if nothing is held, it does nothing and does not call Buffer at all.
 Otherwise it asks how many slots are free and feeds that many held posts,
 earliest date first. Held posts that still do not fit stay held.
+
+**One switch covers LinkedIn and X.** Each check looks at every platform that
+has held posts for the profile, and sends each to its own Buffer channel with
+its own API key. Held X posts go to the X channel with the X key (the variable
+named in the X settings), never to LinkedIn's. The held count is the total
+across both. Each line under *Recent* names its platform. You can switch the
+drain on for a profile that only posts to X.
+
+Before it asks Buffer anything about a platform, the drain applies the same
+checks as **Schedule pending…**. If the X settings are missing, the X key
+variable is not set, or no X identity is configured, it sends nothing for X,
+not even a slot read, and records an error naming X. LinkedIn still feeds in
+the same check.
 
 ### What it will not do
 

@@ -2143,6 +2143,56 @@ def scheduled_preflight(profile_name):
     })
 
 
+def _refused(job_id, exc):
+    """The one shape every scheduling refusal returns, logged the one way."""
+    log_job(job_id, "REFUSED: %s" % exc)
+    return {"scheduled": 0, "failed": 0, "held": 0, "results": [],
+            "error": str(exc)}
+
+
+def _production_gate(platform, resolved):
+    """The production gate both scheduling paths apply before ANY Buffer call.
+
+    Shared by the Schedule button's job and the post drain (job and check), so
+    there is one copy. Redundant with the check inside schedule_pass on
+    purpose: an unresolvable identity (refused even with
+    allow_production=True) must never even reach a slot read - the gate runs
+    before ANY Buffer call, not just before create_post (docs/ARCHITECTURE.md
+    §9). A declared-production identity WITH allow_production=True (always
+    true here: this is the dashboard, production doing its job) proceeds, so
+    this only refuses the unresolvable-identity case.
+
+    Raises pm.ProductionAccessRefused.
+    """
+    if channels.resolve(platform).identity_check == channels.BUFFER_HANDLE:
+        pm.check_declared_production(
+            resolved.get("identity_slug"),
+            "schedule a Buffer post on %s" % platform,
+            allow_production=True)
+
+
+def _gated_schedule_pass(job_id, rows, channel_id, state, profile_name,
+                         platform, resolved, max_new, slot_limit):
+    """schedule_pass with the resolved settings, as both scheduling paths call
+    it. Returns ``(results, refusal)``; exactly one is None."""
+    # The identity guard lives INSIDE schedule_pass (Phase 4a), so this route
+    # is covered by the same check the CLI is - no second implementation, and
+    # no way for a new caller to skip it. It raises rather than returning, so a
+    # refusal cannot be mistaken for "scheduled nothing".
+    #
+    # allow_production=True: this IS the dashboard, which - like the
+    # scheduler - is production doing its job (docs/ARCHITECTURE.md §9). A
+    # bare CLI/module run does not pass this, and is refused by default.
+    try:
+        return csv_pipeline.schedule_pass(
+            rows, channel_id, state, profile_name=profile_name,
+            max_new=max_new, slot_limit=slot_limit, platform=platform,
+            identity_slug=resolved.get("identity_slug"),
+            key=resolved.get("api_key"), allow_production=True), None
+    except (csv_pipeline.IdentityRefused, pm.ProductionAccessRefused) as exc:
+        return None, _refused(job_id, exc)
+
+
 def _scheduled_schedule_job(job_id, profile_name, channel_id,
                             platform=None):
     """Run the proven schedule pass. Nothing here is a reimplementation."""
@@ -2151,9 +2201,7 @@ def _scheduled_schedule_job(job_id, profile_name, channel_id,
     try:
         resolved = pm.resolve_scheduled(profile_name, platform)
     except pm.ScheduledConfigError as exc:
-        log_job(job_id, "REFUSED: %s" % exc)
-        return {"scheduled": 0, "failed": 0, "held": 0, "results": [],
-                "error": str(exc)}
+        return _refused(job_id, exc)
 
     state = csv_pipeline.PipelineState(profile_name=profile_name,
                                        platform=platform)
@@ -2164,22 +2212,10 @@ def _scheduled_schedule_job(job_id, profile_name, channel_id,
         return {"scheduled": 0, "failed": 0, "results": [],
                 "note": "nothing pending"}
 
-    # Checked here too, redundantly with the one inside schedule_pass, so an
-    # unresolvable identity (refused even with allow_production=True) never
-    # even reaches the slots read below - the gate must run before ANY Buffer
-    # call, not just before create_post (docs/ARCHITECTURE.md §9). A declared-
-    # production identity WITH allow_production=True (always true here) would
-    # proceed either way, so this only changes the unresolvable-identity case.
-    if channels.resolve(platform).identity_check == channels.BUFFER_HANDLE:
-        try:
-            pm.check_declared_production(
-                resolved.get("identity_slug"),
-                "schedule a Buffer post on %s" % platform,
-                allow_production=True)
-        except pm.ProductionAccessRefused as exc:
-            log_job(job_id, "REFUSED: %s" % exc)
-            return {"scheduled": 0, "failed": 0, "held": 0, "results": [],
-                    "error": str(exc)}
+    try:
+        _production_gate(platform, resolved)
+    except pm.ProductionAccessRefused as exc:
+        return _refused(job_id, exc)
 
     try:
         # max_age=0: this decides what actually gets sent, so it must not act
@@ -2198,29 +2234,12 @@ def _scheduled_schedule_job(job_id, profile_name, channel_id,
         max_new = None
         slot_limit = None
 
-    # The identity guard lives INSIDE schedule_pass (Phase 4a), so this route
-    # is covered by the same check the CLI is - no second implementation, and
-    # no way for a new caller to skip it. It raises rather than returning, so a
-    # refusal cannot be mistaken for "scheduled nothing".
-    #
-    # allow_production=True: this IS the dashboard, which - like the
-    # scheduler - is production doing its job (docs/ARCHITECTURE.md §9). A
-    # bare CLI/module run does not pass this, and is refused by default.
-    try:
-        results = csv_pipeline.schedule_pass(
-            rows, channel_id, state, profile_name=profile_name,
-            max_new=max_new, slot_limit=slot_limit, platform=platform,
-            identity_slug=resolved.get("identity_slug"),
-            key=resolved.get("api_key"), allow_production=True)
-    except csv_pipeline.IdentityRefused as exc:
-        log_job(job_id, "REFUSED: %s" % exc)
-        return {"scheduled": 0, "failed": 0, "held": 0, "results": [],
-                "error": str(exc)}
-    except pm.ProductionAccessRefused as exc:
-        log_job(job_id, "REFUSED: %s" % exc)
-        return {"scheduled": 0, "failed": 0, "held": 0, "results": [],
-                "error": str(exc)}
-    scheduled = [r for r in results if r.get("status") == csv_pipeline.SCHEDULED]
+    results, refusal = _gated_schedule_pass(
+        job_id, rows, channel_id, state, profile_name, platform, resolved,
+        max_new, slot_limit)
+    if refusal:
+        return refusal
+    scheduled =[r for r in results if r.get("status") == csv_pipeline.SCHEDULED]
     failed = [r for r in results if r.get("status") == csv_pipeline.FAILED]
     on_hold = [r for r in results if r.get("status") == csv_pipeline.HELD]
     for r in results:
@@ -2544,18 +2563,35 @@ scheduler_engine = scheduler_mod.Scheduler(
 # slots that have freed up. Separate engine, separate switch, separate status -
 # the two must never be mistaken for each other in the UI.
 
-def _drain_feed_job(job_id, profile_name, channel_id, free):
-    """Feed up to ``free`` HELD rows into Buffer. Reuses the proven pass."""
-    state = csv_pipeline.PipelineState(profile_name=profile_name)
+def _drain_feed_job(job_id, profile_name, channel_id, free, platform=None):
+    """Feed up to ``free`` HELD rows of one platform into Buffer.
+
+    The Schedule button's steps, for HELD rows instead of PENDING ones: the
+    same resolution, the same production gate, the same schedule_pass call
+    with that platform's identity and key. Refuses exactly where that job does.
+    """
+    platform = platform or platforms.DEFAULT
+    try:
+        resolved = pm.resolve_scheduled(profile_name, platform)
+    except pm.ScheduledConfigError as exc:
+        return _refused(job_id, exc)
+    state = csv_pipeline.PipelineState(profile_name=profile_name,
+                                       platform=platform)
     rows = csv_pipeline.held_rows(state)
     if not rows:
         return {"scheduled": 0, "held": 0, "failed": 0, "results": [],
                 "note": "nothing held"}
 
-    log_job(job_id, "Drain: %d held row(s), %d slot(s) free" % (len(rows), free))
+    log_job(job_id, "Drain %s: %d held row(s), %d slot(s) free"
+            % (platform, len(rows), free))
+    try:
+        _production_gate(platform, resolved)
+    except pm.ProductionAccessRefused as exc:
+        return _refused(job_id, exc)
     slot_limit = None
     try:
-        slots = buffer_client.scheduled_slots(channel_id, max_age=0)
+        slots = buffer_client.scheduled_slots(channel_id, max_age=0,
+                                              key=resolved.get("api_key"))
         # Re-read rather than trusting the count the tick passed in: minutes may
         # have passed, and over-sending is what HELD exists to prevent.
         free = slots["free"]
@@ -2570,9 +2606,11 @@ def _drain_feed_job(job_id, profile_name, channel_id, free):
         return {"scheduled": 0, "held": len(rows), "failed": 0, "results": [],
                 "note": "no slot free by the time the feed ran"}
 
-    results = csv_pipeline.schedule_pass(rows, channel_id, state,
-                                         profile_name=profile_name,
-                                         max_new=free, slot_limit=slot_limit)
+    results, refusal = _gated_schedule_pass(
+        job_id, rows, channel_id, state, profile_name, platform, resolved,
+        free, slot_limit)
+    if refusal:
+        return refusal
     scheduled = [r for r in results if r.get("status") == csv_pipeline.SCHEDULED]
     failed = [r for r in results if r.get("status") == csv_pipeline.FAILED]
     on_hold = [r for r in results if r.get("status") == csv_pipeline.HELD]
@@ -2582,8 +2620,8 @@ def _drain_feed_job(job_id, profile_name, channel_id, free):
     for r in failed:
         log_job(job_id, "FAILED at %s: %s"
                 % (r.get("stage"), "; ".join(r.get("errors") or [])))
-    log_job(job_id, "Drain done: %d fed, %d still held, %d failed"
-            % (len(scheduled), len(on_hold), len(failed)))
+    log_job(job_id, "Drain %s done: %d fed, %d still held, %d failed"
+            % (platform, len(scheduled), len(on_hold), len(failed)))
     return {
         "scheduled": len(scheduled), "held": len(on_hold),
         "failed": len(failed),
@@ -2593,33 +2631,89 @@ def _drain_feed_job(job_id, profile_name, channel_id, free):
     }
 
 
-def _drain_submit_feed(profile_name, channel_id, free):
-    """Start a drain feed unless another schedule pass is already running."""
+def _drain_feed_profile_job(job_id, profile_name, feeds):
+    """One drain job for every channel of a profile that had room.
+
+    One job, not one per channel: the busy check is per profile, so a second
+    job would be turned away by the first and that channel would wait a whole
+    interval. Channels run one after another; each re-reads its slot count, so
+    two channels sharing one Buffer organisation never over-send. One channel
+    failing does not stop the next.
+    """
+    totals = {"scheduled": 0, "held": 0, "failed": 0, "results": [],
+              "platforms": {}}
+    for feed in feeds:
+        platform = feed["platform"]
+        try:
+            out = _drain_feed_job(job_id, profile_name, feed["channel_id"],
+                                  feed["free"], platform=platform)
+        except Exception as exc:
+            logger.exception("PostDrain: %s feed for %s failed",
+                             platform, profile_name)
+            log_job(job_id, "Drain %s FAILED: %s" % (platform, exc))
+            out = {"scheduled": 0, "held": 0, "failed": 0, "results": [],
+                   "error": str(exc)}
+        totals["platforms"][platform] = out
+        for field in ("scheduled", "held", "failed"):
+            totals[field] += out.get(field) or 0
+        totals["results"].extend(dict(r, platform=platform)
+                                 for r in out.get("results") or [])
+    return totals
+
+
+def _drain_submit_feed(profile_name, feeds):
+    """Start one drain feed for ``feeds`` unless a schedule pass is running."""
     if not can_start_scheduling_task(profile_name):
         logger.info("PostDrain: a schedule pass is already running for %s, "
                     "feed not submitted", profile_name)
         return None
     job_id = f"post_drain_{profile_name}_{int(time.time())}"
-    run_job(job_id, _drain_feed_job, profile_name, channel_id, free,
+    run_job(job_id, _drain_feed_profile_job, profile_name, list(feeds),
             profile=profile_name, task_type="api",
             category=post_drain_mod.JOB_CATEGORY)
     return job_id
 
 
-def _drain_held_rows(profile_name):
-    """HELD source rows for a profile, earliest first."""
+def _drain_held_rows(profile_name, platform=None):
+    """HELD source rows for one (profile, platform), earliest first."""
     return csv_pipeline.held_rows(
-        csv_pipeline.PipelineState(profile_name=profile_name))
+        csv_pipeline.PipelineState(profile_name=profile_name,
+                                   platform=platform or platforms.DEFAULT))
+
+
+def _drain_gate(profile_name, platform):
+    """The drain check's gate, before its slot read: resolve the platform's
+    settings and apply the Schedule button's production gate. Returns the
+    platform's Buffer key; raises to refuse."""
+    resolved = pm.resolve_scheduled(profile_name, platform)
+    _production_gate(platform, resolved)
+    return resolved.get("api_key")
 
 
 drain_engine = post_drain_mod.PostDrain(
     channel_fn=_scheduled_channel_id,
     held_fn=_drain_held_rows,
+    gate_fn=_drain_gate,
     slots_fn=buffer_client.scheduled_slots,
     submit_feed=_drain_submit_feed,
     scheduling_available=can_start_scheduling_task,
     list_profiles=lambda: list(pm.list_profiles().get("profiles", {}).keys()),
 )
+
+
+def _any_drain_channel(profile_name):
+    """Does any declared channel of this profile have a Buffer channel id?
+
+    The drain covers every channel, so a profile that only posts to X can
+    switch it on. A platform with no settings simply does not count.
+    """
+    for platform in channels.REGISTRY:
+        try:
+            if _scheduled_channel_id(profile_name, platform):
+                return True
+        except pm.ScheduledConfigError:
+            continue
+    return False
 
 
 @app.route('/api/drain/<profile_name>/status', methods=['GET'])
@@ -2640,7 +2734,7 @@ def drain_toggle(profile_name):
     enabled = body.get("enabled")
     if enabled is None:
         return jsonify({"error": "enabled (bool) is required"}), 400
-    if enabled and not _scheduled_channel_id(profile_name):
+    if enabled and not _any_drain_channel(profile_name):
         # Switching on a feeder that cannot possibly feed anything would show a
         # green light and do nothing at all.
         return jsonify({"error": "No Buffer channel configured for this "

@@ -334,13 +334,18 @@ def test_the_preflight_names_the_handle_buffer_actually_reports(client,
 
 # ─── the drain is untouched ──────────────────────────────────────────────────
 
-def test_the_drain_still_reads_linkedins_store_only():
-    """Explicitly out of scope: the per-platform drain loop is a later phase,
-    so no unguarded X background path exists yet."""
+def test_the_drain_reads_each_platforms_store_through_the_gate():
+    """X1 (DEC-011) made the drain per-platform. This test used to pin the
+    opposite - "no X background path yet" - and is replaced, not loosened:
+    an X background path now exists, so what must hold is that it reads the
+    platform's own store and goes through the Schedule button's gate. The
+    behaviour itself is proved in tests/test_x_drain.py."""
     import inspect
     src = inspect.getsource(dashboard._drain_feed_job)
-    assert "PipelineState(profile_name=profile_name)" in src
-    assert "platform" not in src
+    assert "PipelineState(profile_name=profile_name," in src
+    assert "platform=platform" in src
+    assert "_production_gate(platform, resolved)" in src
+    assert "_gated_schedule_pass(" in src
 
 
 def test_the_drain_wiring_is_unchanged():

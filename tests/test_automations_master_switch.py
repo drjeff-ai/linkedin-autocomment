@@ -153,7 +153,7 @@ def test_scheduler_submits_nothing_for_an_off_profile_and_everything_for_an_on_o
 def _drain_pair(configs):
     slot_reads, feeds = [], []
 
-    def slots(channel_id):
+    def slots(channel_id, key=None):
         slot_reads.append(channel_id)
         return {"limit": 10, "used": 0, "free": 3}
 
@@ -161,10 +161,11 @@ def _drain_pair(configs):
         now_fn=lambda: datetime(2026, 7, 7, 9, 0),
         list_profiles=lambda: [OFF, ON],
         config_fn=lambda p: configs[p],
-        channel_fn=lambda p: "chan_" + p,
-        held_fn=lambda p: [{"key": p + "_row"}],
+        channel_fn=lambda p, platform: "chan_" + p,
+        held_fn=lambda p, platform: ([{"key": p + "_row"}]
+                                     if platform == "linkedin" else []),
         slots_fn=slots,
-        submit_feed=lambda p, ch, free: feeds.append(p) or "job_" + p,
+        submit_feed=lambda p, feeds_: feeds.append(p) or "job_" + p,
     )
     return engine, slot_reads, feeds
 
@@ -339,9 +340,10 @@ def outside_world(monkeypatch):
     # post drain run-now: held rows, a channel, free slots. The slot read is a
     # Buffer call, so it is recorded with the transport's.
     eng = dashboard.drain_engine
-    monkeypatch.setattr(eng, "_held_fn", lambda p: [{"key": "row"}])
-    monkeypatch.setattr(eng, "_channel_fn", lambda p: "chan")
-    monkeypatch.setattr(eng, "_slots_fn", lambda ch: seen["buffer"].append("slots")
+    monkeypatch.setattr(eng, "_held_fn", lambda p, platform: (
+        [{"key": "row"}] if platform == "linkedin" else []))
+    monkeypatch.setattr(eng, "_channel_fn", lambda p, platform: "chan")
+    monkeypatch.setattr(eng, "_slots_fn", lambda ch, key=None: seen["buffer"].append("slots")
                         or {"limit": 10, "used": 0, "free": 1})
     # first-comment drain run-now: one published row past its delay.
     monkeypatch.setattr(csv_pipeline, "rows_awaiting_first_comment",

@@ -65,24 +65,29 @@ class Harness:
             "buffer_channel_id": channel,
             "drain": {"enabled": enabled, "interval_minutes": interval}}}
 
-        def slots_fn(cid):
+        def slots_fn(cid, key=None):
             self.slot_reads += 1
             if self.slots_raises:
                 raise self.slots_raises
             return self.slots
 
-        def submit(profile, channel_id, free):
-            self.feeds.append({"profile": profile, "channel": channel_id,
-                               "free": free})
+        def submit(profile, feeds):
+            for feed in feeds:
+                self.feeds.append({"profile": profile,
+                                   "channel": feed["channel_id"],
+                                   "free": feed["free"]})
             return self.submit_returns
 
         self.drain = pd.PostDrain(
             now_fn=self.clock,
             list_profiles=lambda: ["p"],
             config_fn=lambda profile: self.cfg,
-            channel_fn=lambda profile: (self.cfg["scheduled_posting"]
-                                        .get("buffer_channel_id")),
-            held_fn=lambda profile: list(self.held),
+            channel_fn=lambda profile, platform: (self.cfg["scheduled_posting"]
+                                                  .get("buffer_channel_id")),
+            # This harness holds LinkedIn rows only; X is tested in
+            # tests/test_x_drain.py.
+            held_fn=lambda profile, platform: (list(self.held)
+                                               if platform == "linkedin" else []),
             slots_fn=slots_fn,
             submit_feed=submit,
             scheduling_available=lambda profile: self.available,
@@ -261,7 +266,9 @@ def test_one_profile_blowing_up_does_not_stop_the_others():
     h = Harness(held=1, free=1)
     calls = []
 
-    def held_fn(profile):
+    def held_fn(profile, platform):
+        if platform != "linkedin":
+            return []
         calls.append(profile)
         if profile == "bad":
             raise RuntimeError("state file is corrupt")
@@ -532,7 +539,8 @@ def test_the_drain_is_refused_while_the_schedule_button_runs(configured,
         "status": "running", "profile": "p", "task_type": "api",
         "category": "buffer_schedule"}
     assert dashboard.can_start_scheduling_task("p") is False
-    assert dashboard._drain_submit_feed("p", "chan1", 3) is None
+    assert dashboard._drain_submit_feed(
+        "p", [{"platform": "linkedin", "channel_id": "chan1", "free": 3}]) is None
 
 
 def test_a_browser_job_does_not_block_the_drain(configured, clean_jobs):

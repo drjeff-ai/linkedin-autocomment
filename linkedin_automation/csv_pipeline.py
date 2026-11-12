@@ -286,8 +286,18 @@ def validate_row(row, now=None, tz=None, platform=None):
     problems = []
     text = (row.get("post_text") or "").strip()
     topic = (row.get("topic") or "").strip()
+    channel_id = (platform or "").lower()
+    channel = channels.resolve(channel_id)
     if not text and not topic:
         problems.append("post_text and topic are both empty - nothing to post")
+    elif not text and channel.text_limit is not None:
+        # Topic generation writes LinkedIn-length posts (the generator has one
+        # voice, and its prompt is out of bounds here - DEC-005). On a channel
+        # with a hard length limit that text could only be trimmed or refused
+        # at send time, so the row is refused now, while a person is looking.
+        problems.append(
+            "%s needs post_text: topic generation writes LinkedIn-length "
+            "posts and is not supported on %s." % (channel.label, channel.label))
 
     try:
         bc.due_at(row.get("date"), row.get("time_window"),
@@ -315,8 +325,6 @@ def validate_row(row, now=None, tz=None, platform=None):
     # Rejected, never truncated: a post cut mid-sentence is worse than one that
     # did not go out, and the link is at the END, so truncation would silently
     # drop the thing the row exists to share.
-    channel_id = (platform or "").lower()
-    channel = channels.resolve(channel_id)
 
     # The two names of the link slot may both be present. If they differ there
     # is no right answer, so the row is refused rather than one name winning.
@@ -341,22 +349,37 @@ def validate_row(row, now=None, tz=None, platform=None):
                 "truncated automatically."
                 % (channel.label, extra.name, len(value), extra.limit))
 
-    limit = channel.text_limit
-    if limit is not None and text:
-        body = compose_for_platform(text, row.get("tags"), row_link(row),
-                                    channel_id)
-        used = counted_length(body, limit.url_cost)
-        if used > limit.maximum:
-            how_links_count = (
-                " (every link counts as %d, whatever its real length)"
-                % limit.url_cost if limit.url_cost is not None else "")
-            problems.append(
-                "too long for %s: %d %s against a %d limit%s. Shorten "
-                "post_text, tags or the link - this is never truncated "
-                "automatically."
-                % (channel.label, used, limit.unit_word, limit.maximum,
-                   how_links_count))
+    if text:
+        problem = text_limit_problem(
+            compose_for_platform(text, row.get("tags"), row_link(row),
+                                 channel_id), channel_id)
+        if problem:
+            problems.append(problem)
     return problems
+
+
+def text_limit_problem(body, platform=None):
+    """Why a composed body is over its channel's text limit, or None.
+
+    One rule for the queue-time check in :func:`validate_row` and the
+    send-time check in :func:`schedule_pass`, so the two cannot disagree. A
+    channel with no ``text_limit`` (LinkedIn) never has a problem here.
+    """
+    channel = channels.resolve((platform or "").lower())
+    limit = channel.text_limit
+    if limit is None:
+        return None
+    used = counted_length(body, limit.url_cost)
+    if used <= limit.maximum:
+        return None
+    how_links_count = (
+        " (every link counts as %d, whatever its real length)"
+        % limit.url_cost if limit.url_cost is not None else "")
+    return ("too long for %s: %d %s against a %d limit%s. Shorten "
+            "post_text, tags or the link - this is never truncated "
+            "automatically."
+            % (channel.label, used, limit.unit_word, limit.maximum,
+               how_links_count))
 
 
 class PipelineState:
@@ -1125,6 +1148,19 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
             # the browser pass comments it. Same row, different placement.
             body = compose_for_platform(text, row.get("tags"),
                                         row_link(row), platform)
+
+            # The last check before anything leaves this machine: the body as
+            # it will actually be sent, generated text included. Over the
+            # channel's limit is FAILED at validate, never trimmed, and no
+            # image is uploaded for a post that cannot be created.
+            too_long = text_limit_problem(body, platform)
+            if too_long:
+                state.update(rkey, status=FAILED, stage="validate",
+                             errors=[too_long], text=row_preview(row))
+                result.update(status=FAILED, stage="validate",
+                              errors=[too_long])
+                results.append(result)
+                continue
 
             image_url = None
             image = row_image_path(row)

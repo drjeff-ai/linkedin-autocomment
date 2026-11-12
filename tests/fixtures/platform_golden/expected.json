@@ -7848,24 +7848,18 @@
         "<X>": {
           "compose": "GENERATED from 'a topic to generate from'",
           "schedule": {
-            "errors": [],
+            "errors": [
+              "X needs post_text: topic generation writes LinkedIn-length posts and is not supported on X."
+            ],
             "identity_fetches": 1,
             "note": null,
-            "payloads": [
-              {
-                "assets": [],
-                "channelId": "chan_golden",
-                "dueAt": "2026-09-22T20:53:30.000Z",
-                "mode": "customScheduled",
-                "needsApproval": false,
-                "schedulingType": "automatic",
-                "text": "GENERATED from 'a topic to generate from'"
-              }
-            ],
-            "stage": null,
-            "status": "scheduled"
+            "payloads": [],
+            "stage": "validate",
+            "status": "failed"
           },
-          "validate": []
+          "validate": [
+            "X needs post_text: topic generation writes LinkedIn-length posts and is not supported on X."
+          ]
         },
         "<linkedin >": {
           "compose": "GENERATED from 'a topic to generate from'",
@@ -7923,24 +7917,18 @@
         "<x>": {
           "compose": "GENERATED from 'a topic to generate from'",
           "schedule": {
-            "errors": [],
+            "errors": [
+              "X needs post_text: topic generation writes LinkedIn-length posts and is not supported on X."
+            ],
             "identity_fetches": 1,
             "note": null,
-            "payloads": [
-              {
-                "assets": [],
-                "channelId": "chan_golden",
-                "dueAt": "2026-09-22T20:53:30.000Z",
-                "mode": "customScheduled",
-                "needsApproval": false,
-                "schedulingType": "automatic",
-                "text": "GENERATED from 'a topic to generate from'"
-              }
-            ],
-            "stage": null,
-            "status": "scheduled"
+            "payloads": [],
+            "stage": "validate",
+            "status": "failed"
           },
-          "validate": []
+          "validate": [
+            "X needs post_text: topic generation writes LinkedIn-length posts and is not supported on X."
+          ]
         }
       },
       "row_key": "6a5a512f4a22eeaf"
