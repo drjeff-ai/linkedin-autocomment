@@ -54,7 +54,7 @@ EXPECTED_FILE = os.path.join(FIXTURE_DIR, "expected.json")
 #: whitespace variants, and a channel nothing declares. Literal on purpose:
 #: the corpus must not shrink because a registry did.
 CHANNELS = ("linkedin", "x", None, "", "LinkedIn", "X", " x", "linkedin ",
-            "pinterest")
+            "mastodon")
 
 #: The profile the config-reading probes resolve. It lives in a temporary
 #: DATA_ROOT, never under data/.
@@ -64,7 +64,7 @@ PROFILE_CONFIG = {"scheduled_posting": {
     "platforms": {
         "x": {"buffer_channel_id": "chan_x_golden", "identity_slug": "x-golden",
               "buffer_api_key_env": "BUFFER_API_KEY_X"},
-        "pinterest": {"buffer_channel_id": "chan_pin_golden",
+        "mastodon": {"buffer_channel_id": "chan_pin_golden",
                       "identity_slug": "pin-golden",
                       "buffer_api_key_env": "BUFFER_API_KEY_PIN"}}}}
 ENV_KEYS = {"BUFFER_API_KEY": "golden-li-key", "BUFFER_API_KEY_X": "golden-x-key",

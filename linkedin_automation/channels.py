@@ -193,8 +193,63 @@ X = Channel(
     reconcile_statuses=("sent", "error"),
 )
 
+
+class MissingBoard(ValueError):
+    """A Pinterest createPost was about to be built with no board serviceId."""
+
+
+def _pinterest_metadata(row, board_service_id):
+    """``{"pinterest": {boardServiceId, title, url}}`` for one row.
+
+    The shape pin.publisher sends (``build_pinterest_metadata``). The board is
+    required: Buffer's schema types it optional but refuses a create without
+    it, so a blank one is refused here, before anything is uploaded. ``title``
+    and ``url`` go in only when filled. The pin's description is the post's
+    top-level ``text``, never this. The link is read under both of its names,
+    ``first_comment_link`` first, the way ``csv_pipeline.row_link`` reads it
+    (that module imports this one, so it cannot be called from here).
+    """
+    sid = (board_service_id or "").strip()
+    if not sid:
+        raise MissingBoard(
+            "Pinterest needs the board's serviceId to create a pin, and none "
+            "was resolved for board %r. Nothing was sent."
+            % str(row.get("board") or "").strip())
+    pin = {"boardServiceId": sid}
+    title = str(row.get("title") or "").strip()
+    link = (str(row.get("first_comment_link") or "").strip()
+            or str(row.get("link") or "").strip())
+    if title:
+        pin["title"] = title
+    if link:
+        pin["url"] = link
+    return {"pinterest": pin}
+
+
+PINTEREST = Channel(
+    id=platforms.PINTEREST,
+    label="Pinterest",
+    # The pin's destination link is metadata.pinterest.url, never the body.
+    link_placement=METADATA,
+    # Pinterest caps a pin description at 500 characters. A link is not in
+    # the body, so links count as plain text (url_cost None) if one is typed.
+    text_limit=TextLimit(unit=platform_policy.CHARS, maximum=500, url_cost=None),
+    identity_check=BUFFER_HANDLE,
+    config_layout=OVERLAY,
+    key_env=None,
+    state_path=PLATFORM_DIR,
+    reconcile_statuses=("sent", "error"),
+    extra_columns=(ExtraColumn("title", required=True, limit=100),
+                   ExtraColumn("alt_text", limit=500),
+                   ExtraColumn("board", required=True)),
+    metadata_builder=_pinterest_metadata,
+    alt_text_column="alt_text",
+    image_required=True,
+    board_lookup=True,
+)
+
 #: Every declared channel, by id.
-REGISTRY = {c.id: c for c in (LINKEDIN, X)}
+REGISTRY = {c.id: c for c in (LINKEDIN, X, PINTEREST)}
 
 
 def get(channel_id: str) -> Channel:

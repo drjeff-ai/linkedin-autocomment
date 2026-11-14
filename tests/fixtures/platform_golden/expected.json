@@ -457,20 +457,20 @@
         ]
       }
     },
-    "<pinterest>": {
+    "<mastodon>": {
       "account": {
         "returned": {
           "channel_id": "chan_pin_golden",
           "configured": true,
           "identity_slug": "pin-golden",
-          "platform": "pinterest",
+          "platform": "mastodon",
           "problem": null
         }
       },
       "production_gate": {
         "identity_fetches": 0,
         "payloads": [],
-        "raised": "ProductionAccessRefused: Refusing to schedule a Buffer post on pinterest: identity 'golden-handle' is a declared PRODUCTION identity. Pass --allow-production (or set LINKEDIN_ALLOW_PRODUCTION=1) to proceed."
+        "raised": "ProductionAccessRefused: Refusing to schedule a Buffer post on mastodon: identity 'golden-handle' is a declared PRODUCTION identity. Pass --allow-production (or set LINKEDIN_ALLOW_PRODUCTION=1) to proceed."
       },
       "reconcile_statuses": {
         "returned": [
@@ -486,7 +486,7 @@
           "api_key_env": "BUFFER_API_KEY_PIN",
           "channel_id": "chan_pin_golden",
           "identity_slug": "pin-golden",
-          "platform": "pinterest"
+          "platform": "mastodon"
         }
       },
       "settings_view": {
@@ -499,16 +499,16 @@
           "identity_slug": "pin-golden",
           "key_env_problem": null,
           "missing": [],
-          "platform": "pinterest"
+          "platform": "mastodon"
         }
       },
       "state_path": {
-        "returned": "golden/pinterest/scheduled_posts_state.json"
+        "returned": "golden/mastodon/scheduled_posts_state.json"
       },
       "verify_identity_with_nothing": {
         "returned": [
           false,
-          "no Buffer channel to check the pinterest identity against - refusing"
+          "no Buffer channel to check the mastodon identity against - refusing"
         ]
       }
     },
@@ -736,7 +736,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Loremip sumd olorsit ametcon sect eturlore mip sum dolors. Itamet consect eturl ore mipsumd. O lorsita metc. Onsec te turl oremips umdo lor sitame tconsecte turlo. Re mi psu mdo lorsi tame, tc on s ect et urlor, emi psumd olo rs itam et consectet url ore mipsumdol.\n\n#LO #RemipsuMdolorsi",
           "schedule": {
             "errors": [],
@@ -962,7 +962,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "LORE. Mip Sumdolorsit. Ametc ons ec tetur loremipsu mdo lorsitam'e tconse ctetu rlo remip sumdolor sitame. Tcons ecte tur lorem ipsumdolor sit am etconsect, eturlor em ip. Sumd ol ors itametcon, sect et url oremips umdolors.\n\n#LO #RemipsumdoLO",
           "schedule": {
             "errors": [],
@@ -1200,7 +1200,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "LO. Rem Ipsumdolorsit. Ame tco ns ecteturl. Ore mipsumdolo rsi tametcon. Sec tetur lo rem ipsum. Dolors itam etconse cte tur lore mi psu mdolors it ame tconse, cte tu rlo remip sumdo lo rs itame.\n\n#LO #RemipsumdoLO",
           "schedule": {
             "errors": [],
@@ -1426,7 +1426,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Lore mi psum do lor sitam ET conse ctet urlo rem ipsumd ol o rsi ta metconsec. Tet urlore mip sumdolo rs ita. Metconsectetu rlorem ipsumdol. O rsita me tconsect eturl or. Emi psu mdol orsitamet consectet ur l orem ipsumd olors itamet cons. Ec tetu rl orem ipsumdol, ors ita met consec. Tet url orem ipsum dol orsita metco ns.\n\n#LO #RemipsuMdolorsitametc",
           "schedule": {
             "errors": [],
@@ -1616,7 +1616,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Lore Mips um Dolors",
           "schedule": {
             "errors": [],
@@ -1842,7 +1842,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Lor emips umdolorsi tame tcon secte tur lorem ip sumdol orsi tamet consectetu rlore mips umdo. Lor sitametc onsect et url o remipsum, do lo r sita. Metco nsectetu rlo remip sum do lorsit ame tconsect: eturl orem ipsum dol or?\n\n#LO #RemipsumdoLO",
           "schedule": {
             "errors": [],
@@ -2080,7 +2080,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "LO. Rem Ipsum. Dol orsi tam et consec. Tetur lor emips u mdol. Orsi tametc ons ect eturlor em ips umdolorsit, amet con sectetu rloremi psumdo lorsita metc onsectet urlor emipsu mdol orsitam. Etc onse ctet ur lor emi, psu md olo rsitame.\n\n#LO #RemipsuMdolorsitametc",
           "schedule": {
             "errors": [],
@@ -2306,7 +2306,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Loremipsu mdolo. Rsitamet consect. Etu rlore mips um dol orsitame tconsec tet ur loremips umdo'l orsitame. T cons ectetu rl ore MI psumdolor si tame tconsectet url oremip sumd olor, sit amet co nse c teturlo. Remips um dolorsita metconse cte turlorem. Ips umdo lors it amet cons ect etu rlorem ips umd olor sitamet con sec tet urlo remipsu.\n\n#LO #Remipsumdol",
           "schedule": {
             "errors": [],
@@ -2532,7 +2532,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Lo remi psumd olo r sitametco nsectetur lorem i psum do lor sitam etco ns. Ecte tu rlo r emi, ps um dol orsita. Me tconsec tetu rloremips umdo lors, ita metc onsec tet. Urloremips umdolo rsit ame tcon secteturl ore mipsum dolor.\n\n#LO #RemipsumdoLO",
           "schedule": {
             "errors": [],
@@ -2770,7 +2770,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "L ore mips umdo lor sitam etc. Onsectet ur lorem ip sumdo l orsita metcons ect etu r loremip sumdo lorsita metc on sectetu, rloremi psum dolorsit am etcon sectetu rlorem i psumdolo rsit ametcon se ct. Et url oremipsumd olo rsitametcon secte tur.\n\n#LO #RemipsUmDolo",
           "schedule": {
             "errors": [],
@@ -3008,7 +3008,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Loremips umdolo. Rsit ametcons. Ecte turlore mi psu mdo lo r sita metco nsec t etu rlor em ip. Sumdolorsi tam etcon sec tetur lor emip sumd. Olor sita?\n\n#LO #Remipsum",
           "schedule": {
             "errors": [],
@@ -3246,7 +3246,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Loremips'u mdolor sit am etcon se ct eturlore m ipsum dolors. Ita metconse ct. Eturlore mi. Psumdo lorsitam etcon sectet urlore mips umd olor sitam et co nsec te tur lore mipsu mdo lo. Rsi tametconsec tetur lore mi ps umd olor sita met co nsectetur.\n\n#LO #RemipsUmDolo",
           "schedule": {
             "errors": [],
@@ -3484,7 +3484,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Loremipsum dolor. Sitametc onsec te tu rlore mip sumd olors it amet cons, ect etur lo rem ipsumd olo rsi tametc. Onsect et urlore mip su mdo. Lo rsita metco nse ctet urlo remi ps umdolorsit am etco.\n\n#LO #RemipsUmDolo",
           "schedule": {
             "errors": [],
@@ -3722,7 +3722,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Lorem ipsumdo lorsitam et c onsect. Eturlo re mipsu mdolorsi tamet. Co nse ctet ur loremip sum dolors ita metconse ctetur lo, re mi p sumdo lo rs itametco. Nsecte tur lorem, ips umdo lor sitame.\n\n#LO #Remipsum",
           "schedule": {
             "errors": [],
@@ -3960,7 +3960,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Loremipsu mdolo r sitam. Etc ons ec teturl, oremipsu mdolorsit ametc o nsectetur lore mi ps. Umd olor sitame tcon sec tetur loremi, psum dolorsi tam etc on sec tetu rl o remip su mdolo rsi t ame tc onsectetu rlore mip sumdolo rsi tame.\n\n#LO #Remipsum",
           "schedule": {
             "errors": [],
@@ -4162,7 +4162,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Loremips'u mdolor sit am etcon se ct eturlore m ipsum dolors. Ita metconse ct. Eturlore mi. Psumdo lorsitam etcon sectet urlore mips umd olor sitam et co nsec te tur lore mipsu mdo lo. Rsi tametconsec tetur lore mi ps umd olor sita met co nsectetur.\n\n#LO #RemipsUmDolo",
           "schedule": {
             "errors": [],
@@ -4352,7 +4352,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Lo remi psumd olo r sitametco nsectetur lorem i psum do lor sitam etco ns. Ecte tu rlo r emi, ps um dol orsita. Me tconsec tetu rloremips umdo lors, ita metc onsec tet. Urloremips umdolo rsit ame tcon secteturl ore mipsum dolor.\n\n#LO #RemipsumdoLO",
           "schedule": {
             "errors": [],
@@ -4542,7 +4542,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "LO. Rem Ipsumdolorsit. Ame tco ns ecteturl. Ore mipsumdolo rsi tametcon. Sec tetur lo rem ipsum. Dolors itam etconse cte tur lore mi psu mdolors it ame tconse, cte tu rlo remip sumdo lo rs itame.\n\n#LO #RemipsumdoLO",
           "schedule": {
             "errors": [],
@@ -4732,7 +4732,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Lo remips um dol orsit. Am etcon. Sect etur lor emi psumd ol orsit amet con sec tetur lo remipsumd ol ors ita metc. Onse ct et urloremip sumdolo rsit amet c onsec teturlo, rem ipsumdo lorsit am et conse ct et urlo remi.\n\n#LO #RemipsumdoLO",
           "schedule": {
             "errors": [],
@@ -4922,7 +4922,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Lor emips umdolorsi tame tcon secte tur lorem ip sumdol orsi tamet consectetu rlore mips umdo. Lor sitametc onsect et url o remipsum, do lo r sita. Metco nsectetu rlo remip sum do lorsit ame tconsect: eturl orem ipsum dol or?\n\n#LO #RemipsumdoLO",
           "schedule": {
             "errors": [],
@@ -5106,7 +5106,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Loremipsu mdolo. Rsitamet consect. Etu rlore mips um dol orsitame tconsec tet ur loremips umdo'l orsitame. T cons ectetu rl ore MI psumdolor si tame tconsectet url oremip sumd olor, sit amet co nse c teturlo. Remips um dolorsita metconse cte turlorem. Ips umdo lors it amet cons ect etu rlorem ips umd olor sitamet con sec tet urlo remipsu.\n\n#LO #Remipsumdol",
           "schedule": {
             "errors": [],
@@ -5290,7 +5290,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Loremipsum dolor. Sitametc onsec te tu rlore mip sumd olors it amet cons, ect etur lo rem ipsumd olo rsi tametc. Onsect et urlore mip su mdo. Lo rsita metco nse ctet urlo remi ps umdolorsit am etco.\n\n#LO #RemipsUmDolo",
           "schedule": {
             "errors": [],
@@ -5480,7 +5480,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Lorem ipsumdo lorsitam et c onsect. Eturlo re mipsu mdolorsi tamet. Co nse ctet ur loremip sum dolors ita metconse ctetur lo, re mi p sumdo lo rs itametco. Nsecte tur lorem, ips umdo lor sitame.\n\n#LO #Remipsum",
           "schedule": {
             "errors": [],
@@ -5670,7 +5670,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Loremips umdolo. Rsit ametcons. Ecte turlore mi psu mdo lo r sita metco nsec t etu rlor em ip. Sumdolorsi tam etcon sec tetur lor emip sumd. Olor sita?\n\n#LO #Remipsum",
           "schedule": {
             "errors": [],
@@ -5854,7 +5854,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Loremip sumd olorsit ametcon sect eturlore mip sum dolors. Itamet consect eturl ore mipsumd. O lorsita metc. Onsec te turl oremips umdo lor sitame tconsecte turlo. Re mi psu mdo lorsi tame, tc on s ect et urlor, emi psumd olo rs itam et consectet url ore mipsumdol.\n\n#LO #RemipsuMdolorsi",
           "schedule": {
             "errors": [],
@@ -6038,7 +6038,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Loremipsu mdolo r sitam. Etc ons ec teturl, oremipsu mdolorsit ametc o nsectetur lore mi ps. Umd olor sitame tcon sec tetur loremi, psum dolorsi tam etc on sec tetu rl o remip su mdolo rsi t ame tc onsectetu rlore mip sumdolo rsi tame.\n\n#LO #Remipsum",
           "schedule": {
             "errors": [],
@@ -6228,7 +6228,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "LORE. Mip Sumdolorsit. Ametc ons ec tetur loremipsu mdo lorsitam'e tconse ctetu rlo remip sumdolor sitame. Tcons ecte tur lorem ipsumdolor sit am etconsect, eturlor em ip. Sumd ol ors itametcon, sect et url oremips umdolors.\n\n#LO #RemipsumdoLO",
           "schedule": {
             "errors": [],
@@ -6418,7 +6418,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "LO. Rem Ipsum. Dol orsi tam et consec. Tetur lor emips u mdol. Orsi tametc ons ect eturlor em ips umdolorsit, amet con sectetu rloremi psumdo lorsita metc onsectet urlor emipsu mdol orsitam. Etc onse ctet ur lor emi, psu md olo rsitame.\n\n#LO #RemipsuMdolorsitametc",
           "schedule": {
             "errors": [],
@@ -6644,7 +6644,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Image under asset_path.",
           "schedule": {
             "errors": [],
@@ -6812,7 +6812,7 @@
             "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
           ]
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Window that does not exist.",
           "schedule": {
             "errors": [
@@ -6956,7 +6956,7 @@
             "post_text and topic are both empty - nothing to post"
           ]
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "GENERATED from ''",
           "schedule": {
             "errors": [
@@ -7170,7 +7170,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "LinkedIn post with a first comment link.\n\n#one #two",
           "schedule": {
             "errors": [],
@@ -7408,7 +7408,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "LinkedIn post without a link.",
           "schedule": {
             "errors": [],
@@ -7576,7 +7576,7 @@
             "image_path does not exist: tests/fixtures/platform_golden/nope.png"
           ]
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Image that is not there.",
           "schedule": {
             "errors": [
@@ -7720,7 +7720,7 @@
             "2026-08-01 morning resolves to 2026-08-01T16:53:30+00:00, which is in the past. Buffer will not schedule it."
           ]
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Already in the past.",
           "schedule": {
             "errors": [
@@ -7892,7 +7892,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "GENERATED from 'a topic to generate from'",
           "schedule": {
             "errors": [],
@@ -8076,7 +8076,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Has a column nobody reads.",
           "schedule": {
             "errors": [],
@@ -8266,7 +8266,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Short post that carries a link.\n\n#ai",
           "schedule": {
             "errors": [],
@@ -8450,7 +8450,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           "schedule": {
             "errors": [],
@@ -8634,7 +8634,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "schedule": {
             "errors": [],
@@ -8818,7 +8818,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
           "schedule": {
             "errors": [],
@@ -9002,7 +9002,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Loremi Psumdol Orsi tam E tcons ecte tur lo remipsu mdolorsita me tco nsect. Eturlorem ip sumd olors itam etco.",
           "schedule": {
             "errors": [],
@@ -9192,7 +9192,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Lore m ipsum dolor sit ametc onse ctet urlo remips umd ol orsit amet consecte turlor emipsumdol. Ors itamet cons ect eturlor emi psumdol ors itametc onsect.",
           "schedule": {
             "errors": [],
@@ -9382,7 +9382,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Lore mips, umd olors itame t consecte turl oremips umdolor sit ametconsect etur. Lo rem ipsumdo lors itametco. Nsec teturlo.",
           "schedule": {
             "errors": [],
@@ -9572,7 +9572,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Loremipsum do lors it 77% am etc onsecte turlor emi psumd ol orsitame. Tco'n sect et urlo remi-psumdolors. Ita metco nse cte turlor. Emi psumdo lo rsitame tcons.",
           "schedule": {
             "errors": [],
@@ -9762,7 +9762,7 @@
           },
           "validate": []
         },
-        "<pinterest>": {
+        "<mastodon>": {
           "compose": "Loremip s UmDO lo rsi tamet consectet url o rem ips u mdol. Orsit amet cons ecte tu rlo remipsumd'o lor si tam 7777 etconsect.",
           "schedule": {
             "errors": [],

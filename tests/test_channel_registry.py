@@ -245,9 +245,8 @@ def test_no_module_but_platforms_defines_a_platform_string():
 
 # ─── The registry ───────────────────────────────────────────────────────────
 
-def test_the_registry_declares_exactly_linkedin_and_x():
-    assert set(channels.REGISTRY) == set(platforms.ALL) == {"linkedin", "x"}
-    assert "pinterest" not in channels.REGISTRY      # P5, not P1
+def test_the_registry_declares_exactly_linkedin_x_and_pinterest():
+    assert set(channels.REGISTRY) == set(platforms.ALL) == {"linkedin", "x", "pinterest"}
     for cid, channel in channels.REGISTRY.items():
         assert channel.id == cid
 
@@ -320,13 +319,13 @@ def test_a_declaration_that_breaks_the_field_coupling_is_refused():
 
 def test_get_refuses_an_undeclared_name():
     with pytest.raises(channels.UnknownChannel):
-        channels.get("pinterest")
+        channels.get("mastodon")
 
 
 def test_an_undeclared_name_resolves_to_the_old_else_branch():
     """Every P1 site was ``if linkedin: A else: B``. An undeclared name got B,
     and still does, so routing through the registry changed nothing for it."""
-    c = channels.resolve("pinterest")
+    c = channels.resolve("mastodon")
     assert c.link_placement == channels.NO_LINK
     assert c.text_limit is None
     assert c.identity_check == channels.BUFFER_HANDLE
@@ -395,4 +394,4 @@ def test_req_platform_refuses_a_voice_that_is_not_a_channel(client, monkeypatch)
                         platform_policy.PLATFORMS["x"])
     res = client.get("/api/scheduled/p/settings?platform=voiceonly")
     assert res.status_code == 400
-    assert "unknown platform 'voiceonly' - known: linkedin, x" in res.get_json()["error"]
+    assert "unknown platform 'voiceonly' - known: linkedin, pinterest, x" in res.get_json()["error"]

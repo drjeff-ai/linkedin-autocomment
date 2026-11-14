@@ -2053,7 +2053,29 @@ def scheduled_add_rows(profile_name):
     if not rows:
         return jsonify({"error": "No rows found"}), 400
 
-    accepted, rejected, skipped, warnings = csv_pipeline.queue_rows(rows, state)
+    # A channel whose rows name a board checks each one against the channel's
+    # boards as Buffer reports them now, so a typo is refused while the person
+    # is looking at the upload. If the boards cannot be read, the whole upload
+    # is refused and nothing is written: queueing unchecked boards would only
+    # move the refusal to send time.
+    boards = None
+    if channels.resolve(platform).board_lookup:
+        try:
+            resolved = pm.resolve_scheduled(profile_name, platform)
+            if not resolved.get("channel_id"):
+                raise buffer_client.BufferError(
+                    "no Buffer channel id is configured for %s"
+                    % channels.resolve(platform).label)
+            boards = buffer_client.channel_boards(resolved["channel_id"],
+                                       key=resolved.get("api_key"))
+        except (pm.ScheduledConfigError, buffer_client.BufferError) as exc:
+            return jsonify({"error": "Could not read the %s boards to check "
+                                     "this upload against, so nothing was "
+                                     "queued: %s"
+                                     % (channels.resolve(platform).label, exc)}), 400
+
+    accepted, rejected, skipped, warnings = csv_pipeline.queue_rows(
+        rows, state, boards=boards)
     return jsonify({
         "ok": True,
         "source": source,
