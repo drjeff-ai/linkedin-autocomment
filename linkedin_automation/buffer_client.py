@@ -386,6 +386,97 @@ def get_channel(channel_id, key=None, session=None, max_age=None):
     return channel
 
 
+#: Verbatim from pin.publisher ``pinterest_adapter.py`` (``_CHANNEL_BOARDS_QUERY``),
+#: the query its live captures were taken with.
+Q_CHANNEL_BOARDS = """
+query GetChannelBoards($channelId: ChannelId!) {
+  channel(input: { id: $channelId }) {
+    id
+    metadata {
+      ... on PinterestMetadata {
+        boards {
+          id
+          serviceId
+          name
+          url
+          description
+        }
+      }
+    }
+  }
+}
+"""
+
+
+class BoardLookupError(ValueError):
+    """A row's board does not name exactly one of the channel's boards."""
+
+
+class BoardNotFound(BoardLookupError):
+    """No board on the channel has the row's board name."""
+
+
+class BoardAmbiguous(BoardLookupError):
+    """Two or more boards on the channel share the row's board name."""
+
+
+def channel_boards(channel_id, key=None, session=None):
+    """The Pinterest channel's boards, as ``[{id, serviceId, name}]``.
+
+    Never cached: a board renamed or deleted in Pinterest must be seen on the
+    next call, and a pin sent to a board that no longer exists is a pin in the
+    wrong place. Raises :class:`BufferError` when Buffer returns no channel or
+    no Pinterest metadata for it (not a Pinterest channel); an empty board list
+    is returned as ``[]``.
+    """
+    body = gql(Q_CHANNEL_BOARDS, {"channelId": channel_id}, key=key,
+               label="getChannelBoards", session=session)
+    channel = (body.get("data") or {}).get("channel")
+    if not channel:
+        raise BufferError("Buffer returned no channel for id %r" % channel_id)
+    metadata = channel.get("metadata")
+    boards = metadata.get("boards") if isinstance(metadata, dict) else None
+    if boards is None:
+        raise BufferError(
+            "Buffer returned no Pinterest boards for channel %r: it is not a "
+            "Pinterest channel, or Buffer sent no board metadata." % channel_id)
+    return [{"id": str(b.get("id") or ""),
+             "serviceId": str(b.get("serviceId") or ""),
+             "name": str(b.get("name") or "")}
+            for b in boards if isinstance(b, dict)]
+
+
+def resolve_board(boards, name):
+    """The ``serviceId`` of the one board whose name is exactly ``name``.
+
+    Exact: case and whitespace count, so "Secret" or "secret " never resolves
+    to "secret". A near match is a guess, and a pin on the wrong board is a
+    public post in the wrong place. Returns Buffer's ``serviceId`` (what
+    ``metadata.pinterest.boardServiceId`` takes), never Buffer's own ``id``.
+
+    Raises :class:`BoardNotFound` listing every board name, or
+    :class:`BoardAmbiguous` when two boards share the name.
+    """
+    matches = [b for b in boards if b.get("name") == name]
+    if not matches:
+        names = ", ".join(repr(b.get("name")) for b in boards) or "none"
+        raise BoardNotFound(
+            "board %r is not on this Pinterest channel. Its boards are: %s. "
+            "The name must match exactly, including case and spaces."
+            % (name, names))
+    if len(matches) > 1:
+        raise BoardAmbiguous(
+            "board %r names %d boards on this Pinterest channel, so which one "
+            "is meant cannot be told. Rename one in Pinterest."
+            % (name, len(matches)))
+    service_id = (matches[0].get("serviceId") or "").strip()
+    if not service_id:
+        raise BoardNotFound(
+            "board %r has no serviceId in Buffer's answer, so a pin cannot be "
+            "addressed to it." % name)
+    return service_id
+
+
 Q_LIMITS = """
 query GetLimits($org: OrganizationId!) {
   account { organizations { id limits { scheduledPosts } } }

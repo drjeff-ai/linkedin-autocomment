@@ -11,8 +11,9 @@ What these pin, in the order the dispatch's gate lists them:
 * ``queue_rows`` validates for the row's own channel, so X's 280 limit is
   enforced at queue time and nothing over it is written anywhere.
 
-Extras are tested against a channel monkeypatched into ``channels.REGISTRY``:
-no shipped channel declares one yet.
+Extras are tested against a channel monkeypatched into ``channels.REGISTRY``,
+so these hold whatever the shipped channels declare. Pinterest (P5) is the
+first shipped channel with extras; its own behaviour is in test_pinterest.py.
 """
 
 import dataclasses
@@ -84,8 +85,14 @@ def test_a_duplicate_extra_name_is_refused():
                            channels.ExtraColumn("board", required=True)))
 
 
-def test_pinterest_stays_undeclared():
-    assert "pinterest" not in channels.REGISTRY
+def test_pinterest_declares_its_extras():
+    pin = channels.get("pinterest")
+    assert pin.extra_columns == (
+        channels.ExtraColumn("title", required=True, limit=100),
+        channels.ExtraColumn("alt_text", limit=500),
+        channels.ExtraColumn("board", required=True))
+    assert pin.alt_text_column == "alt_text"
+    assert pin.image_required and pin.board_lookup
 
 
 # --- row identity: nothing existing moves ----------------------------------

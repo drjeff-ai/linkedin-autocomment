@@ -12,9 +12,10 @@ voice lives in ``platform_policy.py``.
 
 LINKEDIN = "linkedin"
 X = "x"
+PINTEREST = "pinterest"
 
 #: Every platform id, in a fixed order.
-ALL = (LINKEDIN, X)
+ALL = (LINKEDIN, X, PINTEREST)
 
 #: The platform a call means when it names none. LinkedIn, for history: its
 #: settings are the flat ``scheduled_posting`` fields and its state file is the

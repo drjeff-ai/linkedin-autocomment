@@ -1122,7 +1122,7 @@ limit and the drain feeding X, but not yet the CLI's `--platform` or
 ### 10.9 Platform ids and the channel registry
 
 **One spelling of every platform id.** `linkedin_automation/platforms.py`
-defines `LINKEDIN`, `X`, `ALL` and `DEFAULT`. The older names
+defines `LINKEDIN`, `X`, `PINTEREST`, `ALL` and `DEFAULT`. The older names
 (`platform_policy.LINKEDIN/X`, `post_store.LINKEDIN/X`,
 `csv_pipeline.X_PLATFORM`, `profile_manager.SCHEDULED_DEFAULT_PLATFORM`) are
 imports of it, not second definitions.
@@ -1131,21 +1131,21 @@ imports of it, not second definitions.
 Shared publishing code reads the declaration's fields and never asks which
 channel it is. The fields are:
 
-| Field | LinkedIn | X | Read by |
-|---|---|---|---|
-| `label` | LinkedIn | X | validation and settings messages |
-| `link_placement` | `first_comment` | `body` | `compose_for_platform`, the queue's `first_comment` flag, the CLI's comment pass |
-| `text_limit` | none | 280 chars, a URL counts 23 | `validate_row` (length, and refusing topic-only rows), `schedule_pass`'s send-time check, both through `text_limit_problem` |
-| `identity_check` | `ungated` (the browser checks the account at comment time) | `buffer_handle` | `verify_identity`, `schedule_pass`'s production gate and identity guard, the dashboard's account header, settings view and schedule job |
-| `config_layout` | `flat` | `overlay` | `resolve_scheduled`, the settings view and save |
-| `key_env` | fixed `BUFFER_API_KEY` | each profile's overlay names it | `resolve_scheduled`, the settings view and save |
-| `state_path` | `legacy` | `platform_dir` | `PipelineState` |
-| `reconcile_statuses` | `sent` | `sent`, `error` | `reconcile_published` |
-| `extra_columns` | none | none | `row_key`, `unknown_columns`, `validate_row`, the dashboard form route |
-| `metadata_builder` | none | none | `schedule_pass`, through `channel_post_extras`: its result is createPost's `metadata` |
-| `alt_text_column` | none | none | `schedule_pass`, through `channel_post_extras`: the column's stripped value is the image's `altText` |
-| `image_required` | no | no | `validate_row` (`<label> needs an image: every pin is an image.`) |
-| `board_lookup` | no | no | `schedule_pass` (P3: refuses before any Buffer call; P5 resolves the board) |
+| Field | LinkedIn | X | Pinterest | Read by |
+|---|---|---|---|---|
+| `label` | LinkedIn | X | Pinterest | validation and settings messages |
+| `link_placement` | `first_comment` | `body` | `metadata` (the pin's `url`) | `compose_for_platform`, the queue's `first_comment` flag, the CLI's comment pass |
+| `text_limit` | none | 280 chars, a URL counts 23 | 500 chars, a URL counts its length | `validate_row` (length, and refusing topic-only rows), `schedule_pass`'s send-time check, both through `text_limit_problem` |
+| `identity_check` | `ungated` (the browser checks the account at comment time) | `buffer_handle` | `buffer_handle` | `verify_identity`, `schedule_pass`'s production gate and identity guard, the dashboard's account header, settings view and schedule job |
+| `config_layout` | `flat` | `overlay` | `overlay` | `resolve_scheduled`, the settings view and save |
+| `key_env` | fixed `BUFFER_API_KEY` | each profile's overlay names it | each profile's overlay names it | `resolve_scheduled`, the settings view and save |
+| `state_path` | `legacy` | `platform_dir` | `platform_dir` | `PipelineState` |
+| `reconcile_statuses` | `sent` | `sent`, `error` | `sent`, `error` | `reconcile_published` |
+| `extra_columns` | none | none | `title` (required, 100), `alt_text` (500), `board` (required) | `row_key`, `unknown_columns`, `validate_row`, the dashboard form route |
+| `metadata_builder` | none | none | `_pinterest_metadata` | `schedule_pass`, through `channel_post_extras`: its result is createPost's `metadata` |
+| `alt_text_column` | none | none | `alt_text` | `schedule_pass`, through `channel_post_extras`: the column's stripped value is the image's `altText` |
+| `image_required` | no | no | yes | `validate_row` (`<label> needs an image: every pin is an image.`) |
+| `board_lookup` | no | no | yes | `queue_rows` (the board list is required), `schedule_pass` (boards read once per pass, row resolved), the dashboard's CSV queue route (§10.10) |
 
 **Only fields something reads are declared.** The rest of the design
 (`media`, `drain`) arrives with the phase that first reads it; see
@@ -1157,8 +1157,8 @@ declared: a flat channel must fix its key, and an overlay channel must not.
 
 **Extra columns and row identity.** `extra_columns` is a tuple of
 `ExtraColumn(name, required=False, limit=None)`; a duplicate name is refused at
-declaration. No shipped channel declares one yet (Pinterest, the first, is not in
-the registry). For a channel that does:
+declaration. Pinterest (P5) is the first shipped channel that declares any. For
+a channel that does:
 - `validate_row` rejects a missing or whitespace-only required value, and a
   stripped value longer than `limit` characters, naming the channel, column,
   length and limit. It is never truncated.
@@ -1212,7 +1212,68 @@ page. A declared channel therefore appears in the panel with no template change.
   code before the registry existed. `tests/test_channel_extras.py` additionally
   recomputes every golden row's `row_key` with and without a channel.
 
-*Verification anchor (10.9): 2026-11-14, branch `p4-dashboard-registry`; the
-golden fixture is unchanged from P1; `tests/test_channel_metadata.py` asserts
-the P3 fields on the captured createPost input; `tests/test_dashboard_registry.py`
-renders a third channel's pill and drives its settings, CSV and banner.*
+*Verification anchor (10.9): 2026-11-14, branch `p5-pinterest`; the golden's
+undeclared probe is `mastodon` since P5's rename commit (DEC-021), otherwise
+unchanged from P1; `tests/test_channel_metadata.py` asserts the P3 fields on
+the captured createPost input; `tests/test_dashboard_registry.py` renders the
+three shipped pills and a test channel's, and drives its settings, CSV and
+banner.*
+
+### 10.10 Pinterest (P5)
+
+Pinterest is a declaration (`channels.PINTEREST`, after X in `REGISTRY`), not a
+branch. A pin goes through the same `schedule_pass`, the same `BUFFER_HANDLE`
+identity check and the same production gate as an X post.
+
+**The CSV.** `post_text` is the pin description (top-level `text`, at most 500
+characters). `title` (required, at most 100), `board` (required), `alt_text`
+(at most 500), `link` (or `first_comment_link`) and `image_path` (required: every
+pin is an image). A topic-only row is refused, as on X. Nothing generates pin
+text; `platform_policy` has no Pinterest entry.
+
+**The createPost input** is the shape `pin.publisher` sends
+(`buffer_publisher.build_create_post_input`): `text` is the description, the
+link never enters it; `metadata = {"pinterest": {"boardServiceId", "title",
+"url"}}`, `title` and `url` only when filled, from `_pinterest_metadata`, which
+refuses a blank board; the asset is `{"image": {"url", "metadata": {"altText"}}}`
+when `alt_text` is filled. `mode`, `schedulingType` and `dueAt` follow this
+repo (`customScheduled`, `automatic`, the row's window).
+
+**Board lookup.** `buffer_client.channel_boards(channel_id, key, session)` runs
+`pin.publisher`'s `GetChannelBoards` query and returns `[{id, serviceId, name}]`.
+It is never cached. `resolve_board(boards, name)` is pure and exact: case and
+whitespace count, so the row's `board` is matched unstripped. It returns the
+board's `serviceId`, never Buffer's `id`. No match raises `BoardNotFound`
+listing every board name; two matches raise `BoardAmbiguous`.
+
+- `queue_rows(..., boards=)`: a `board_lookup` channel with no board list raises
+  `BoardLookupUnavailable` before anything is written. A row whose board does
+  not resolve is rejected with the resolver's message.
+- `schedule_pass(..., fetch_boards=)`: after the identity gate and before any
+  upload, the boards are read once per pass (default `bc.channel_boards` with
+  the pass's key and session). A failed read raises `BoardLookupUnavailable`
+  (`Nothing was created`). It subclasses `IdentityRefused`, so every caller
+  that stops on an identity refusal stops on it (DEC-022). A row whose board no
+  longer resolves is `FAILED` at stage `board` (`STAGE_BOARD`), after
+  validation and before the HELD slot check, with no upload and no createPost.
+- The dashboard's queue route (`scheduled_add_rows`) reads the boards with the
+  profile's resolved Pinterest channel and key and passes them to
+  `queue_rows`. A missing config or a failed read refuses the whole upload with
+  the error, and nothing is written. The drain and the Schedule button pass
+  nothing new: `schedule_pass` reads the boards itself.
+
+**Profile config.** `scheduled_posting.platforms.pinterest = {buffer_channel_id,
+identity_slug, buffer_api_key_env, drain}`, an overlay like X's (§10.4). The
+identity is the Buffer channel's `name`, which for a Pinterest channel is the
+account's handle. The overlay's `drain` value is resolved but nothing reads it
+yet: the drain switch is per profile (§10.7).
+
+**One publisher per channel.** `pin.publisher` also publishes to Pinterest
+through Buffer. Once this repo posts pins to a channel, `pin.publisher`'s
+scheduled task for it (`PinPublisherBufferDrain`) stays Disabled: two
+publishers draining one channel would double-post.
+
+*Verification anchor (10.10): 2026-11-14, branch `p5-pinterest`;
+`tests/test_pinterest.py` compares the captured createPost input with
+`pin.publisher`'s shape and covers board lookup, the row rules, identity and the
+drain.*

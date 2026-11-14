@@ -282,16 +282,29 @@ def test_without_image_required_an_imageless_row_is_accepted(tmp_path, register)
                            platform=TEST_CHANNEL) == []
 
 
-# --- board_lookup, before a resolver exists ----------------------------------
+# --- board_lookup: boards that cannot be read ---------------------------------
 
-def test_a_board_lookup_channel_is_refused_before_any_buffer_call(tmp_path,
-                                                                  register):
+def test_a_board_lookup_channel_whose_boards_cannot_be_read_creates_nothing(
+        tmp_path, register):
+    """P5 (DEC-022) replaced P3's refuse-before-identity placeholder with a
+    board read after the identity gate. A read that fails still sends
+    nothing: identity ran once, nothing uploaded, nothing created."""
     register(_channel(board_lookup=True, identity_check=channels.BUFFER_HANDLE))
     fetches = []
+    session, uploads = _Session(), _Uploads()
+
+    def no_boards(*a, **k):
+        raise bc.BufferError("boards unreadable")
+
     with pytest.raises(cp.BoardLookupUnavailable, match="Nothing was created"):
-        _schedule([make_row()], _state(tmp_path), identity_slug="someone",
-                  fetch_channel=lambda *a, **k: fetches.append(a) or {"name": "someone"})
-    assert fetches == []
+        cp.schedule_pass(
+            [make_row(board="b")], "chan", _state(tmp_path), key="k",
+            session=session, upload=uploads, now=NOW, platform=TEST_CHANNEL,
+            generate=lambda *a, **k: "g", identity_slug="someone",
+            fetch_channel=lambda *a, **k: fetches.append(a) or {"name": "someone"},
+            fetch_boards=no_boards)
+    assert len(fetches) == 1
+    assert uploads.paths == [] and session.inputs == []
 
 
 def test_the_test_channel_differs_from_the_default_only_where_declared():

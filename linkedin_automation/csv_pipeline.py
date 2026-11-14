@@ -217,11 +217,6 @@ def read_rows(path):
         return parse_rows(f.read())
 
 
-class BoardLookupUnavailable(RuntimeError):
-    """A board_lookup channel reached schedule_pass with no way to resolve
-    its boards. Raised before any Buffer call, like :class:`IdentityRefused`."""
-
-
 def channel_post_extras(channel, row, board_service_id=None):
     """The createPost keywords this channel's declaration adds for ``row``.
 
@@ -243,6 +238,41 @@ class IdentityRefused(RuntimeError):
     Raised rather than returned so the whole run stops. A caller that ignored a
     return value would schedule to the wrong account, and there is no undo.
     """
+
+
+class BoardLookupUnavailable(IdentityRefused):
+    """A board_lookup channel's boards could not be read or were not given.
+
+    Raised before anything is uploaded or created. A subclass of
+    :class:`IdentityRefused` on purpose: it is the same kind of whole-run
+    refusal ("cannot tell where this would post"), and every caller that
+    already stops on an identity refusal stops on this one with no change.
+    """
+
+
+#: The FAILED stage for a row whose board does not resolve on the channel.
+STAGE_BOARD = "board"
+
+
+def row_board(row):
+    """The row's board name as written: not stripped, because the match is
+    exact and a name with a stray space is not the board's name."""
+    return str(row.get("board") or "")
+
+
+def board_problem(channel, row, boards):
+    """Why the row's board does not resolve to one board, or None.
+
+    Only for a ``board_lookup`` channel, and only when the row names a board
+    (an empty board is already refused by its extra column).
+    """
+    if not channel.board_lookup or not row_board(row).strip():
+        return None
+    try:
+        bc.resolve_board(boards, row_board(row))
+    except bc.BoardLookupError as exc:
+        return str(exc)
+    return None
 
 
 #: Every link on X is rewritten to a t.co shortlink of FIXED width, so a URL
@@ -712,10 +742,16 @@ def _verify_identity_linkedin(poster, expect_slug):
 
 # ─── queueing: rows enter as PENDING, before anything is scheduled ───────────
 
-def queue_rows(rows, state, now=None, tz=None):
+def queue_rows(rows, state, now=None, tz=None, boards=None):
     """Validate every row, then store only the ones that passed.
 
     Returns ``(accepted, rejected, skipped, warnings)``.
+
+    ``boards`` is the channel's board list (``bc.channel_boards``). A channel
+    that declares ``board_lookup`` requires it, and a row whose board does not
+    resolve to exactly one of them is rejected with the resolver's message.
+    Without it nothing is written: the board is checked while a person is
+    looking, not discovered at send time.
 
     Validation runs over the WHOLE batch before a single row is written, so a
     file with a bad row in the middle cannot leave half a calendar queued and
@@ -729,6 +765,12 @@ def queue_rows(rows, state, now=None, tz=None):
     tz = tz or bc.posting_timezone()
     accepted, rejected, skipped = [], [], []
     warnings = []
+    channel = channels.resolve((state.platform or "").lower())
+    if channel.board_lookup and boards is None:
+        raise BoardLookupUnavailable(
+            "refusing to queue on %s: its rows name a board, and no board "
+            "list was given to check them against. Nothing was written."
+            % channel.label)
 
     if rows:
         unknown = unknown_columns(rows[0], state.platform)
@@ -748,6 +790,9 @@ def queue_rows(rows, state, now=None, tz=None):
     checked = []
     for index, row in enumerate(rows, start=1):
         problems = validate_row(row, now=now, tz=tz, platform=state.platform)
+        board = board_problem(channel, row, boards)
+        if board:
+            problems.append(board)
         checked.append((index, row, problems))
 
     for index, row, problems in checked:
@@ -1069,8 +1114,15 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
                   upload=None, generate=None, profile_name=None, now=None,
                   max_new=None, slot_limit=None, platform=None,
                   identity_slug=None, fetch_channel=None,
-                  allow_production=False):
+                  allow_production=False, fetch_boards=None):
     """Validate and create every post that does not already have one.
+
+    On a ``board_lookup`` channel the boards are read once per pass, after the
+    identity gate and before any upload (``fetch_boards``, default
+    :func:`buffer_client.channel_boards` with this pass's key). A failed read
+    raises :class:`BoardLookupUnavailable` with nothing sent. A row whose board
+    no longer resolves is FAILED at stage ``board``, with no upload and no
+    createPost.
 
     ``max_new`` is the number of scheduled-post slots Buffer actually has free.
     Rows beyond it are marked HELD rather than sent, because sending them would
@@ -1084,15 +1136,6 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
     tz = bc.posting_timezone()
     platform = (platform or platforms.DEFAULT).lower()
     channel = channels.resolve(platform)
-
-    # A channel that names its board per row needs that board resolved before
-    # anything is sent, and nothing here resolves one yet. Refused before any
-    # Buffer call rather than sent without a board.
-    if channel.board_lookup:
-        raise BoardLookupUnavailable(
-            "refusing to schedule on %s: it declares board_lookup, and no "
-            "board resolver is wired into schedule_pass. Nothing was created."
-            % platform)
 
     # THE IDENTITY GUARD LIVES HERE, not in the CLI.
     #
@@ -1129,6 +1172,22 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
         logger.info("identity confirmed on %s: channel posts as %s",
                     platform, detail)
 
+    # A channel that names its board per row resolves it against the boards
+    # as they are NOW: a board renamed or deleted since the row was queued
+    # must not get a pin. Read once per pass, after the identity gate (the
+    # board list of a channel we would refuse is not worth a request), and
+    # before any upload. A failed read sends nothing: falling through to
+    # sending would be a pin with no board, or on the wrong one.
+    boards = None
+    if channel.board_lookup:
+        try:
+            boards = (fetch_boards or bc.channel_boards)(
+                channel_id, key=key, session=session)
+        except Exception as exc:
+            raise BoardLookupUnavailable(
+                "refusing to schedule on %s: its boards could not be read "
+                "(%s). Nothing was created." % (channel.label, exc)) from exc
+
     created = 0
     held = 0
     for row in rows:
@@ -1152,6 +1211,21 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
             result.update(status=FAILED, stage="validate", errors=problems)
             results.append(result)
             continue
+
+        # Resolved before the slot check: a row whose board is gone is not
+        # waiting for a slot, it can never go out as written.
+        board_service_id = None
+        if channel.board_lookup:
+            try:
+                board_service_id = bc.resolve_board(boards, row_board(row))
+            except bc.BoardLookupError as exc:
+                errors = [str(exc)]
+                state.update(rkey, status=FAILED, stage=STAGE_BOARD,
+                             errors=errors, text=row_preview(row))
+                result.update(status=FAILED, stage=STAGE_BOARD, errors=errors)
+                results.append(result)
+                logger.error("row %s failed at %s: %s", rkey, STAGE_BOARD, exc)
+                continue
 
         if max_new is not None and created >= max_new:
             # Validated and fine - there is simply no room. Held, not failed.
@@ -1197,7 +1271,7 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
 
             # Built before the upload: a builder that refuses the row (a
             # blank board) costs nothing and leaves nothing hosted.
-            extras = channel_post_extras(channel, row)
+            extras = channel_post_extras(channel, row, board_service_id)
 
             image_url = None
             image = row_image_path(row)

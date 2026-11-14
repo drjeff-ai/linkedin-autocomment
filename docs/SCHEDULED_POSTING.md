@@ -89,6 +89,53 @@ I think that's the wrong first question.",,#AI #FutureOfWork,S:\content\img\agen
 | `link` | The post's link, and the canonical name. LinkedIn posts it as the first comment; X puts it in the post. Leave blank for no link. |
 | `first_comment_link` | An accepted alias for `link`, kept forever; the two fill the same slot. Setting both to different values is rejected. |
 
+### Pinterest rows
+
+A Pinterest row is one pin. Upload it on the **Pinterest** pill, with these
+columns:
+
+```csv
+date,time_window,post_text,title,board,alt_text,link,image_path
+2036-09-14,morning,"The pin description.",A pin title,secret,A red square on white.,https://example.com/target,S:\content\img\pin.png
+```
+
+| column | notes |
+|---|---|
+| `post_text` | The pin **description**, at most 500 characters. Required: a topic-only row is refused, nothing generates pin text. |
+| `title` | Required, at most 100 characters. |
+| `board` | Required. The board's name exactly as Pinterest shows it: case and spaces count, `Secret` is not `secret`. |
+| `alt_text` | Optional, at most 500 characters. The image's alt text. |
+| `link` | Optional. The pin's destination link. It never goes in the description. |
+| `image_path` | Required: every pin is an image. |
+
+Nothing over a limit is truncated; the row is refused with the column, its
+length and the limit.
+
+**The board is checked twice.** At upload, the dashboard reads the channel's
+boards from Buffer and refuses a row whose board does not match exactly one of
+them, listing every board name. If the boards cannot be read, the whole upload
+is refused and nothing is queued. At schedule time the boards are read again,
+once per pass: a board deleted or renamed since the upload fails that row at
+stage `board`, and nothing is uploaded or sent for it.
+
+**Settings.** The profile needs `scheduled_posting.platforms.pinterest`:
+
+```json
+{"buffer_channel_id": "<the Buffer Pinterest channel id>",
+ "identity_slug": "<the channel's Buffer name, the Pinterest handle>",
+ "buffer_api_key_env": "BUFFER_API_KEY",
+ "drain": false}
+```
+
+The identity check and the production guard are X's: before anything is sent,
+Buffer's name for the channel must equal `identity_slug`.
+
+**`pin.publisher` stays disabled for any Pinterest channel this repo posts
+to.** It publishes to Pinterest through Buffer too, and two publishers on one
+channel double-post. Check before the first pin:
+`(Get-ScheduledTask -TaskName PinPublisherBufferDrain).State` must print
+`Disabled`.
+
 ### Time windows
 
 Interpreted in **`POST_TIMEZONE`** (default `America/Los_Angeles`), with a random
