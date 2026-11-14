@@ -217,6 +217,26 @@ def read_rows(path):
         return parse_rows(f.read())
 
 
+class BoardLookupUnavailable(RuntimeError):
+    """A board_lookup channel reached schedule_pass with no way to resolve
+    its boards. Raised before any Buffer call, like :class:`IdentityRefused`."""
+
+
+def channel_post_extras(channel, row, board_service_id=None):
+    """The createPost keywords this channel's declaration adds for ``row``.
+
+    Only what the channel declares is returned, so a channel with no
+    ``metadata_builder`` and no ``alt_text_column`` calls ``create_post``
+    exactly as it always has.
+    """
+    extras = {}
+    if channel.metadata_builder is not None:
+        extras["metadata"] = channel.metadata_builder(row, board_service_id)
+    if channel.alt_text_column is not None:
+        extras["alt_text"] = row.get(channel.alt_text_column)
+    return extras
+
+
 class IdentityRefused(RuntimeError):
     """The account a run would post as is not the one configured.
 
@@ -306,6 +326,9 @@ def validate_row(row, now=None, tz=None, platform=None):
         problems.append(str(exc))
 
     image = row_image_path(row)
+    if not image and channel.image_required:
+        problems.append("%s needs an image: every pin is an image."
+                        % channel.label)
     if image:
         if not os.path.isfile(image):
             problems.append("image_path does not exist: %s" % image)
@@ -1060,6 +1083,16 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
     results = []
     tz = bc.posting_timezone()
     platform = (platform or platforms.DEFAULT).lower()
+    channel = channels.resolve(platform)
+
+    # A channel that names its board per row needs that board resolved before
+    # anything is sent, and nothing here resolves one yet. Refused before any
+    # Buffer call rather than sent without a board.
+    if channel.board_lookup:
+        raise BoardLookupUnavailable(
+            "refusing to schedule on %s: it declares board_lookup, and no "
+            "board resolver is wired into schedule_pass. Nothing was created."
+            % platform)
 
     # THE IDENTITY GUARD LIVES HERE, not in the CLI.
     #
@@ -1074,7 +1107,7 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
     # LinkedIn is deliberately not gated here - see .dev/BACKLOG.md. Its
     # declaration's identity_check is UNGATED, so this branch simply does not
     # run and its schedule path is byte-identical.
-    if channels.resolve(platform).identity_check == channels.BUFFER_HANDLE:
+    if channel.identity_check == channels.BUFFER_HANDLE:
         # PRODUCTION GATE, before verify_identity - which itself is a live
         # Buffer call. verify_identity answers "is this the right channel";
         # this answers "did the caller declare authorization to touch a
@@ -1162,6 +1195,10 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
                 results.append(result)
                 continue
 
+            # Built before the upload: a builder that refuses the row (a
+            # blank board) costs nothing and leaves nothing hosted.
+            extras = channel_post_extras(channel, row)
+
             image_url = None
             image = row_image_path(row)
             if image:
@@ -1173,7 +1210,7 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
             # returns, a failure cannot tell us whether Buffer committed.
             in_flight = True
             post = bc.create_post(channel_id, body, image_url, when,
-                                  key=key, session=session)
+                                  key=key, session=session, **extras)
             in_flight = False
         except bc.BufferAtCapacity as exc:
             # Buffer said it is full. The row is correct; it waits.

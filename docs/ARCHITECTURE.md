@@ -937,6 +937,18 @@ drain, per channel (§10.7). `buffer_client.create_post()`
 (`buffer_client.py:431`) is the sole GraphQL mutation that actually creates a
 post; `schedule_pass` is its only live caller.
 
+**Metadata and alt text come from the declaration (P3).** `build_post_input`
+and `create_post` take `metadata=None, alt_text=None` after the old
+arguments. `metadata` is added under `"metadata"` only when it is not None.
+A non-blank stripped `alt_text` on a post with an image makes the asset
+`{"image": {"url": ..., "metadata": {"altText": ...}}}`; otherwise the asset is
+`{"image": {"url": ...}}` as before, because Buffer requires `altText`
+whenever the image's `metadata` is sent. `schedule_pass` passes these keywords
+only for a channel that declares a `metadata_builder` or `alt_text_column`
+(`channel_post_extras`), so LinkedIn and X call `create_post` with exactly the
+arguments they always did. The builder runs before the image upload, and one
+that raises fails the row at `prepare` with nothing hosted.
+
 **Where the link goes is a platform decision** (`compose_for_platform`, reading
 the channel's `link_placement`, §10.9), not a CSV column: LinkedIn's link is
 posted as a first comment by the browser pass (Buffer's `firstComment` field is
@@ -989,7 +1001,9 @@ comment pass, because the link already rode in the body; asking it to comment
 would imply a browser action that makes no sense for this platform. The CLI
 names this explicitly rather than trying and failing.
 
-*Verification anchor (10.2): 2026-11-11, branch `x1-x-csv-drain`;
+*Verification anchor (10.2): 2026-11-14, branch `p3-buffer-metadata`
+(metadata and alt text, `tests/test_channel_metadata.py`); before that
+2026-11-11, branch `x1-x-csv-drain`;
 `tests/test_channel_extras.py` carries the CSV-to-createPost `link` proof and the
 X queue-time limit, and `tests/test_x_drain.py` covers the topic-only refusal
 and the send-time length check.*
@@ -1128,10 +1142,15 @@ channel it is. The fields are:
 | `state_path` | `legacy` | `platform_dir` | `PipelineState` |
 | `reconcile_statuses` | `sent` | `sent`, `error` | `reconcile_published` |
 | `extra_columns` | none | none | `row_key`, `unknown_columns`, `validate_row`, the dashboard form route |
+| `metadata_builder` | none | none | `schedule_pass`, through `channel_post_extras`: its result is createPost's `metadata` |
+| `alt_text_column` | none | none | `schedule_pass`, through `channel_post_extras`: the column's stripped value is the image's `altText` |
+| `image_required` | no | no | `validate_row` (`<label> needs an image: every pin is an image.`) |
+| `board_lookup` | no | no | `schedule_pass` (P3: refuses before any Buffer call; P5 resolves the board) |
 
 **Only fields something reads are declared.** The rest of the design
-(`media`, `lookups`, `build_metadata`, `drain`) arrives with
-the phase that first reads it; see `.dev/PLATFORM_REFACTOR.md`.
+(`media`, `drain`) arrives with the phase that first reads it; see
+`PLATFORM_REFACTOR.md` in the strategy repo. The design's `build_metadata`
+and `lookups` arrived in P3 as `metadata_builder` and `board_lookup`.
 
 `config_layout` and `key_env` are checked against each other when a channel is
 declared: a flat channel must fix its key, and an overlay channel must not.
@@ -1182,5 +1201,6 @@ published to never needs a voice.
   code before the registry existed. `tests/test_channel_extras.py` additionally
   recomputes every golden row's `row_key` with and without a channel.
 
-*Verification anchor (10.9): 2026-11-08, branch `platform-p2-row-identity`; the
-golden fixture is unchanged from P1.*
+*Verification anchor (10.9): 2026-11-14, branch `p3-buffer-metadata`; the
+golden fixture is unchanged from P1; `tests/test_channel_metadata.py` asserts
+the new fields on the captured createPost input.*
