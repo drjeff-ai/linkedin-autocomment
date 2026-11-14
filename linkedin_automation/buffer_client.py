@@ -166,13 +166,33 @@ def due_at(date_str, window, rng=None, tz=None, now=None):
     return when.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def build_post_input(channel_id, text, image_url, due_at_iso):
-    """The createPost input, in the shape the live schema actually accepts."""
+def _image_asset(image_url, alt_text=None):
+    """One image asset. Alt text rides on it as ``metadata.altText``.
+
+    ``ImageMetadataInput.altText`` is required whenever ``metadata`` is sent
+    (pin.publisher's capture), so a blank alt text sends no ``metadata`` at
+    all rather than an empty one Buffer would refuse.
+    """
+    image = {"url": image_url}
+    alt = (alt_text or "").strip()
+    if alt:
+        image["metadata"] = {"altText": alt}
+    return {"image": image}
+
+
+def build_post_input(channel_id, text, image_url, due_at_iso, metadata=None,
+                     alt_text=None):
+    """The createPost input, in the shape the live schema actually accepts.
+
+    ``metadata`` is the channel's Buffer metadata (Pinterest's board, title and
+    link), added only when given, so a channel that declares none sends exactly
+    the keys it always has.
+    """
     payload = {
         "channelId": channel_id,
         "text": text,
         # Required and non-null even when there is no image.
-        "assets": [{"image": {"url": image_url}}] if image_url else [],
+        "assets": [_image_asset(image_url, alt_text)] if image_url else [],
         "mode": "customScheduled",
         "schedulingType": "automatic",
         "needsApproval": False,
@@ -180,6 +200,8 @@ def build_post_input(channel_id, text, image_url, due_at_iso):
     }
     # metadata.firstComment is NEVER set. On the free plan it does not degrade
     # gracefully - it rejects the whole post and nothing is created.
+    if metadata is not None:
+        payload["metadata"] = metadata
     return payload
 
 
@@ -428,9 +450,11 @@ def scheduled_slots(channel_id, key=None, session=None, max_age=None):
     return result
 
 
-def create_post(channel_id, text, image_url, due_at_iso, key=None, session=None):
+def create_post(channel_id, text, image_url, due_at_iso, key=None, session=None,
+                metadata=None, alt_text=None):
     """Schedule one post. Returns the created post dict, or raises."""
-    payload = build_post_input(channel_id, text, image_url, due_at_iso)
+    payload = build_post_input(channel_id, text, image_url, due_at_iso,
+                               metadata=metadata, alt_text=alt_text)
     logger.info("Buffer createPost: dueAt=%s image=%s chars=%d",
                 due_at_iso, bool(image_url), len(text))
     body = gql(M_CREATE_POST, {"input": payload}, key=key,

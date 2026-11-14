@@ -23,7 +23,7 @@ the generator never has to declare a channel it only publishes to.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from . import platform_policy
 from . import platforms
@@ -36,6 +36,10 @@ FIRST_COMMENT = "first_comment"
 BODY = "body"
 #: Nowhere. Only an undeclared name gets this.
 NO_LINK = "none"
+#: In the channel's Buffer metadata, never the body (Pinterest: the pin's
+#: destination link is ``metadata.pinterest.url``). The channel's
+#: ``metadata_builder`` places it.
+METADATA = "metadata"
 
 # ── identity_check: what is verified before a Buffer post is created ────────
 #: Nothing at schedule time. The account is confirmed by the browser, against
@@ -122,6 +126,16 @@ class Channel:
     #: hashed into the row's identity when filled. Last, with a default, so a
     #: declaration that predates it still constructs.
     extra_columns: Tuple[ExtraColumn, ...] = ()
+    #: ``(row, board_service_id) -> metadata or None``: the Buffer ``metadata``
+    #: this channel's createPost carries. None sends no ``metadata`` key.
+    metadata_builder: Optional[Callable[[dict, Optional[str]], Optional[dict]]] = None
+    #: The CSV column whose stripped value is the image's alt text.
+    alt_text_column: Optional[str] = None
+    #: A row with no image is refused (every pin is an image).
+    image_required: bool = False
+    #: The row names a board that is resolved to Buffer's board serviceId
+    #: before anything is sent.
+    board_lookup: bool = False
 
     def __post_init__(self):
         names = [column.name for column in self.extra_columns]
