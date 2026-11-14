@@ -1671,10 +1671,12 @@ header {
                platforms are separate stores and separate Buffer accounts, so
                a stale table beside a switched header would be a lie. -->
           <div style="display:flex;gap:0.35rem;justify-content:flex-end;margin-bottom:0.35rem">
-            <button class="schp-plat" data-plat="linkedin" onclick="schpSetPlatform('linkedin')"
-                    style="padding:0.25rem 0.7rem;border-radius:999px;font-size:0.75rem;cursor:pointer;border:1px solid var(--border)">LinkedIn</button>
-            <button class="schp-plat" data-plat="x" onclick="schpSetPlatform('x')"
-                    style="padding:0.25rem 0.7rem;border-radius:999px;font-size:0.75rem;cursor:pointer;border:1px solid var(--border)">X</button>
+            <!-- One pill per declared channel, in registry order (P4): the
+                 server renders them from channels.REGISTRY. -->
+            {% for c in channels %}
+            <button class="schp-plat" data-plat="{{ c.id }}" onclick="schpSetPlatform(this.dataset.plat)"
+                    style="padding:0.25rem 0.7rem;border-radius:999px;font-size:0.75rem;cursor:pointer;border:1px solid var(--border)">{{ c.label }}</button>
+            {% endfor %}
             <button onclick="schpToggleSettings()"
                     style="padding:0.25rem 0.7rem;border-radius:999px;font-size:0.75rem;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--text-dim)">Settings</button>
           </div>
@@ -3158,7 +3160,17 @@ const SCHP_BADGE = {
 // The platform the scheduled-posting section is acting on. LinkedIn by
 // default, so nothing about the existing section changes until someone
 // switches. Every request this section makes carries it.
-let schpPlatform = 'linkedin';
+//
+// The declared channels, rendered by the server from channels.REGISTRY in
+// registry order (P4). Labels and the default platform come from here, never
+// from a platform id written into this page.
+const SCHP_CHANNELS = {{ channels|tojson }};
+
+function schpChannel(id) {
+  return SCHP_CHANNELS.find(c => c.id === id) || {id: id, label: id};
+}
+
+let schpPlatform = SCHP_CHANNELS[0].id;
 
 // Whether the selected platform has a first-comment step. The SERVER decides
 // this (the queue payload's `first_comment`), so the UI cannot drift from what
@@ -3245,7 +3257,7 @@ async function schpLoadSettings() {
     keyEnvInput.value = d.buffer_api_key_env || '';
     keyEnvInput.disabled = !d.buffer_api_key_env_editable;
     keyEnvInput.title = d.buffer_api_key_env_editable ? '' :
-      "LinkedIn's Buffer key variable is fixed and cannot be changed per profile.";
+      schpChannel(schpPlatform).label + "'s Buffer key variable is fixed and cannot be changed per profile.";
 
     const status = document.getElementById('schpSetKeyEnvStatus');
     if (!d.buffer_api_key_env) {
@@ -3258,7 +3270,7 @@ async function schpLoadSettings() {
     const missingBox = document.getElementById('schpSettingsMissing');
     if (d.missing && d.missing.length) {
       missingBox.style.display = 'block';
-      missingBox.textContent = 'Missing for ' + (schpPlatform === 'x' ? 'X' : 'LinkedIn') +
+      missingBox.textContent = 'Missing for ' + schpChannel(schpPlatform).label +
         ': ' + d.missing.join(', ') + '. Scheduling will refuse until these are set.' +
         (d.key_env_problem ? ' ' + d.key_env_problem : '');
     } else {
@@ -3727,12 +3739,14 @@ async function schpAwaitJob(jobId, out) {
 // from config.missing, the list the Settings form reports, never from
 // config.problem: that prose is written for logs and names raw config paths.
 function schpPaintConfigWarn(warn, platform, config) {
-  const label = platform === 'x' ? 'X' : 'LinkedIn';
+  // From the queue payload's config, which the server fills from the channel
+  // declaration, so this function needs nothing but its arguments.
+  const label = config.label || platform;
   const missing = config.missing || [];
   const isEnvVar = f => / environment variable$/.test(f);
   // LinkedIn's schedule path does not need an identity, so a blank one is not
   // in `missing` - but check_production_guard refuses every browser job without it.
-  const blankLinkedInIdentity = platform === 'linkedin' && !config.identity_configured;
+  const blankLinkedInIdentity = config.config_layout === 'flat' && !config.identity_configured;
 
   if (!missing.length && !blankLinkedInIdentity) {
     warn.style.display = 'none';
@@ -3743,12 +3757,12 @@ function schpPaintConfigWarn(warn, platform, config) {
   const code = f => '<code>' + schpEsc(f) + '</code>';
   const lines = [];
   if (missing.length) {
-    lines.push(label + ' is missing ' + missing.map(code).join(', ') +
+    lines.push(schpEsc(label) + ' is missing ' + missing.map(code).join(', ') +
       '. Scheduling refuses until ' + (missing.length > 1 ? 'these are' : 'this is') + ' set.');
   }
   if (config.key_env_problem) lines.push(schpEsc(config.key_env_problem));
   if (blankLinkedInIdentity) {
-    lines.push('LinkedIn has no ' + code('identity_slug') +
+    lines.push(schpEsc(label) + ' has no ' + code('identity_slug') +
       '. Browser jobs, including the first-comment pass, refuse until it is set.');
   }
   if (blankLinkedInIdentity || missing.some(f => !isEnvVar(f))) {
@@ -3773,13 +3787,13 @@ async function loadScheduledQueue() {
 
     // The server decides the platform and whether it has a comment step, so a
     // stale local value cannot make the UI describe the wrong pipeline.
-    schpPlatform = d.platform || 'linkedin';
+    schpPlatform = d.platform || SCHP_CHANNELS[0].id;
     schpFirstComment = (d.first_comment !== false);
     schpPaintPlatform();
 
     // Identity, always visible - this section acts on a real account.
     const idLine = document.getElementById('schpIdentityLine');
-    const platLabel = schpPlatform === 'x' ? 'X' : 'LinkedIn';
+    const platLabel = schpChannel(schpPlatform).label;
     schpPaintConfigWarn(document.getElementById('schpConfigWarn'), schpPlatform, d.config);
     if (d.config.identity_configured) {
       idLine.innerHTML = 'On <strong>' + schpEsc(platLabel) + '</strong>, acts as ' +
