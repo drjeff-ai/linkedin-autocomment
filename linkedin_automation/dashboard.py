@@ -17,7 +17,7 @@ import subprocess
 import glob
 import logging
 from datetime import datetime
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, render_template
 from dotenv import load_dotenv
 
 from .comment_fields import normalize_comment_fields, comments_to_txt
@@ -1992,6 +1992,10 @@ def scheduled_queue(profile_name):
             # Surfaced here so the UI can disable the control and say why,
             # rather than letting someone turn it on and find out later.
             "identity_configured": bool(identity),
+            # From the channel declaration, so the banner names the channel
+            # and knows its config layout without a platform id in the page.
+            "label": channels.resolve(platform).label,
+            "config_layout": channels.resolve(platform).config_layout,
         },
     })
 
@@ -3031,10 +3035,19 @@ def scheduler_connector_urls(profile_name):
 
 # ─── Serve Frontend ──────────────────────────────────────────────────────────
 
+def _page_channels():
+    """The scheduled-posting panel's channel list, from the registry, in
+    registry order. The page renders its platform pills and labels from this,
+    so a declared channel appears with no change to the template."""
+    return [{"id": c.id, "label": c.label, "config_layout": c.config_layout,
+             "extra_columns": [e.name for e in c.extra_columns]}
+            for c in channels.REGISTRY.values()]
+
+
 @app.route('/')
 def index():
     """GET / — serve the single-page dashboard UI."""
-    return send_file(os.path.join(_PACKAGE_DIR, 'templates', 'dashboard.html'))
+    return render_template('dashboard.html', channels=_page_channels())
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────

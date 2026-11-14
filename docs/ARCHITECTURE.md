@@ -1185,6 +1185,17 @@ The dashboard's `_req_platform` validates against `channels.REGISTRY`, not the
 comment generator's `platform_policy.PLATFORMS`. A channel that is only
 published to never needs a voice.
 
+**The scheduled-posting panel is rendered from the registry (P4).** `GET /`
+renders `templates/dashboard.html` through Jinja with `channels`, a list of
+`{id, label, config_layout, extra_columns}` from `channels.REGISTRY` in
+registry order (`dashboard._page_channels`). The platform pills are one button
+per entry, the page's `SCHP_CHANNELS` is the same list, the default platform is
+its first id, and the settings and identity lines read labels through
+`schpChannel(id)`. The queue payload's `config` carries the channel's `label`
+and `config_layout`, so the unconfigured banner (`schpPaintConfigWarn`) names
+the channel and shows the flat-only identity line without a platform id in the
+page. A declared channel therefore appears in the panel with no template change.
+
 **Two tests hold this:**
 - `tests/test_channel_registry.py` parses `linkedin_automation/` and `tools/`
   and fails on any branch on a platform id outside `platforms.py` and
@@ -1201,6 +1212,7 @@ published to never needs a voice.
   code before the registry existed. `tests/test_channel_extras.py` additionally
   recomputes every golden row's `row_key` with and without a channel.
 
-*Verification anchor (10.9): 2026-11-14, branch `p3-buffer-metadata`; the
+*Verification anchor (10.9): 2026-11-14, branch `p4-dashboard-registry`; the
 golden fixture is unchanged from P1; `tests/test_channel_metadata.py` asserts
-the new fields on the captured createPost input.*
+the P3 fields on the captured createPost input; `tests/test_dashboard_registry.py`
+renders a third channel's pill and drives its settings, CSV and banner.*
