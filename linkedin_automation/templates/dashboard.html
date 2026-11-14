@@ -2186,6 +2186,7 @@ const REASON_LABEL = {
   low_quality: 'Below quality threshold',
   no_url: 'No URL (cannot link/comment)',
   evaluator_rejected: 'Rejected by evaluator',
+  stale: 'Draft expired (too old to post)',
   manual: 'Manually rejected'
 };
 
@@ -4317,6 +4318,9 @@ function fmtLastRun(job) {
   return `last: ${detail} · ${when}`;
 }
 
+// A job auto_mode keeps from running on its own (the cycle runs it instead).
+const SCHED_PAUSED_AUTO_MODE = 'Paused: auto mode runs this as part of the cycle.';
+
 async function loadScheduler() {
   if (!currentProfile) return;
   try {
@@ -4360,7 +4364,8 @@ async function loadScheduler() {
     document.getElementById('schedPostMax').value = pc.count_max ?? 8;
     document.getElementById('schedPostSkip').value = pc.skip_chance ?? 0.1;
     document.getElementById('schedPostWhen').textContent =
-      `Count ${pc.count_min}-${pc.count_max} per run. Today: ${fmtWindows(pc)}. ${fmtLastRun(pc)}`;
+      pc.paused_by === 'auto_mode' ? SCHED_PAUSED_AUTO_MODE
+        : `Count ${pc.count_min}-${pc.count_max} per run. Today: ${fmtWindows(pc)}. ${fmtLastRun(pc)}`;
 
     const sc = s.jobs.scrape;
     document.getElementById('schedScrapeEnabled').checked = !!sc.enabled;
@@ -4370,7 +4375,8 @@ async function loadScheduler() {
     document.getElementById('schedScrapeQuality').value = sc.min_quality ?? 10;
     document.getElementById('schedScrapeSkip').value = sc.skip_chance ?? 0.1;
     document.getElementById('schedScrapeWhen').textContent =
-      `Today: ${fmtWindows(sc)}. ${fmtLastRun(sc)}`;
+      sc.paused_by === 'auto_mode' ? SCHED_PAUSED_AUTO_MODE
+        : `Today: ${fmtWindows(sc)}. ${fmtLastRun(sc)}`;
 
     const cyc = s.jobs.auto_cycle;
     document.getElementById('schedCycleEnabled').checked = !!cyc.enabled;

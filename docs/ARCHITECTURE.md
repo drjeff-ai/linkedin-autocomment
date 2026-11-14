@@ -107,7 +107,7 @@ rendered list*, not *the HTTP response*. See §1.8.
 | `NEW` | Scraped, passed the cheap filters, not yet evaluated or drafted. **A work queue** — if something can never be acted on, it does not belong here. |
 | `GENERATED` | Has a draft comment on the record. Awaiting review and/or posting. |
 | `COMMENTED` | The comment was posted to LinkedIn. Terminal. |
-| `TRASH` | Rejected: not worth commenting on, with a reason. Always restorable. |
+| `TRASH` | Rejected: not worth commenting on, with a reason. Always restorable. `manual` and `stale` (a draft past `draft_max_age_days`, §6.2) are sticky against a re-scrape; the computed reasons are not. |
 | `UNAVAILABLE` | The post is **gone from LinkedIn** — deleted, taken down, made private. Terminal. |
 
 **Approved is not a status.** A draft is approved when its `GENERATED` record
@@ -185,7 +185,7 @@ that is the bug returning.
 | Post preview (step 05) | `GET /api/comments/<p>?include_reviewed=1` | store `by_status(GENERATED)` | none |
 | Generate input | `POST /api/comments/<p>/generate` | store `by_status(NEW)` | URL-bearing only |
 | Post input (manual) | `POST /api/post/<p>` | store `by_status(GENERATED)` | reviewed drafts sorted first |
-| Post input (scheduled) | `scheduler._fire_post_comments` | store `by_status(GENERATED)` | random count in `[count_min, count_max]` |
+| Post input (scheduled) | `scheduler._fire_post_comments`, auto_cycle post stage | store `by_status(GENERATED)` after stale expiry (§6.2) | random count in `[count_min, count_max]` |
 | `tools/reconcile_bins.py` | CLI | store | diagnostic only |
 
 **Writers:**
@@ -390,6 +390,7 @@ data/
     posts_db.json                ← THE STORE (source of truth) — LinkedIn
     <platform>/posts_db.json     ← a second platform's OWN store, e.g. x/posts_db.json
     profile_config.json          ← deep-merged over default_profile_config.json
+    scheduler_state.json         ← today's scheduler slots, last_fire, recent runs (§6.2)
     linkedin_timeline/
       ai_posts_<ts>.json           scrape output (also enrichment metadata)
       ai_posts_curated_<ts>.json   "Save & Continue" snapshot — NOT a generator input
@@ -582,6 +583,68 @@ profile silently enables it for every profile that never configured one.
 That is an account-safety problem, not a config bug — unexpected automated
 activity is exactly what gets an account restricted. Regression coverage is in
 `tests/test_scheduler.py` ("Config isolation between profiles").
+
+### 6.2 One engine process, persisted state, honest misses, stale drafts (S1)
+
+**One engine process.** `run.bat` runs `python -m linkedin_automation.dashboard`,
+whose `main()` calls `app.run(debug=True, use_reloader=True)`. The reloader runs
+the module twice: a parent that only watches files, and a serving child with
+`WERKZEUG_RUN_MAIN=true`. `_should_start_engines(use_reloader, environ)` starts
+the scheduler, the post drain and the first-comment drain only in the child, and
+logs `Background engines started in process <pid>`. The old guard,
+`not app.debug or ...`, was always true in the parent because `app.debug` is set
+only inside `app.run`, so production ran two schedulers and two of each drain
+(DEC-014, DEC-016). The scheduler status JSON carries `engine_pid`, the pid of the
+process serving it; it should equal the logged pid.
+
+**One predicate for tick and status.** `_job_runs_unattended(cfg, job_type)`
+(job enabled; `auto_cycle` only with `auto_mode`; `scrape` and `post_comments`
+not while `auto_mode` is on) gates both `_tick_profile` and `status()`. Before
+S1, `status()` rolled every enabled job, so opening the page recorded a MISSED
+run for jobs the tick never ran. A job `auto_mode` suppresses reports
+`paused_by: "auto_mode"` and windows with `fire_at: null`, `status: "paused"`;
+the dashboard shows `Paused: auto mode runs this as part of the cycle.`
+
+**Persisted state.** `Scheduler(state_path_fn=...)`; the dashboard injects
+`data/<profile>/scheduler_state.json`. It holds today's slots (job_type, window
+index, window, rolled_window, rolled_date, fire_at, will_skip, status),
+`last_fire` and `recent_runs`, written temp-then-`os.replace` after every roll,
+fire and record (including `run_now`), and read once per profile on first
+access. Slots rolled on another day are dropped; runs and `last_fire` are kept,
+so MIN_GAP holds across a restart and across midnight. A missing, unreadable or
+malformed file logs a warning and starts empty. With `state_path_fn=None` (every
+older test) nothing is read or written.
+
+**Roll rules.**
+
+| Case | Result | Note on the run record |
+|---|---|---|
+| Fresh roll, time after now | PENDING | — |
+| Fresh roll, time at or before now, window open | re-drawn uniformly in `[now, end]`, PENDING | — |
+| Fresh roll, window closed | MISSED | `dashboard started after this window closed` |
+| Slot loaded from the file, PENDING, time passed, window open | fires on the normal `_maybe_fire` path | — |
+| Slot loaded from the file, PENDING, time passed, window closed | MISSED | `dashboard was not running at the scheduled time` |
+
+A slot already FIRED, SKIPPED or MISSED today is loaded as such and never fires
+again. MIN_GAP, the skip chance and the browser-busy wait are unchanged; a
+PENDING slot deferred by them while the dashboard runs still fires late, as
+before.
+
+**Stale drafts.** `scheduler.draft_max_age_days` (default 3, top level beside
+`auto_mode`, 0 disables, no UI field). `scheduler.expire_stale_drafts` calls
+`PostStore.expire_stale_generated`, which moves GENERATED records whose
+`generated_at` (else `updated_at`) is more than that many days old to TRASH with
+reason `stale`, draft kept. Records with no or an unparseable timestamp are left
+alone. Both scheduled post paths call it before selecting: `_fire_post_comments`
+and the auto_cycle post stage (`dashboard._auto_cycle_job.run_post`, which reads
+the full profile config because its `job_cfg` is the auto_cycle section only).
+The manual Post button does not. `stale` is not in `AUTO_REASONS`, so a re-scrape
+leaves it in TRASH (`_is_sticky_trash`); `restore()` returns it to GENERATED with
+a fresh `generated_at`, so the next expiry does not take it straight back.
+
+*Verification anchor (6.2): 2026-11-13, branch `s1-scheduler`;
+`tests/test_scheduler_s1.py` covers the engine guard, status vs tick over 48
+simulated hours, persistence across a restart, the roll rules and stale expiry.*
 
 ---
 
