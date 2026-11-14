@@ -20,9 +20,14 @@ Randomization is the whole point — LinkedIn punishes mechanical automation, so
 * **Minimum gap.** Two real runs for a profile never fire closer together than
   :data:`MIN_GAP_MINUTES`.
 
-It never "catches up" missed runs: if the dashboard was closed when a window's
-rolled time passed, that window is simply marked missed for the day and the
-normal schedule resumes (catching up would batch actions unnaturally). Firing a
+It never "catches up" a window that has closed: if the dashboard was not running
+for the whole of a window, that window is marked missed for the day, with the
+true cause in the note, and the normal schedule resumes (catching up would batch
+actions unnaturally). A window that is still open is never lost to a late start
+or a restart: a fresh roll whose time has already passed re-draws between now
+and the window's end (S1), and the per-profile ``scheduler_state.json``
+(injected via ``state_path_fn``) carries today's slots, ``last_fire`` and the run
+history across a restart, so a slot that already fired is not fired again. Firing a
 real run goes through the injected executor callbacks, which use the dashboard's
 ``run_job`` / browser-task lock, so a scheduled run respects the "one browser
 task per profile" rule and never collides with a manual run.
@@ -99,6 +104,7 @@ touches it, in either direction.
 
 import os
 import copy
+import json
 import logging
 import random
 import threading
@@ -136,6 +142,10 @@ JOB_TYPES = ("post_comments", "scrape", "auto_cycle", "connector")
 DEFAULT_SCHEDULER = {
     "enabled": False,
     "auto_mode": False,
+    # GENERATED drafts older than this many days are moved to TRASH (reason
+    # ``stale``, restorable) before any scheduled post selects drafts (S1).
+    # 0 disables expiry. No UI field.
+    "draft_max_age_days": 3,
     "post_comments": {
         "enabled": True,
         "windows": [["08:00", "11:00"], ["14:00", "17:00"]],
@@ -191,6 +201,16 @@ ACTION_QUEUE_EMPTY = "queue_empty"
 ACTION_MISSED = "missed"
 ACTION_AT_CAP = "at_cap"
 
+# Run-record notes for a MISSED window. Each names the one true cause.
+NOTE_STARTED_AFTER_CLOSE = "dashboard started after this window closed"
+NOTE_DOWN_AT_FIRE_TIME = "dashboard was not running at the scheduled time"
+
+# What status() reports for a job auto_mode keeps from running on its own.
+PAUSED_BY_AUTO_MODE = "auto_mode"
+PAUSED = "paused"
+
+_SLOT_STATUSES = (PENDING, FIRED, SKIPPED, MISSED)
+
 
 # ─── Config helpers ───────────────────────────────────────────────────────────
 
@@ -238,6 +258,73 @@ def merge_scheduler_config(section: dict, profile: str = None) -> dict:
     return _deep_merge(DEFAULT_SCHEDULER, section or {})
 
 
+def _suppressed_by_auto_mode(cfg: dict, job_type: str) -> bool:
+    """True for a standalone job auto_mode's cycle already covers.
+
+    While auto_mode is on, the cycle runs scrape and post as its first and
+    third stages; the standalone scrape / post_comments jobs must not ALSO
+    fire unattended, or every cycle duplicates its own work (Dispatch 41).
+    Their ``enabled`` flags are left untouched, so turning auto_mode off
+    restores them exactly as configured.
+    """
+    return job_type in ("scrape", "post_comments") and bool(cfg.get("auto_mode"))
+
+
+def _job_runs_unattended(cfg: dict, job_type: str) -> bool:
+    """Would the unattended tick run this job? ``cfg`` is the merged scheduler
+    section. The master switches (``automations`` and ``cfg["enabled"]``) are
+    the caller's to check.
+
+    The one predicate both ``_tick_profile`` and ``status()`` use (S1): before
+    it, ``status()`` rolled jobs the tick never ran and recorded MISSED runs
+    for them every time the page was opened. ``run_now()`` bypasses it on
+    purpose.
+    """
+    job_cfg = cfg.get(job_type) or {}
+    if not job_cfg.get("enabled"):
+        return False
+    # auto_cycle never fires from the unattended tick loop without auto_mode,
+    # regardless of its own enabled flag.
+    if job_type == "auto_cycle" and not cfg.get("auto_mode"):
+        return False
+    if _suppressed_by_auto_mode(cfg, job_type):
+        return False
+    return True
+
+
+def draft_max_age_days(full_config: dict) -> float:
+    """``scheduler.draft_max_age_days`` from a profile's full config, merged
+    against :data:`DEFAULT_SCHEDULER`. A value that is not a non-negative
+    number falls back to the default, with a warning."""
+    cfg = merge_scheduler_config((full_config or {}).get("scheduler"))
+    raw = cfg.get("draft_max_age_days")
+    try:
+        days = float(raw)
+    except (TypeError, ValueError):
+        days = -1
+    if days < 0:
+        default = DEFAULT_SCHEDULER["draft_max_age_days"]
+        logger.warning("Scheduler: bad draft_max_age_days %r, using %s", raw, default)
+        return default
+    return days
+
+
+def expire_stale_drafts(store, full_config: dict, now=None) -> int:
+    """Trash GENERATED drafts older than the profile's ``draft_max_age_days``
+    (restorable, reason ``stale``) and save the store when any moved.
+
+    Called by both scheduled post paths, ``_fire_post_comments`` and the
+    auto_cycle post stage, before they select drafts, so the two cannot
+    disagree. The manual Post button does not call it.
+    """
+    days = draft_max_age_days(full_config)
+    moved = store.expire_stale_generated(days, now=now, save=True)
+    if moved:
+        logger.info("Scheduler: %d GENERATED draft(s) older than %s day(s) "
+                    "moved to TRASH (stale)", moved, days)
+    return moved
+
+
 def _parse_hhmm(value: str):
     """Parse ``"HH:MM"`` into ``(hour, minute)``; tolerate bad input as midnight."""
     try:
@@ -246,6 +333,83 @@ def _parse_hhmm(value: str):
     except (ValueError, AttributeError):
         logger.warning("Scheduler: bad time %r, treating as 00:00", value)
         return 0, 0
+
+
+def _window_bounds(window, day):
+    """``(start, end)`` datetimes of an ``["HH:MM", "HH:MM"]`` window on ``day``.
+    An end before the start collapses to the start."""
+    start_h, start_m = _parse_hhmm(window[0])
+    end_h, end_m = _parse_hhmm(window[1])
+    start_dt = datetime.combine(day, dtime(start_h, start_m))
+    end_dt = datetime.combine(day, dtime(end_h, end_m))
+    return start_dt, max(start_dt, end_dt)
+
+
+_PERSISTED_SLOT_KEYS = ("job_type", "window_index", "window", "rolled_window",
+                        "rolled_date", "fire_at", "will_skip", "status")
+
+
+def _state_to_json(state):
+    """The JSON form of one profile's runtime state (see ``_state_from_json``)."""
+    slots = []
+    for slot in state["slots"].values():
+        if not slot.get("rolled_date"):
+            continue  # created but never rolled: nothing to carry over
+        out = {k: slot.get(k) for k in _PERSISTED_SLOT_KEYS}
+        out["fire_at"] = slot["fire_at"].isoformat() if slot.get("fire_at") else None
+        slots.append(out)
+    last = state.get("last_fire")
+    return {
+        "version": 1,
+        "slots": slots,
+        "last_fire": last.isoformat() if last else None,
+        "recent_runs": list(state.get("recent_runs") or []),
+    }
+
+
+def _state_from_json(raw, today):
+    """Rebuild runtime state from the file's JSON. Raises ``ValueError`` (or
+    ``TypeError``/``KeyError``) on any malformed part; the caller then starts
+    empty. Slots rolled on a day other than ``today`` are dropped; a PENDING
+    slot is marked ``loaded`` so its first evaluation can tell a time that
+    passed while the dashboard was down from one that passed while it ran."""
+    if not isinstance(raw, dict):
+        raise ValueError("state is not an object")
+    slots = {}
+    for item in raw.get("slots") or []:
+        if not isinstance(item, dict):
+            raise ValueError("slot is not an object")
+        job_type = item["job_type"]
+        idx = item["window_index"]
+        status = item["status"]
+        window = item["window"]
+        rolled_window = item["rolled_window"]
+        if job_type not in JOB_TYPES or not isinstance(idx, int) \
+                or status not in _SLOT_STATUSES:
+            raise ValueError(f"bad slot {job_type!r}/{idx!r}/{status!r}")
+        if not (isinstance(window, list) and len(window) == 2
+                and isinstance(rolled_window, list) and len(rolled_window) == 2):
+            raise ValueError(f"bad window in slot {job_type}/{idx}")
+        if item["rolled_date"] != today:
+            continue
+        slots[(job_type, idx)] = {
+            "job_type": job_type, "window_index": idx,
+            "window": list(window), "rolled_window": list(rolled_window),
+            "rolled_date": today,
+            "fire_at": datetime.fromisoformat(item["fire_at"]),
+            "will_skip": bool(item["will_skip"]),
+            "status": status,
+            "loaded": status == PENDING,
+        }
+    last = raw.get("last_fire")
+    runs = raw.get("recent_runs") or []
+    if not isinstance(runs, list) or not all(isinstance(r, dict) for r in runs):
+        raise ValueError("recent_runs is not a list of objects")
+    return {
+        "slots": slots,
+        "last_fire": datetime.fromisoformat(last) if last else None,
+        "recent_runs": runs[-MAX_RECENT_RUNS:],
+    }
 
 
 def _default_list_profiles():
@@ -357,13 +521,18 @@ class Scheduler:
       search results.
     * ``browser_available(profile) -> bool`` — the browser-task lock check.
     * ``list_profiles() -> list[str]`` and ``config_fn(profile) -> dict``.
+    * ``state_path_fn(profile) -> str`` — where the profile's schedule state
+      (today's slots, ``last_fire``, ``recent_runs``) is persisted. ``None``
+      (the default, and every test that does not ask for it) means nothing is
+      read or written; the dashboard injects ``data/<profile>/scheduler_state.json``.
     """
 
     def __init__(self, *, now_fn=None, rng=None, tick_seconds=TICK_SECONDS,
                  min_gap_minutes=MIN_GAP_MINUTES, submit_post_job=None,
                  submit_scrape_job=None, submit_cycle_job=None,
                  submit_connector_job=None,
-                 browser_available=None, list_profiles=None, config_fn=None):
+                 browser_available=None, list_profiles=None, config_fn=None,
+                 state_path_fn=None):
         self._now = now_fn or datetime.now
         self._rng = rng or random
         self._tick_seconds = tick_seconds
@@ -375,6 +544,7 @@ class Scheduler:
         self._browser_available = browser_available or (lambda profile: True)
         self._list_profiles = list_profiles or _default_list_profiles
         self._config_fn = config_fn or pm.get_profile_config
+        self._state_path_fn = state_path_fn
 
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -436,27 +606,13 @@ class Scheduler:
         cfg = merge_scheduler_config(full_config.get("scheduler"), profile)
         if not cfg.get("enabled"):
             return
-        state = self._profile_state(profile)
+        state = self._profile_state(profile, now)
         for job_type in JOB_TYPES:
-            job_cfg = cfg.get(job_type, {})
-            if not job_cfg.get("enabled"):
-                continue
-            # auto_cycle never fires from the unattended tick loop without
-            # auto_mode, regardless of its own enabled flag.
-            # run_now() bypasses this deliberately, same as it already
+            # run_now() bypasses this predicate deliberately, the same way it
             # bypasses enabled - see run_now's docstring.
-            if job_type == "auto_cycle" and not cfg.get("auto_mode"):
+            if not _job_runs_unattended(cfg, job_type):
                 continue
-            # While auto_mode is on, the cycle already runs scrape and post
-            # as its first and third stages - the standalone scrape /
-            # post_comments jobs must not ALSO fire unattended, or every
-            # cycle duplicates its own scrape and post as a second run.
-            # Their own `enabled` flag (and every other config value) is
-            # left untouched here, so turning auto_mode back off restores
-            # them exactly as configured, with no separate re-toggle.
-            # run_now() bypasses this too, for the same reason as above.
-            if job_type in ("scrape", "post_comments") and cfg.get("auto_mode"):
-                continue
+            job_cfg = cfg.get(job_type, {})
             for idx, window in enumerate(job_cfg.get("windows") or []):
                 slot = self._slot(state, job_type, idx, window)
                 self._ensure_rolled(profile, state, slot, job_cfg, now)
@@ -464,12 +620,73 @@ class Scheduler:
 
     # ── per-slot state ────────────────────────────────────────────────────────
 
-    def _profile_state(self, profile):
+    def _profile_state(self, profile, now=None):
+        """The profile's runtime state, loaded from its state file on first
+        access when persistence is injected."""
         st = self._state.get(profile)
         if st is None:
-            st = {"slots": {}, "last_fire": None, "recent_runs": []}
+            st = self._load_state(profile, now or self._now())
             self._state[profile] = st
         return st
+
+    # ── persistence (S1) ──────────────────────────────────────────────────────
+    #
+    # Without it a restart forgot which of today's slots had fired, the
+    # last_fire behind MIN_GAP, and the run history. The file is written after
+    # every roll, fire and record, atomically, and read once per profile.
+
+    def _state_path(self, profile):
+        if self._state_path_fn is None:
+            return None
+        return self._state_path_fn(profile)
+
+    def _load_state(self, profile, now):
+        """Read the profile's state file. Slots rolled on another day are
+        dropped; runs and ``last_fire`` are kept. A missing, unreadable or
+        malformed file logs a warning and starts empty. Never raises."""
+        empty = {"slots": {}, "last_fire": None, "recent_runs": []}
+        path = self._state_path(profile)
+        if path is None:
+            return empty
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+            state = _state_from_json(raw, now.date().isoformat())
+        except FileNotFoundError:
+            logger.warning("Scheduler[%s] no state file at %s; starting empty",
+                           profile, path)
+            return empty
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            logger.warning("Scheduler[%s] state file %s unreadable (%s); "
+                           "starting empty", profile, path, exc)
+            return empty
+        logger.info("Scheduler[%s] loaded state: %d slot(s) for today, %d run(s)",
+                    profile, len(state["slots"]), len(state["recent_runs"]))
+        return state
+
+    def _save_state(self, profile):
+        """Write the profile's state atomically (temp file, then ``os.replace``).
+        A failed write is logged, never raised: the tick must go on."""
+        path = self._state_path(profile)
+        if path is None:
+            return
+        state = self._state.get(profile)
+        if state is None:
+            return
+        tmp = path + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(_state_to_json(state), f, indent=2)
+            os.replace(tmp, path)
+        except (OSError, TypeError, ValueError):
+            logger.exception("Scheduler[%s] could not write state file %s",
+                             profile, path)
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    logger.warning("Scheduler[%s] could not remove %s", profile, tmp)
 
     def _slot(self, state, job_type, idx, window):
         """Get-or-create the runtime slot for one (job, window index)."""
@@ -490,29 +707,41 @@ class Scheduler:
     def _roll(self, slot, job_cfg, now):
         """Re-roll a slot for today: random fire time within its window + skip flag.
 
-        If the freshly rolled time is already in the past (the dashboard started
-        after the window, or after that minute), the slot is MISSED — we never
-        fire late (no catch-up). Otherwise it is PENDING.
+        If the freshly rolled time is already at or before now (the dashboard
+        started late in the window, or after it):
+
+        * window still open: re-draw uniformly between now and the window end,
+          PENDING. A late start inside a window no longer loses that run.
+        * window closed: MISSED. We never fire after the window (no catch-up).
         """
         today = now.date()
-        start_h, start_m = _parse_hhmm(slot["window"][0])
-        end_h, end_m = _parse_hhmm(slot["window"][1])
-        start_dt = datetime.combine(today, dtime(start_h, start_m))
-        end_dt = datetime.combine(today, dtime(end_h, end_m))
-        if end_dt < start_dt:
-            end_dt = start_dt
+        start_dt, end_dt = _window_bounds(slot["window"], today)
         span = int((end_dt - start_dt).total_seconds())
         offset = self._rng.randint(0, span) if span > 0 else 0
         slot["fire_at"] = start_dt + timedelta(seconds=offset)
         slot["will_skip"] = self._rng.random() < float(job_cfg.get("skip_chance", 0.1))
         slot["rolled_date"] = today.isoformat()
         slot["rolled_window"] = list(slot["window"])
-        slot["status"] = MISSED if slot["fire_at"] <= now else PENDING
+        slot["loaded"] = False
+        if slot["fire_at"] > now:
+            slot["status"] = PENDING
+        elif now < end_dt:
+            remaining = int((end_dt - now).total_seconds())
+            slot["fire_at"] = now + timedelta(seconds=self._rng.randint(0, remaining))
+            slot["status"] = PENDING
+        else:
+            slot["status"] = MISSED
 
     def _ensure_rolled(self, profile, state, slot, job_cfg, now):
-        """Roll the slot if it hasn't been rolled today (or its window changed)."""
+        """Roll the slot if it hasn't been rolled today (or its window changed).
+
+        A PENDING slot loaded from the state file whose time passed while the
+        dashboard was down is left PENDING while its window is open (the
+        normal ``_maybe_fire`` path fires it) and is MISSED once it has closed.
+        """
         today = now.date().isoformat()
         if slot["rolled_date"] == today and slot["rolled_window"] == slot["window"]:
+            self._resolve_loaded(profile, state, slot, now)
             return
         self._roll(slot, job_cfg, now)
         logger.info(
@@ -522,7 +751,25 @@ class Scheduler:
             slot["fire_at"].strftime("%H:%M:%S"), slot["will_skip"], slot["status"])
         if slot["status"] == MISSED:
             self._record(state, slot, now, action=ACTION_MISSED,
-                         note="dashboard not running at rolled time")
+                         note=NOTE_STARTED_AFTER_CLOSE)
+        self._save_state(profile)
+
+    def _resolve_loaded(self, profile, state, slot, now):
+        """First evaluation of a slot read from the state file."""
+        if not slot.get("loaded"):
+            return
+        slot["loaded"] = False
+        if slot["status"] != PENDING or now < slot["fire_at"]:
+            return
+        _, end_dt = _window_bounds(slot["window"], now.date())
+        if now < end_dt:
+            return  # still open: _maybe_fire fires it on the normal path
+        slot["status"] = MISSED
+        logger.info("Scheduler[%s] %s window %s MISSED: %s", profile,
+                    slot["job_type"], slot["window_index"], NOTE_DOWN_AT_FIRE_TIME)
+        self._record(state, slot, now, action=ACTION_MISSED,
+                     note=NOTE_DOWN_AT_FIRE_TIME)
+        self._save_state(profile)
 
     def _maybe_fire(self, profile, state, slot, job_type, job_cfg, now):
         """Fire (or skip/defer) a pending slot whose rolled time has arrived."""
@@ -534,6 +781,7 @@ class Scheduler:
             logger.info("Scheduler[%s] %s window %s SKIPPED (random skip roll)",
                         profile, job_type, slot["window_index"])
             self._record(state, slot, now, action=ACTION_SKIPPED)
+            self._save_state(profile)
             return
 
         # Respect the browser lock: an active manual (or other scheduled) task
@@ -554,6 +802,7 @@ class Scheduler:
         if result.get("action") == ACTION_FIRED:
             state["last_fire"] = now
         self._record(state, slot, now, **result)
+        self._save_state(profile)
 
     # ── actions ───────────────────────────────────────────────────────────────
 
@@ -569,8 +818,10 @@ class Scheduler:
         return {"action": "error", "count": 0, "note": f"unknown job {job_type}"}
 
     def _fire_post_comments(self, profile, job_cfg, now):
-        """Post a random count of GENERATED drafts; no-op when the queue is empty."""
+        """Post a random count of GENERATED drafts; no-op when the queue is empty.
+        Drafts older than ``draft_max_age_days`` are trashed first (S1)."""
         store = post_store.load_synced_store(profile)
+        expire_stale_drafts(store, self._config_fn(profile) or {}, now)
         generated = store.by_status(post_store.GENERATED)
         if not generated:
             logger.info("Scheduler[%s] post_comments: No comments queued, "
@@ -724,23 +975,37 @@ class Scheduler:
 
     def status(self, profile):
         """Full scheduler state for a profile: master flag, per-job windows with
-        today's rolled fire time + skip flag, count ranges, and recent runs."""
+        today's rolled fire time + skip flag, count ranges, and recent runs.
+
+        Opening it rolls only what the tick itself would run (the shared
+        ``_job_runs_unattended`` predicate), so viewing the page can never
+        record a run for a job that is not scheduled to run. A job auto_mode
+        suppresses reports ``paused_by: "auto_mode"`` and paused windows."""
         with self._lock:
             now = self._now()
             full_config = self._config_fn(profile) or {}
             automations = pm.automations_enabled(full_config)
             cfg = merge_scheduler_config(full_config.get("scheduler"), profile)
-            state = self._profile_state(profile)
+            state = self._profile_state(profile, now)
+            masters_on = bool(automations and cfg.get("enabled"))
             jobs = {}
             for job_type in JOB_TYPES:
                 job_cfg = cfg.get(job_type, {})
+                paused_by = (PAUSED_BY_AUTO_MODE
+                             if _suppressed_by_auto_mode(cfg, job_type) else None)
+                rolls = masters_on and _job_runs_unattended(cfg, job_type)
                 windows = []
                 for idx, window in enumerate(job_cfg.get("windows") or []):
                     slot = self._slot(state, job_type, idx, window)
-                    # No rolling while the master switch is off: a roll can
-                    # record a MISSED run, and nothing runs at all here.
-                    if automations and cfg.get("enabled") and job_cfg.get("enabled"):
+                    # No rolling unless the tick would run this job: a roll
+                    # can record a MISSED run.
+                    if rolls:
                         self._ensure_rolled(profile, state, slot, job_cfg, now)
+                    if paused_by:
+                        windows.append({"index": idx, "window": list(window),
+                                        "fire_at": None, "will_skip": False,
+                                        "status": PAUSED})
+                        continue
                     windows.append({
                         "index": idx,
                         "window": list(window),
@@ -753,6 +1018,7 @@ class Scheduler:
                      if r.get("job_type") == job_type), None)
                 jobs[job_type] = {
                     "enabled": job_cfg.get("enabled", False),
+                    "paused_by": paused_by,
                     "windows": windows,
                     "count_min": job_cfg.get("count_min"),
                     "count_max": job_cfg.get("count_max"),
@@ -765,6 +1031,10 @@ class Scheduler:
                 }
             return {
                 "running": self.is_running(),
+                # The process serving this status. With the engines started
+                # only in the serving process (S1), it equals the pid in the
+                # "Background engines started in process <pid>" log line.
+                "engine_pid": os.getpid(),
                 "automations_enabled": automations,
                 "enabled": cfg.get("enabled", False),
                 "auto_mode": cfg.get("auto_mode", False),
@@ -795,10 +1065,11 @@ class Scheduler:
                         "note": pm.automations_disabled_message(profile)}
             cfg = merge_scheduler_config(full_config.get("scheduler"), profile)
             result = self._fire(profile, job_type, cfg.get(job_type, {}), now)
-            state = self._profile_state(profile)
+            state = self._profile_state(profile, now)
             slot = {"job_type": job_type, "window_index": -1,
                     "window": None, "fire_at": now}
             self._record(state, slot, now, manual=True, **result)
+            self._save_state(profile)
             return result
 
     def toggle(self, profile, target, enabled):

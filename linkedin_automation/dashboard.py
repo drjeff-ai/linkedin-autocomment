@@ -377,6 +377,13 @@ def _auto_cycle_job(job_id, profile_name, job_cfg):
             return dict(skipped, posted=0)
         try:
             store = post_store.load_synced_store(profile_name)
+            # job_cfg is the auto_cycle section only; draft_max_age_days sits
+            # at the top of the scheduler section, so read the full config.
+            expired = scheduler_mod.expire_stale_drafts(
+                store, pm.get_profile_config(profile_name), datetime.now())
+            if expired:
+                log_job(job_id, "Moved %d stale draft(s) to Trash before posting."
+                        % expired)
             generated = store.by_status(post_store.GENERATED)
             if not generated:
                 log_job(job_id, "No comments queued; nothing to post.")
@@ -2553,6 +2560,8 @@ scheduler_engine = scheduler_mod.Scheduler(
     submit_connector_job=_sched_submit_connector_job,
     browser_available=can_start_browser_task,
     list_profiles=lambda: list(pm.list_profiles().get("profiles", {}).keys()),
+    # Today's schedule and run history survive a restart (S1).
+    state_path_fn=lambda p: os.path.join(pm.get_data_dir(p), "scheduler_state.json"),
 )
 
 
@@ -3030,16 +3039,34 @@ def index():
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
-if __name__ == '__main__':
+def _should_start_engines(use_reloader: bool, environ) -> bool:
+    """Should this process start the background engines?
+
+    With the reloader on, werkzeug runs this module twice: a parent that only
+    watches files and restarts, and a serving child with
+    ``WERKZEUG_RUN_MAIN=true``. Only the child may start engines. The old
+    guard, ``not app.debug or ...``, was always true in the parent, because
+    ``app.debug`` is only set inside ``app.run``: the parent ran a second
+    scheduler and second drains (DEC-016).
+    """
+    return (not use_reloader) or environ.get("WERKZEUG_RUN_MAIN") == "true"
+
+
+def main():
+    """Start the dashboard: engines in the serving process only, then Flask."""
     pm.auto_migrate_from_env()
     print("\n" + "=" * 50)
     print("  LinkedIn Automation Dashboard")
     print("  http://localhost:6500")
     print("=" * 50 + "\n")
-    # Start the background scheduler. use_reloader is left on (Flask debug), so
-    # only start in the reloader's child process to avoid two scheduler threads.
-    if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+    use_reloader = True
+    if _should_start_engines(use_reloader, os.environ):
         scheduler_engine.start()
         drain_engine.start()
         first_comment_drain_engine.start()
-    app.run(debug=True, port=6500)
+        logger.info("Background engines started in process %s", os.getpid())
+    app.run(debug=True, port=6500, use_reloader=use_reloader)
+
+
+if __name__ == '__main__':
+    main()

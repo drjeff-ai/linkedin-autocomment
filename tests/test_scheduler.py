@@ -98,6 +98,12 @@ class FakeStore:
     def by_status(self, status):
         return list(self._by_status.get(status, []))
 
+    def expire_stale_generated(self, max_age_days, now=None, save=False):
+        # S1: the scheduled post path expires stale drafts before selecting.
+        # These records carry no timestamps, so nothing here is stale; the
+        # real expiry is tested on a real PostStore in test_scheduler_s1.py.
+        return 0
+
 
 def _generated(n):
     return [{

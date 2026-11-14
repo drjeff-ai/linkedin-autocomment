@@ -32,7 +32,7 @@ import os
 import json
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from .comment_fields import normalize_comment_fields
@@ -82,6 +82,14 @@ REASON_NO_URL = "no_url"
 # every run. Auto, so it is restorable and a re-scrape can let it back in.
 REASON_EVALUATOR_REJECTED = "evaluator_rejected"
 REASON_MANUAL = "manual"
+# A GENERATED draft older than the scheduler's ``draft_max_age_days``, trashed
+# before a scheduled post selects drafts (S1). Not an auto reason: like
+# ``manual``, a re-scrape never puts it back; ``restore()`` returns it to
+# GENERATED with its draft.
+REASON_STALE = "stale"
+# Computed reasons. A TRASH record whose reason is in here adopts the freshly
+# computed status on a re-scrape; any other reason (``manual``, ``stale``) is
+# sticky. See ``_is_sticky_trash``.
 AUTO_REASONS = (REASON_AD, REASON_JOB, REASON_LOW_QUALITY, REASON_NO_URL,
                 REASON_EVALUATOR_REJECTED)
 
@@ -115,6 +123,20 @@ def post_key(item: Dict) -> str:
 
 def _now() -> str:
     return datetime.now().isoformat()
+
+
+def _parse_local_iso(value) -> Optional[datetime]:
+    """Parse a timestamp ``_now()`` wrote (naive local ISO). An aware value is
+    converted to naive local time; anything unparseable is ``None``."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
 
 
 def _read_json(path):
@@ -216,8 +238,17 @@ class PostStore:
             "relevance_score": post.get("relevance_score", 0) or 0,
         }
 
-    def _is_manual_trash(self, rec: Dict) -> bool:
-        return rec.get("status") == TRASH and rec.get("trash_reason") == REASON_MANUAL
+    @staticmethod
+    def _is_sticky_trash(rec: Dict) -> bool:
+        """TRASH that a re-scrape must not undo: a decision, not a computation.
+
+        ``manual`` (the user rejected it) and ``stale`` (an expired draft) are
+        sticky; the computed ``AUTO_REASONS`` are not. A TRASH record with no
+        reason at all predates reasons and stays non-sticky, as before S1.
+        """
+        reason = rec.get("trash_reason")
+        return (rec.get("status") == TRASH and reason is not None
+                and reason not in AUTO_REASONS)
 
     # ── transitions ──────────────────────────────────────────────────────────
 
@@ -245,7 +276,7 @@ class PostStore:
             # so a stale scrape file mentioning it must not put it back in the
             # queue to be tried (and to burn the navigation timeout) again.
             if existing.get("status") in (COMMENTED, GENERATED, UNAVAILABLE) \
-                    or self._is_manual_trash(existing):
+                    or self._is_sticky_trash(existing):
                 if save:
                     self.save()
                 return key
@@ -384,16 +415,54 @@ class PostStore:
         return True
 
     def restore(self, key_or_url: str, save: bool = False) -> bool:
-        """Move a TRASH post back to GENERATED (if it has a draft) else NEW."""
+        """Move a TRASH post back to GENERATED (if it has a draft) else NEW.
+
+        A restored ``stale`` draft gets a fresh ``generated_at``: restoring it
+        is the user saying it is still worth posting, and with its old
+        timestamp the next scheduled post would expire it again at once.
+        """
         rec = self._resolve(key_or_url)
         if rec is None or rec.get("status") != TRASH:
             return False
+        was_stale = rec.get("trash_reason") == REASON_STALE
         rec["status"] = GENERATED if rec.get("comment") else NEW
         rec["trash_reason"] = None
         rec["updated_at"] = _now()
+        if was_stale and rec["status"] == GENERATED:
+            rec["generated_at"] = rec["updated_at"]
         if save:
             self.save()
         return True
+
+    def expire_stale_generated(self, max_age_days, now: datetime = None,
+                               save: bool = False) -> int:
+        """Move GENERATED drafts older than ``max_age_days`` → TRASH(stale).
+
+        Age is measured from ``generated_at``, or ``updated_at`` when that is
+        missing; a record with neither, or with one that does not parse, is
+        left alone. The draft is kept, so ``restore()`` brings it back.
+        ``max_age_days`` of 0 (or less) expires nothing. ``now`` is a naive
+        local datetime, matching the naive local ISO strings ``_now()`` writes.
+        Returns the count moved.
+        """
+        if not max_age_days or max_age_days <= 0:
+            return 0
+        now = now or datetime.now()
+        cutoff = now - timedelta(days=max_age_days)
+        changed = 0
+        for rec in self.posts.values():
+            if rec.get("status") != GENERATED:
+                continue
+            stamp = _parse_local_iso(rec.get("generated_at") or rec.get("updated_at"))
+            if stamp is None or stamp >= cutoff:
+                continue
+            rec["status"] = TRASH
+            rec["trash_reason"] = REASON_STALE
+            rec["updated_at"] = _now()
+            changed += 1
+        if changed and save:
+            self.save()
+        return changed
 
     def trash_urlless_new(self, save: bool = False) -> int:
         """Move NEW posts that have no URL → TRASH(no_url). Returns the count moved.
