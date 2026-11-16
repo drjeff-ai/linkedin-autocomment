@@ -455,21 +455,39 @@ def get_profiles():
 
 @app.route('/api/profiles', methods=['POST'])
 def create_profile():
-    """POST /api/profiles — create a new profile from name/username/password."""
+    """POST /api/profiles — create a new profile from name/username/password.
+
+    Username and password both set: a LinkedIn profile. Both present and
+    blank: a publishing-only profile (Buffer only, no LinkedIn login). One set
+    and the other blank is refused, naming the missing one. A body that leaves
+    the fields out entirely is refused: blank is a choice the form sends,
+    absent is a malformed request.
+    """
     body = request.json
-    name = body.get('name', '').strip()
-    username = body.get('username', '').strip()
-    password = body.get('password', '').strip()
+    name = (body.get('name') or '').strip()
+    username = (body.get('username') or '').strip()
+    password = (body.get('password') or '').strip()
     is_default = body.get('set_default', False)
-    
-    if not name or not username or not password:
-        return jsonify({"error": "name, username, and password are required"}), 400
-    
+    publishing_only = not username and not password
+
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+    if bool(username) != bool(password):
+        missing = "password" if username else "username"
+        return jsonify({"error": f"LinkedIn {missing} is missing: give both a username "
+                                 f"and a password, or neither for a publishing-only "
+                                 f"profile"}), 400
+    if publishing_only and ('username' not in body or 'password' not in body):
+        return jsonify({"error": "name, username, and password are required "
+                                 "(send both blank for a publishing-only "
+                                 "profile)"}), 400
+
     if pm.get_profile(name):
         return jsonify({"error": f"Profile '{name}' already exists"}), 409
-    
+
     pm.add_profile(name, username, password, set_default=is_default)
-    return jsonify({"ok": True, "message": f"Profile '{name}' created"})
+    kind = "Publishing-only profile" if publishing_only else "Profile"
+    return jsonify({"ok": True, "message": f"{kind} '{name}' created"})
 
 
 @app.route('/api/profiles/<name>/default', methods=['POST'])
