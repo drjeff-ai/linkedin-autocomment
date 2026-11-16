@@ -858,10 +858,26 @@ def row_image_column(row):
     return None
 
 
+def window_rank(window):
+    """Sort key putting time windows in clock order (D-012 F2).
+
+    A declared window ranks by its start minute in ``bc.TIME_WINDOWS``, so
+    morning < afternoon < evening, whatever the names. A name that is not
+    declared ranks after every declared one, then by name. Matching is the
+    same as ``bc.due_at``: stripped and lower-cased.
+    """
+    key = str(window or "").strip().lower()
+    spec = bc.TIME_WINDOWS.get(key)
+    if spec is not None:
+        return (0, spec[0] * 60 + spec[1], key)
+    return (1, 0, key)
+
+
 def _waiting_sort_key(kv):
-    """Earliest post first: date, then window, then when it was queued."""
+    """Earliest post first: date, then window in clock order, then when it
+    was queued."""
     row = kv[1].get("row") or {}
-    return (row.get("date") or "9999", row.get("time_window") or "",
+    return (row.get("date") or "9999", window_rank(row.get("time_window")),
             kv[1].get("updated_at") or "")
 
 
