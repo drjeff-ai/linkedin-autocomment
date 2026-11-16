@@ -31,7 +31,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import buffer_client as bc
 from . import channels
@@ -896,6 +896,152 @@ def held_rows(state):
     return [dict(v.get("row") or {}) for _k, v in waiting]
 
 
+#: Set on a stored row by :func:`redate_pending`: the key the row was queued
+#: under. ``row_key`` hashes the date and window, so without it a re-dated row
+#: would hash to a new key at schedule time, and the same CSV uploaded again
+#: would queue it twice. It is not a CSV column and never enters a hash.
+PINNED_KEY = "_queued_key"
+
+
+def effective_row_key(row, state, platform=None):
+    """The key ``schedule_pass`` acts on for ``row``.
+
+    A row carrying :data:`PINNED_KEY` keeps that key only when ``state`` holds
+    an entry under it whose stored row pins the same key and has the same
+    content (``row_key`` equal), i.e. it is the row this queue re-dated.
+    Anything else (a CSV that happens to carry the field, an edited copy) is
+    keyed from its content as always.
+    """
+    computed = row_key(row, platform)
+    pinned = row.get(PINNED_KEY) if isinstance(row, dict) else None
+    if pinned:
+        stored = (state.rows.get(pinned) or {}).get("row") or {}
+        if (stored.get(PINNED_KEY) == pinned
+                and row_key(stored, platform) == computed):
+            return pinned
+    return computed
+
+
+def _window_slots(day, from_window=None):
+    """``(date, window)`` for ``day`` in clock order, from ``from_window`` on."""
+    names = sorted(bc.TIME_WINDOWS, key=window_rank)
+    if from_window is not None:
+        names = names[names.index(from_window):]
+    return [(day, n) for n in names]
+
+
+def _first_open_slot(now, tz):
+    """The first ``(date, window)`` whose start is after ``now``."""
+    local = now.astimezone(tz)
+    day = local.date()
+    for _ in range(3):
+        for d, name in _window_slots(day):
+            sh, sm, _eh, _em = bc.TIME_WINDOWS[name]
+            if datetime(d.year, d.month, d.day, sh, sm, tzinfo=tz) > local:
+                return d, name
+        day = day + timedelta(days=1)
+    raise ValueError("no time window starts after %s" % local.isoformat())
+
+
+def _start_slot(start, now, tz):
+    """Normalise ``start`` to a ``(date, window)`` that has not begun."""
+    if start is None:
+        return _first_open_slot(now, tz)
+    if isinstance(start, datetime):
+        aware = start if start.tzinfo else start.replace(tzinfo=tz)
+        day, name = _first_open_slot(aware - timedelta(microseconds=1), tz)
+    else:
+        date_str, window = start
+        name = str(window or "").strip().lower()
+        if name not in bc.TIME_WINDOWS:
+            raise ValueError("start window %r is not one of %s" % (
+                window, ", ".join(sorted(bc.TIME_WINDOWS, key=window_rank))))
+        day = datetime.strptime(str(date_str).strip(), "%Y-%m-%d").date()
+    sh, sm, _eh, _em = bc.TIME_WINDOWS[name]
+    if datetime(day.year, day.month, day.day, sh, sm, tzinfo=tz) <= now.astimezone(tz):
+        raise ValueError("start %s %s has already begun; re-dating would put "
+                         "rows in the past" % (day.isoformat(), name))
+    return day, name
+
+
+def redate_pending(profile, channel, per_day, start=None, rng=None,
+                   now=None, state=None):
+    """Give the channel's queued, unscheduled rows consecutive dates.
+
+    Acts on PENDING rows only: SCHEDULED and later rows already have a Buffer
+    post, and HELD rows passed the confirmation dialog for their date. They
+    keep their current order (:func:`pending_rows` order) and get ``per_day``
+    rows a day, each in a different window in clock order, starting at
+    ``start`` or else the next window that has not begun. ``start`` is a
+    ``(YYYY-MM-DD, window)`` pair or a datetime (the first window starting at
+    or after it). ``per_day`` is 1 to the number of declared windows; with
+    fewer, a day uses its earliest windows.
+
+    Only ``date`` and ``time_window`` change in each stored row, plus the
+    :data:`PINNED_KEY` that keeps its key: row keys never move. The minute
+    inside the window is picked when the row is scheduled, by ``bc.due_at``, as
+    for every row; here ``bc.due_at`` is only used (with ``rng``) to prove each
+    new slot is in the future. One atomic write of the state file.
+
+    Returns ``[{"key", "date", "time_window", "old_date", "old_window"}]`` in
+    order.
+    """
+    tz = bc.posting_timezone()
+    now = now or datetime.now(timezone.utc)
+    windows = sorted(bc.TIME_WINDOWS, key=window_rank)
+    if not isinstance(per_day, int) or isinstance(per_day, bool) \
+            or not 1 <= per_day <= len(windows):
+        raise ValueError("per_day must be 1 to %d, got %r" % (len(windows), per_day))
+    if state is None:
+        state = PipelineState(profile_name=profile, platform=channel)
+    elif (state.platform or "") != (channel or "").lower():
+        raise ValueError("state is for %r, not %r" % (state.platform, channel))
+
+    waiting = [(k, v) for k, v in state.rows.items()
+               if v.get("status") == PENDING and v.get("row")]
+    waiting.sort(key=_waiting_sort_key)
+    if not waiting:
+        return []
+
+    day, window = _start_slot(start, now, tz)
+    slots = []
+    first = True
+    while len(slots) < len(waiting):
+        allowed = set(windows[:per_day])
+        day_slots = _window_slots(day, window if first else None)
+        if first:
+            # The start day keeps clock order from the start window and uses
+            # up to per_day of the remaining windows.
+            day_slots = day_slots[:per_day]
+        else:
+            day_slots = [s for s in day_slots if s[1] in allowed]
+        slots.extend(day_slots)
+        day = day + timedelta(days=1)
+        first = False
+
+    changes = []
+    for (key, entry), (d, name) in zip(waiting, slots):
+        date_str = d.isoformat()
+        # Proves the slot is in the future, with the same picker schedule_pass
+        # uses; raises (writing nothing) if it is not.
+        bc.due_at(date_str, name, rng=rng, tz=tz, now=now)
+        changes.append((key, entry, date_str, name))
+
+    out = []
+    stamp = datetime.now(timezone.utc).isoformat()
+    for key, entry, date_str, name in changes:
+        row = entry["row"]
+        out.append({"key": key, "date": date_str, "time_window": name,
+                    "old_date": row.get("date"),
+                    "old_window": row.get("time_window")})
+        row["date"] = date_str
+        row["time_window"] = name
+        row[PINNED_KEY] = key
+        entry["redated_at"] = stamp
+    state.save()
+    return out
+
+
 #: Statuses a row can be in and still be owed a first comment. Matches
 #: comment_pass's own retry set MINUS SCHEDULED: a SCHEDULED row normally
 #: has no permalink yet (comment_pass still has to poll Buffer for one), so
@@ -1207,7 +1353,7 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
     created = 0
     held = 0
     for row in rows:
-        rkey = row_key(row, platform)
+        rkey = effective_row_key(row, state, platform)
         entry = state.get(rkey)
         result = {"key": rkey, "row": row, "status": entry.get("status")}
 

@@ -1034,7 +1034,23 @@ queue time. An undeclared window name sorts after every declared one. Before
 F2 the window sorted by name, so a day's evening row went ahead of its morning
 row when slots were scarce.
 
-*Verification anchor (10.2): 2026-11-16, branch `f2-window-order`
+**Re-dating queued rows (F3).** `redate_pending(profile, channel, per_day,
+start=None, rng=None)` gives a channel's PENDING rows (not HELD, not
+SCHEDULED or later) consecutive dates in their current order, `per_day` a day
+in clock-ordered windows, from `start` (a `(date, window)` pair or a datetime)
+or else the next window not yet begun. A start that has begun is refused with
+nothing written. It changes only each stored row's `date` and `time_window`,
+and writes the state file once, atomically. The minute is still picked at
+schedule time by `bc.due_at`. **Keys never move:** `row_key` hashes the date
+and window, so the stored row also gets `_queued_key` (`PINNED_KEY`), the key
+it was queued under. `schedule_pass` keys each row through
+`effective_row_key`, which honours the pin only when the state entry under it
+pins the same key and holds the same content. Otherwise, as for a CSV that
+happens to carry the field, the row is keyed from its content. The same CSV
+queued again therefore still reads as already queued.
+
+*Verification anchor (10.2): 2026-11-16, branch `f3-redate-pending`
+(`tests/test_redate_pending.py`); `f2-window-order`
 (`tests/test_window_order.py`); before that 2026-11-14, branch
 `p3-buffer-metadata` (metadata and alt text, `tests/test_channel_metadata.py`); before that
 2026-11-11, branch `x1-x-csv-drain`;
