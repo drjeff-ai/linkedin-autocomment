@@ -149,26 +149,83 @@ def get_profile(name: str) -> Optional[Dict]:
     return data["profiles"].get(name)
 
 
+class PublishingOnlyProfileError(RuntimeError):
+    """A LinkedIn login or browser path was asked to act as a publishing-only
+    profile, which has no LinkedIn credentials and no Chrome session."""
+
+    def __init__(self, profile_name: str):
+        self.profile_name = profile_name
+        super().__init__(publishing_only_message(profile_name))
+
+
+def publishing_only_message(profile_name: str) -> str:
+    """The one refusal every LinkedIn path gives a publishing-only profile."""
+    return f"Profile '{profile_name}' is publishing-only: it has no LinkedIn login."
+
+
+def _credential_blank(value) -> bool:
+    """None or the empty string. Whitespace is NOT blank: a password is stored
+    exactly as given (see the CLI's getpass note), so a space is a character."""
+    return value is None or value == ""
+
+
+def is_publishing_only(profile: Optional[Dict]) -> bool:
+    """Whether a stored profile record has no LinkedIn login (both credentials
+    null or empty). Such a profile only publishes through Buffer."""
+    if not isinstance(profile, dict):
+        return False
+    return _credential_blank(profile.get("username")) and _credential_blank(profile.get("password"))
+
+
+def _linkedin_profile_names(profiles: Dict) -> list:
+    """Names of the profiles that have a LinkedIn login, in stored order."""
+    return [n for n, p in profiles.items() if not is_publishing_only(p)]
+
+
 def get_default_profile_name() -> Optional[str]:
     """Get the default profile name."""
     data = load_profiles()
     # If a default is explicitly set, use it
     if data.get("default") and data["default"] in data.get("profiles", {}):
         return data["default"]
-    # If only one profile exists, it's the default
-    profiles = data.get("profiles", {})
-    if len(profiles) == 1:
-        return list(profiles.keys())[0]
+    # If only one LinkedIn profile exists, it's the default. A publishing-only
+    # profile is never picked implicitly: the default is what LinkedIn tools
+    # run as when no --profile is given.
+    linkedin = _linkedin_profile_names(data.get("profiles", {}))
+    if len(linkedin) == 1:
+        return linkedin[0]
     return None
 
 
-def add_profile(name: str, username: str, password: str, set_default: bool = False) -> Dict:
-    """Add a new profile."""
+def add_profile(name: str, username: Optional[str] = None,
+                password: Optional[str] = None, set_default: bool = False) -> Dict:
+    """Add a new profile.
+
+    Both credentials set: a LinkedIn profile, with a Chrome session dir.
+    Both blank (None or ""): a publishing-only profile, stored with
+    ``username: null, password: null`` and no session dir; every LinkedIn
+    login or browser path refuses it (PublishingOnlyProfileError).
+    Exactly one blank: ValueError naming the missing one.
+    """
+    user_blank = _credential_blank(username)
+    pass_blank = _credential_blank(password)
+    if user_blank != pass_blank:
+        missing = "username" if user_blank else "password"
+        raise ValueError(
+            f"Profile '{name}': LinkedIn {missing} is missing. Give both a "
+            f"username and a password, or neither for a publishing-only profile."
+        )
+    publishing_only = user_blank and pass_blank
+
     data = load_profiles()
-    
-    session_dir = os.path.join(CHROME_SESSIONS_DIR, name)
-    os.makedirs(session_dir, exist_ok=True)
-    
+
+    if publishing_only:
+        session_dir = None
+        username = password = None
+    else:
+        session_dir = os.path.join(CHROME_SESSIONS_DIR, name)
+        os.makedirs(session_dir, exist_ok=True)
+
     data["profiles"][name] = {
         "username": username,
         "password": password,
@@ -176,13 +233,16 @@ def add_profile(name: str, username: str, password: str, set_default: bool = Fal
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "last_used": None
     }
-    
-    # Set as default if requested or if it's the first profile
-    if set_default or len(data["profiles"]) == 1:
+
+    # Set as default if requested, or if it's the first LinkedIn profile. A
+    # publishing-only profile never becomes the default by that rule.
+    if set_default or (not publishing_only
+                       and _linkedin_profile_names(data["profiles"]) == [name]):
         data["default"] = name
-    
+
     save_profiles(data)
-    logger.info(f"Profile '{name}' added successfully")
+    kind = " (publishing-only)" if publishing_only else ""
+    logger.info(f"Profile '{name}'{kind} added successfully")
     return data["profiles"][name]
 
 
@@ -192,8 +252,8 @@ def remove_profile(name: str):
     if name in data["profiles"]:
         del data["profiles"][name]
         if data.get("default") == name:
-            # Set a new default if available
-            remaining = list(data["profiles"].keys())
+            # Set a new default if available (a LinkedIn profile only)
+            remaining = _linkedin_profile_names(data["profiles"])
             data["default"] = remaining[0] if remaining else None
         save_profiles(data)
         logger.info(f"Profile '{name}' removed")
@@ -884,6 +944,8 @@ def create_driver(profile_name: str = None, headless: bool = False,
 
     # Refuse BEFORE anything below constructs a browser - a refusal must cost
     # nothing and leave no session behind.
+    if is_publishing_only(profile):
+        raise PublishingOnlyProfileError(profile_name)
     check_production_guard(profile_name, allow_production=allow_production)
 
     logger.info(f"Using profile: '{profile_name}' ({profile['username']})")
@@ -989,7 +1051,14 @@ def is_logged_in(driver: webdriver.Chrome) -> bool:
 def login(driver: webdriver.Chrome, profile: Dict) -> bool:
     """
     Login to LinkedIn. Checks if already logged in first (persistent session).
+
+    A publishing-only profile raises PublishingOnlyProfileError before the
+    driver is touched. create_driver already refuses one, so reaching here with
+    one means a caller built its own driver; it still must not log in.
     """
+    if is_publishing_only(profile):
+        raise PublishingOnlyProfileError(_stored_name_of(profile))
+
     logger.info("Checking login status...")
     
     if is_logged_in(driver):
@@ -1039,6 +1108,15 @@ def login(driver: webdriver.Chrome, profile: Dict) -> bool:
         return False
 
 
+def _stored_name_of(profile: Dict) -> str:
+    """The stored name of a profile record, for a refusal message (login()
+    receives the record, not its name)."""
+    for name, stored in load_profiles()["profiles"].items():
+        if stored == profile:
+            return name
+    return "<unregistered>"
+
+
 # ─── Convenience function for scripts ─────────────────────────────────────────
 
 def setup_and_login(profile_name: str = None, headless: bool = False,
@@ -1067,6 +1145,13 @@ def setup_and_login(profile_name: str = None, headless: bool = False,
 
 
 # ─── CLI for Profile Management ──────────────────────────────────────────────
+
+def _display_username(profile: Dict) -> str:
+    """The username as the CLI shows it; a publishing-only profile has none."""
+    if is_publishing_only(profile):
+        return "(publishing-only)"
+    return str(profile.get("username"))
+
 
 def cli():
     """Command-line interface for managing profiles."""
@@ -1111,6 +1196,8 @@ Examples:
     add_parser.add_argument('--username', help='LinkedIn username/email')
     add_parser.add_argument('--password', help='LinkedIn password')
     add_parser.add_argument('--default', action='store_true', help='Set as default')
+    add_parser.add_argument('--publishing-only', action='store_true',
+                            help='No LinkedIn login: the profile only publishes through Buffer')
     
     # Remove
     remove_parser = subparsers.add_parser('remove', help='Remove a profile')
@@ -1161,10 +1248,10 @@ Examples:
         for name, info in profiles.items():
             is_default = " [DEFAULT]" if name == default else ""
             print(f"\n  📋 {name}{is_default}")
-            print(f"     Username:  {info['username']}")
+            print(f"     Username:  {_display_username(info)}")
             print(f"     Created:   {info.get('created', 'unknown')}")
             print(f"     Last used: {info.get('last_used', 'never')}")
-            print(f"     Session:   {info.get('session_dir', 'N/A')}")
+            print(f"     Session:   {info.get('session_dir') or 'N/A'}")
         
         print(f"\n  Total: {len(profiles)} profile(s)")
         print()
@@ -1177,9 +1264,17 @@ Examples:
             print(f"Profile '{name}' already exists. Remove it first or choose a different name.")
             return
         
+        if args.publishing_only:
+            if args.username or args.password:
+                print("--publishing-only takes no --username or --password.")
+                return
+            add_profile(name, set_default=args.default)
+            print(f"\n✅ Publishing-only profile '{name}' created (no LinkedIn login).")
+            return
+
         username = args.username
         password = args.password
-        
+
         if not username:
             username = input(f"LinkedIn username/email for '{name}': ").strip()
         if not password:
@@ -1206,7 +1301,7 @@ Examples:
             print(f"Profile '{args.name}' not found.")
             return
         
-        confirm = input(f"Remove profile '{args.name}' ({profile['username']})? [y/N]: ").strip().lower()
+        confirm = input(f"Remove profile '{args.name}' ({_display_username(profile)})? [y/N]: ").strip().lower()
         if confirm == 'y':
             remove_profile(args.name)
             print(f"✅ Profile '{args.name}' removed.")

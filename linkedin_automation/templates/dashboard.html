@@ -1923,6 +1923,9 @@ header {
       <label>LinkedIn Password</label>
       <input type="password" id="newProfilePass" placeholder="••••••••">
     </div>
+    <div class="form-group">
+      <label><input type="checkbox" id="newProfilePublishingOnly"> Publishing-only (no LinkedIn login; leave email and password blank)</label>
+    </div>
     <div class="form-row">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="addProfile()">Create Profile</button>
@@ -2005,7 +2008,8 @@ async function loadProfiles() {
   for (const [name, info] of Object.entries(profiles)) {
     const opt = document.createElement('option');
     opt.value = name;
-    opt.textContent = name + (name === defaultP ? ' ★' : '');
+    const publishingOnly = !info.username && !info.password;
+    opt.textContent = name + (publishingOnly ? ' (publishing-only)' : '') + (name === defaultP ? ' ★' : '');
     sel.appendChild(opt);
   }
   
@@ -2871,19 +2875,27 @@ function closeModal() {
   document.getElementById('newProfileName').value = '';
   document.getElementById('newProfileEmail').value = '';
   document.getElementById('newProfilePass').value = '';
+  document.getElementById('newProfilePublishingOnly').checked = false;
 }
 
 async function addProfile() {
   const name = document.getElementById('newProfileName').value.trim();
   const username = document.getElementById('newProfileEmail').value.trim();
   const password = document.getElementById('newProfilePass').value.trim();
-  
-  if (!name || !username || !password) return alert('All fields required');
-  
+  const publishing_only = document.getElementById('newProfilePublishingOnly').checked;
+
+  if (!name) return alert('Profile name required');
+  if (publishing_only && (username || password)) {
+    return alert('A publishing-only profile has no LinkedIn email or password');
+  }
+  if (!publishing_only && (!username || !password)) {
+    return alert('LinkedIn email and password required (or tick Publishing-only)');
+  }
+
   const res = await fetch('/api/profiles', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, username, password, set_default: false })
+    body: JSON.stringify({ name, username, password, publishing_only, set_default: false })
   });
   
   const data = await res.json();

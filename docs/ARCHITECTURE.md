@@ -798,6 +798,23 @@ silent pass and never as a failure. The gate flags are `requires_menu_open`,
 - **Profiles.** `profile_manager.py` owns per-profile credentials, Chrome session
   dirs, data dirs, and config. All paths anchor to a computed `PROJECT_ROOT` —
   never `__file__`-relative, never cwd-relative.
+- **Publishing-only profiles (B0).** A brand that only publishes through Buffer
+  has no LinkedIn login. `add_profile(name)` with both credentials blank (None or
+  `""`) stores `username: null, password: null, session_dir: null` and creates
+  no Chrome session dir; exactly one blank raises `ValueError` naming it. Such a
+  profile never becomes the default implicitly (first-profile rule, the
+  single-profile fallback in `get_default_profile_name`, or reassignment on
+  remove), because the default is what LinkedIn tools run as. `create_driver`
+  and `login` raise `PublishingOnlyProfileError` ("Profile '<name>' is
+  publishing-only: it has no LinkedIn login.") before any browser exists, so
+  every LinkedIn entry point refuses it at the same chokepoint as the
+  production guard. Scheduled-posting overlays, `resolve_scheduled`,
+  `queue_rows` and `schedule_pass` never read credentials and work unchanged.
+  `POST /api/profiles` takes both credential fields present and blank (a body
+  without the fields is refused); the dashboard form gates it behind a
+  Publishing-only checkbox, and the CLI uses `add <name> --publishing-only`.
+  *Verification anchor (9, publishing-only): 2026-11-16, branch
+  `b0-publishing-only`, `tests/test_profile_manager.py` B0 section.*
 - **Config.** `default_profile_config.json` is deep-merged under each profile's
   `profile_config.json`, so new default keys appear without clobbering user
   values. A corrupt config falls back to the default rather than raising.

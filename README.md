@@ -268,6 +268,10 @@ for the counts.** Files on disk are derived output, never state.
 # Add a new profile
 uv run python -m linkedin_automation.profile_manager add
 
+# Add a publishing-only profile (Buffer posting only, no LinkedIn login;
+# every LinkedIn command refuses it)
+uv run python -m linkedin_automation.profile_manager add <name> --publishing-only
+
 # List profiles
 uv run python -m linkedin_automation.profile_manager list
 
