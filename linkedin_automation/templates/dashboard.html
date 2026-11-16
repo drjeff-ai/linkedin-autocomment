@@ -2008,7 +2008,7 @@ async function loadProfiles() {
   for (const [name, info] of Object.entries(profiles)) {
     const opt = document.createElement('option');
     opt.value = name;
-    const publishingOnly = !info.username && !info.password;
+    const publishingOnly = !info.username && !info.has_password;
     opt.textContent = name + (publishingOnly ? ' (publishing-only)' : '') + (name === defaultP ? ' ★' : '');
     sel.appendChild(opt);
   }

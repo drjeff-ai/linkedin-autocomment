@@ -815,6 +815,15 @@ silent pass and never as a failure. The gate flags are `requires_menu_open`,
   Publishing-only checkbox, and the CLI uses `add <name> --publishing-only`.
   *Verification anchor (9, publishing-only): 2026-11-16, branch
   `b0-publishing-only`, `tests/test_profile_manager.py` B0 section.*
+- **Passwords never reach the browser (F1).** `GET /api/profiles` passes each
+  stored record through `dashboard._public_profile`, which drops `password`
+  and adds `has_password: true|false`; the username and every other field stay.
+  It is the only route that returns profile records, and the page reads
+  `has_password` for its publishing-only label. There is no edit-profile route,
+  so nothing ever needs the password back on the client.
+  *Verification anchor (9, password): 2026-11-16, branch `f1-profile-secrets`,
+  `tests/test_profile_api_secrets.py` (walks every `/api/profiles*` rule in the
+  URL map).*
 - **Config.** `default_profile_config.json` is deep-merged under each profile's
   `profile_config.json`, so new default keys appear without clobbering user
   values. A corrupt config falls back to the default rather than raising.

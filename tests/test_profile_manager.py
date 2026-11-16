@@ -379,7 +379,8 @@ def test_dashboard_creates_a_publishing_only_profile(api_client, monkeypatch):
     assert "Publishing-only" in resp.get_json()["message"]
     listing = api_client.get("/api/profiles").get_json()
     assert listing["profiles"]["brand"]["username"] is None
-    assert listing["profiles"]["brand"]["password"] is None
+    assert "password" not in listing["profiles"]["brand"]  # D-012 F1
+    assert listing["profiles"]["brand"]["has_password"] is False
     assert listing["default"] is None
 
 
