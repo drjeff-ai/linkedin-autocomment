@@ -445,12 +445,28 @@ def _dedupe_key(item):
 
 # ─── API: Profiles ───────────────────────────────────────────────────────────
 
+def _public_profile(record) -> dict:
+    """A stored profile record as the browser may see it: every field except
+    ``password``, which becomes ``has_password: true|false``. The LinkedIn
+    password never leaves the server (D-012 F1)."""
+    if not isinstance(record, dict):
+        return {"has_password": False}
+    public = {k: v for k, v in record.items() if k != "password"}
+    public["has_password"] = bool(record.get("password"))
+    return public
+
+
 @app.route('/api/profiles', methods=['GET'])
 def get_profiles():
-    """GET /api/profiles — list all profiles (auto-migrating from .env first)."""
+    """GET /api/profiles — list all profiles (auto-migrating from .env first).
+
+    Passwords are replaced by ``has_password``; see ``_public_profile``.
+    """
     pm.auto_migrate_from_env()
     data = pm.list_profiles()
-    return jsonify(data)
+    profiles = {name: _public_profile(rec)
+                for name, rec in data.get("profiles", {}).items()}
+    return jsonify({"profiles": profiles, "default": data.get("default")})
 
 
 @app.route('/api/profiles', methods=['POST'])
