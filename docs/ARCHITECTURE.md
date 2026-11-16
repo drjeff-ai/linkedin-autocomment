@@ -1027,8 +1027,16 @@ comment pass, because the link already rode in the body; asking it to comment
 would imply a browser action that makes no sense for this platform. The CLI
 names this explicitly rather than trying and failing.
 
-*Verification anchor (10.2): 2026-11-14, branch `p3-buffer-metadata`
-(metadata and alt text, `tests/test_channel_metadata.py`); before that
+**Waiting rows go out in clock order (F2).** `pending_rows` and `held_rows`
+order by date, then by `window_rank(time_window)` (the window's start minute
+in `buffer_client.TIME_WINDOWS`, so morning, afternoon, evening), then by
+queue time. An undeclared window name sorts after every declared one. Before
+F2 the window sorted by name, so a day's evening row went ahead of its morning
+row when slots were scarce.
+
+*Verification anchor (10.2): 2026-11-16, branch `f2-window-order`
+(`tests/test_window_order.py`); before that 2026-11-14, branch
+`p3-buffer-metadata` (metadata and alt text, `tests/test_channel_metadata.py`); before that
 2026-11-11, branch `x1-x-csv-drain`;
 `tests/test_channel_extras.py` carries the CSV-to-createPost `link` proof and the
 X queue-time limit, and `tests/test_x_drain.py` covers the topic-only refusal
