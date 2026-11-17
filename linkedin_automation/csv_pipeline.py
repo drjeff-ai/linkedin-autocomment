@@ -964,8 +964,42 @@ def _start_slot(start, now, tz):
     return day, name
 
 
+#: :func:`redate_pending` gives up after this many consecutive days that
+#: place no row, so a calendar of zeros cannot loop forever.
+REDATE_MAX_EMPTY_DAYS = 400
+
+
+def _per_day_counter(per_day, n_windows):
+    """``date -> int`` from ``per_day`` (an int or a callable), validated."""
+    if callable(per_day):
+        def count(day):
+            n = per_day(day)
+            if not isinstance(n, int) or isinstance(n, bool) \
+                    or not 0 <= n <= n_windows:
+                raise ValueError("per_day(%s) must return 0 to %d, got %r"
+                                 % (day.isoformat(), n_windows, n))
+            return n
+        return count
+    if not isinstance(per_day, int) or isinstance(per_day, bool) \
+            or not 1 <= per_day <= n_windows:
+        raise ValueError("per_day must be 1 to %d, got %r" % (n_windows, per_day))
+    return lambda _day: per_day
+
+
+def _day_windows(n, windows, windows_for):
+    """The ``n`` window names a day with ``n`` rows uses, in clock order."""
+    if windows_for is None:
+        return windows[:n]
+    names = [str(w or "").strip().lower() for w in windows_for(n)]
+    if len(names) != n or len(set(names)) != n \
+            or any(w not in windows for w in names):
+        raise ValueError("windows_for(%d) must name %d distinct windows of %s, "
+                         "got %r" % (n, n, ", ".join(windows), names))
+    return sorted(names, key=window_rank)
+
+
 def redate_pending(profile, channel, per_day, start=None, rng=None,
-                   now=None, state=None):
+                   now=None, state=None, windows_for=None):
     """Give the channel's queued, unscheduled rows consecutive dates.
 
     Acts on PENDING rows only: SCHEDULED and later rows already have a Buffer
@@ -976,6 +1010,16 @@ def redate_pending(profile, channel, per_day, start=None, rng=None,
     ``(YYYY-MM-DD, window)`` pair or a datetime (the first window starting at
     or after it). ``per_day`` is 1 to the number of declared windows; with
     fewer, a day uses its earliest windows.
+
+    ``per_day`` may instead be a callable ``date -> int`` giving each day its
+    own count, 0 to the number of windows; a day given 0 gets no rows, and
+    :data:`REDATE_MAX_EMPTY_DAYS` consecutive days placing nothing raise
+    ``ValueError``. ``windows_for``, if given, is a callable ``n -> window
+    names`` choosing which windows a day with ``n`` rows uses (by default its
+    earliest ``n``). On the start day only windows from ``start`` on are used:
+    by default the first ``n`` of those, with ``windows_for`` its choices that
+    have not begun. Every check runs before the single write, so a bad count
+    or window list writes nothing.
 
     Only ``date`` and ``time_window`` change in each stored row, plus the
     :data:`PINNED_KEY` that keeps its key: row keys never move. The minute
@@ -989,9 +1033,7 @@ def redate_pending(profile, channel, per_day, start=None, rng=None,
     tz = bc.posting_timezone()
     now = now or datetime.now(timezone.utc)
     windows = sorted(bc.TIME_WINDOWS, key=window_rank)
-    if not isinstance(per_day, int) or isinstance(per_day, bool) \
-            or not 1 <= per_day <= len(windows):
-        raise ValueError("per_day must be 1 to %d, got %r" % (len(windows), per_day))
+    count = _per_day_counter(per_day, len(windows))
     if state is None:
         state = PipelineState(profile_name=profile, platform=channel)
     elif (state.platform or "") != (channel or "").lower():
@@ -1006,16 +1048,26 @@ def redate_pending(profile, channel, per_day, start=None, rng=None,
     day, window = _start_slot(start, now, tz)
     slots = []
     first = True
+    empty_run = 0
     while len(slots) < len(waiting):
-        allowed = set(windows[:per_day])
-        day_slots = _window_slots(day, window if first else None)
+        n = count(day)
         if first:
-            # The start day keeps clock order from the start window and uses
-            # up to per_day of the remaining windows.
-            day_slots = day_slots[:per_day]
+            # The start day keeps clock order from the start window: the
+            # first n of the remaining windows, or windows_for's choices that
+            # have not begun.
+            remaining = windows[windows.index(window):]
+            if windows_for is None:
+                names = remaining[:n]
+            else:
+                names = [w for w in _day_windows(n, windows, windows_for)
+                         if w in remaining]
         else:
-            day_slots = [s for s in day_slots if s[1] in allowed]
-        slots.extend(day_slots)
+            names = _day_windows(n, windows, windows_for)
+        slots.extend((day, w) for w in names)
+        empty_run = 0 if names else empty_run + 1
+        if empty_run >= REDATE_MAX_EMPTY_DAYS:
+            raise ValueError("per_day placed no row on %d consecutive days "
+                             "up to %s" % (empty_run, day.isoformat()))
         day = day + timedelta(days=1)
         first = False
 

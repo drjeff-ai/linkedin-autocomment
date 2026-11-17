@@ -1049,7 +1049,18 @@ pins the same key and holds the same content. Otherwise, as for a CSV that
 happens to carry the field, the row is keyed from its content. The same CSV
 queued again therefore still reads as already queued.
 
-*Verification anchor (10.2): 2026-11-16, branch `f3-redate-pending`
+**Per-day counts (F4).** `per_day` may also be a callable `date -> int`, 0 to
+the number of windows, so each day gets its own count; a day given 0 gets no
+rows. `windows_for=None` (keyword) is an optional callable `n -> window names`
+choosing which windows a day with `n` rows uses; the default is the earliest
+`n`, as with an int. On the start day only windows from `start` on are used.
+A count out of range, a bad window list, or 400 consecutive days placing
+nothing (`REDATE_MAX_EMPTY_DAYS`) raise `ValueError` before the write. The
+calendar itself lives in the caller (for Tinderbox, operator scratch), not
+the app.
+
+*Verification anchor (10.2): 2026-11-17, branch `f4-per-day-count`
+(`tests/test_redate_pending.py`); 2026-11-16, branch `f3-redate-pending`
 (`tests/test_redate_pending.py`); `f2-window-order`
 (`tests/test_window_order.py`); before that 2026-11-14, branch
 `p3-buffer-metadata` (metadata and alt text, `tests/test_channel_metadata.py`); before that

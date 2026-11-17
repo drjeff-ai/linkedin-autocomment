@@ -246,3 +246,128 @@ def test_an_edited_copy_of_a_redated_row_does_not_inherit_its_key(state):
     edited = dict(redated, post_text="Different text.")
     assert cp.effective_row_key(edited, state, "linkedin") == cp.row_key(
         edited, "linkedin") != keys[0]
+
+
+# --- D-017 F4: per_day as a callable, windows_for -------------------------
+
+def _calendar(counts, first="2036-01-06"):
+    """``date -> int`` giving ``counts`` from ``first`` on, then 3."""
+    base = datetime.fromisoformat(first).date()
+
+    def per_day(d):
+        i = (d - base).days
+        return counts[i] if 0 <= i < len(counts) else 3
+    return per_day
+
+
+def _two_ends(n):
+    return {0: [], 1: ["afternoon"], 2: ["evening", "morning"],
+            3: ["morning", "afternoon", "evening"]}[n]
+
+
+def test_a_callable_gives_each_day_its_count_in_clock_order(state):
+    _queue(state, [make_row(i) for i in range(6)])
+    out = cp.redate_pending("p", "linkedin", _calendar([3, 2, 0, 1]),
+                            start=("2036-01-06", "morning"), now=NOW, state=state)
+    assert [(o["date"], o["time_window"]) for o in out] == [
+        ("2036-01-06", "morning"), ("2036-01-06", "afternoon"),
+        ("2036-01-06", "evening"),
+        ("2036-01-07", "morning"), ("2036-01-07", "afternoon"),
+        # 2036-01-08 returned 0: no row that day.
+        ("2036-01-09", "morning")]
+    assert _pending_dates(state) == [(o["date"], o["time_window"]) for o in out]
+
+
+def test_windows_for_picks_morning_evening_for_2_and_afternoon_for_1(state):
+    _queue(state, [make_row(i) for i in range(6)])
+    out = cp.redate_pending("p", "linkedin", _calendar([3, 2, 0, 1]),
+                            start=("2036-01-06", "morning"), now=NOW,
+                            state=state, windows_for=_two_ends)
+    assert [(o["date"], o["time_window"]) for o in out] == [
+        ("2036-01-06", "morning"), ("2036-01-06", "afternoon"),
+        ("2036-01-06", "evening"),
+        ("2036-01-07", "morning"), ("2036-01-07", "evening"),
+        ("2036-01-09", "afternoon")]
+
+
+def test_windows_for_on_the_start_day_skips_windows_already_begun(state):
+    _queue(state, [make_row(i) for i in range(3)])
+    # Start at afternoon on a 2-day: morning is before the start, so only
+    # evening is used that day.
+    out = cp.redate_pending("p", "linkedin", _calendar([2, 2]),
+                            start=("2036-01-06", "afternoon"), now=NOW,
+                            state=state, windows_for=_two_ends)
+    assert [(o["date"], o["time_window"]) for o in out] == [
+        ("2036-01-06", "evening"),
+        ("2036-01-07", "morning"), ("2036-01-07", "evening")]
+
+
+def test_a_callable_redate_keeps_keys_and_order(state):
+    keys = _queue(state, [make_row(i) for i in range(6)])
+    before = copy.deepcopy(state.rows)
+    order_before = [r["post_text"] for r in cp.pending_rows(state)]
+    out = cp.redate_pending("p", "linkedin", _calendar([1, 0, 2, 0, 3]),
+                            start=("2036-01-06", "morning"), now=NOW,
+                            state=state, windows_for=_two_ends)
+    assert [o["key"] for o in out] == keys
+    assert [r["post_text"] for r in cp.pending_rows(state)] == order_before
+    disk = _on_disk(state)
+    assert set(disk) == set(keys)
+    for k in keys:
+        old, new = before[k]["row"], disk[k]["row"]
+        assert new[cp.PINNED_KEY] == k
+        changed = {f for f in set(old) | set(new) if old.get(f) != new.get(f)}
+        assert changed <= {"date", "time_window", cp.PINNED_KEY}
+
+
+def test_a_callable_always_3_matches_the_int_path(tmp_path):
+    results = []
+    for per_day in (3, lambda _d: 3):
+        st = cp.PipelineState(path=str(tmp_path / ("s%d.json" % len(results))),
+                              platform="linkedin")
+        _queue(st, [make_row(i) for i in range(7)])
+        results.append([(o["key"], o["date"], o["time_window"]) for o in
+                        cp.redate_pending("p", "linkedin", per_day, now=NOW,
+                                          state=st)])
+    assert results[0] == results[1]
+
+
+@pytest.mark.parametrize("bad", [4, -1, "2", True, None, 2.0])
+def test_a_callable_returning_out_of_range_raises_and_writes_nothing(state, bad):
+    _queue(state, [make_row(i) for i in range(4)])
+    before = json.dumps(_on_disk(state), sort_keys=True)
+    with pytest.raises(ValueError, match="per_day"):
+        cp.redate_pending("p", "linkedin", _calendar([3, bad]),
+                          start=("2036-01-06", "morning"), now=NOW, state=state)
+    assert json.dumps(_on_disk(state), sort_keys=True) == before
+
+
+def test_an_all_zero_calendar_raises_and_writes_nothing(state):
+    _queue(state, [make_row(0)])
+    before = json.dumps(_on_disk(state), sort_keys=True)
+    with pytest.raises(ValueError, match="consecutive days"):
+        cp.redate_pending("p", "linkedin", lambda _d: 0, now=NOW, state=state)
+    assert json.dumps(_on_disk(state), sort_keys=True) == before
+
+
+def test_399_empty_days_then_a_1_still_places_the_row(state):
+    _queue(state, [make_row(0)])
+    out = cp.redate_pending("p", "linkedin",
+                            _calendar([0] * 399 + [1], first="2036-01-06"),
+                            start=("2036-01-06", "morning"), now=NOW, state=state)
+    assert out[0]["date"] == "2037-02-08"
+
+
+@pytest.mark.parametrize("bad", [
+    lambda n: ["morning"] * n,
+    lambda n: ["midnight"] + ["morning"] * (n - 1),
+    lambda n: ["morning", "afternoon", "evening"][:max(n - 1, 0)],
+])
+def test_a_bad_windows_for_raises_and_writes_nothing(state, bad):
+    _queue(state, [make_row(i) for i in range(4)])
+    before = json.dumps(_on_disk(state), sort_keys=True)
+    with pytest.raises(ValueError, match="windows_for"):
+        cp.redate_pending("p", "linkedin", _calendar([2, 2, 2]),
+                          start=("2036-01-06", "morning"), now=NOW,
+                          state=state, windows_for=bad)
+    assert json.dumps(_on_disk(state), sort_keys=True) == before
