@@ -26,10 +26,13 @@ def _order(rows):
     return [(r["date"], r["time_window"]) for r in rows]
 
 
-def test_the_declared_windows_are_the_three_this_test_assumes():
-    assert set(bc.TIME_WINDOWS) == {"morning", "afternoon", "evening"}
+def test_the_declared_windows_are_the_ones_this_test_assumes():
+    # D-021 F5: two opt-in windows join the three defaults (DEC-046).
+    assert set(bc.DEFAULT_WINDOWS) == {"morning", "afternoon", "evening"}
+    assert set(bc.TIME_WINDOWS) == set(bc.DEFAULT_WINDOWS) | {
+        "late_afternoon", "night"}
     # Alphabetical order differs from clock order, so the tests below can tell.
-    assert sorted(bc.TIME_WINDOWS) == ["afternoon", "evening", "morning"]
+    assert sorted(bc.DEFAULT_WINDOWS) == ["afternoon", "evening", "morning"]
 
 
 @pytest.mark.parametrize("insert", [
