@@ -12,6 +12,14 @@ days apart:
     uv run python tools/run_scheduled_posts.py comment --profile dev \\
         --expect-identity your-profile-slug
 
+    uv run python tools/run_scheduled_posts.py topup --profile tinderbox \
+        --platform pinterest [--reserve 2] [--dry-run] [--log-file F]
+
+`topup` sends the channel's earliest queued rows into Buffer up to its free
+slots minus a reserve, from stored state (no CSV), after the board and link
+checks in the profile overlay (linkedin_automation/topup.py). It is what the
+Windows task from tools/setup_topup_task.ps1 runs.
+
 `comment` is the one to put on a schedule - every 15 minutes is ample, since it
 does nothing for rows whose posts have not published yet.
 
@@ -34,6 +42,7 @@ from linkedin_automation import channels  # noqa: E402
 from linkedin_automation import csv_pipeline as cp  # noqa: E402
 from linkedin_automation import platforms  # noqa: E402
 from linkedin_automation import profile_manager as pm  # noqa: E402
+from linkedin_automation import topup  # noqa: E402
 
 load_dotenv()
 
@@ -62,7 +71,7 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("pass_name", choices=["schedule", "comment", "status"])
+    ap.add_argument("pass_name", choices=["schedule", "comment", "status", "topup"])
     ap.add_argument("--csv", help="the content calendar (schedule pass)")
     ap.add_argument("--channel-id",
                     help="Buffer channel id. Defaults to the resolved "
@@ -83,11 +92,34 @@ def main():
     ap.add_argument("--allow-production", action="store_true",
                     help="allow the schedule or comment pass to run against "
                          "a declared PRODUCTION identity")
+    ap.add_argument("--reserve", type=int, default=None,
+                    help="topup: Buffer slots to leave free (default: the "
+                         "overlay's topup_reserve, else 2)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="topup: say what would be sent; no Buffer or state "
+                         "write")
+    ap.add_argument("--log-file", default=None,
+                    help="also append this run's log to this file")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+    if args.log_file:
+        parent = os.path.dirname(args.log_file)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        handler = logging.FileHandler(args.log_file, encoding="utf-8")
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s %(message)s"))
+        logging.getLogger().addHandler(handler)
+
+    if args.pass_name == "topup":
+        if not args.profile:
+            ap.error("topup needs --profile")
+        code, _summary = topup.run(args.profile, args.platform,
+                                   reserve=args.reserve, dry_run=args.dry_run)
+        return code
 
     # ONE source for the channel id and the identity. These used to be
     # CLI-only, which made this tool an independent SECOND source of the

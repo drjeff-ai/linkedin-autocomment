@@ -257,6 +257,24 @@ for the counts.** Files on disk are derived output, never state.
   `GET /api/scheduler/<profile>/status`, `POST .../toggle` (master or a job),
   `POST .../config` (windows/counts), `POST .../run-now` (fire immediately).
 
+### Buffer top-up (`topup`)
+- One headless command sends a channel's earliest queued rows into Buffer, up
+  to its free slots minus a reserve (default 2), from stored state:
+  `uv run python tools/run_scheduled_posts.py topup --profile <p> --platform <ch> [--reserve N] [--dry-run] [--log-file F]`.
+- Each row must pass a board check (in the overlay's `approved_boards` and on
+  Buffer's board list) and a link check (2xx, no redirect, a real page title),
+  or it is skipped and left queued. An overdue queue is re-dated first from the
+  overlay's `cadence`. Row keys never move.
+- Needs `approved_boards` and `cadence` in `scheduled_posting.platforms.<ch>`
+  of the profile config (`topup_reserve` optional); a channel without them is
+  refused. It also refuses while the profile's drain is on, and while the
+  dashboard is scheduling that channel (a shared per-channel lock file).
+- Exit codes: 0 ok (including nothing to do), 1 Buffer error, 2 refused,
+  3 production identity refused.
+- `tools/setup_topup_task.ps1 -Profile <p> -Platform <ch> [-Remove]` registers
+  a Windows task that runs it daily at 07:00, 13:00 and 21:00, logging to
+  `data/logs/topup.log`. Run it yourself; nothing registers it for you.
+
 ### Multi-Profile
 - Manage multiple LinkedIn accounts
 - Per-profile Chrome sessions (no cookie conflicts)

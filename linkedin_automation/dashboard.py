@@ -33,6 +33,7 @@ from . import first_comment_drain as first_comment_drain_mod
 from . import first_comment as fc
 from . import buffer_client
 from . import csv_pipeline
+from . import publisher_lock
 
 load_dotenv()
 
@@ -2238,6 +2239,32 @@ def _production_gate(platform, resolved):
             allow_production=True)
 
 
+def _rows_still_schedulable(job_id, rows, state, platform):
+    """``rows`` minus any that changed in ``state`` since they were read.
+
+    Both callers read their rows from the state file before taking the
+    publisher lock. A row whose entry is no longer PENDING or HELD, or no
+    longer stores this row, is dropped; so is a row pinned to a key it no
+    longer resolves to (it was re-dated, and its stale copy would hash to a
+    new key). A row with no entry and no pin is kept, as before the lock."""
+    keep = []
+    for row in rows:
+        key = csv_pipeline.effective_row_key(row, state, platform)
+        entry = state.rows.get(key)
+        pinned = row.get(csv_pipeline.PINNED_KEY)
+        if pinned and pinned != key:
+            continue
+        if entry is not None and (
+                entry.get("status") not in csv_pipeline.SCHEDULABLE_STATES
+                or entry.get("row") != row):
+            continue
+        keep.append(row)
+    if len(keep) != len(rows):
+        log_job(job_id, "Skipped %d row(s) another publisher changed since "
+                        "this job read them" % (len(rows) - len(keep)))
+    return keep
+
+
 def _gated_schedule_pass(job_id, rows, channel_id, state, profile_name,
                          platform, resolved, max_new, slot_limit):
     """schedule_pass with the resolved settings, as both scheduling paths call
@@ -2250,13 +2277,26 @@ def _gated_schedule_pass(job_id, rows, channel_id, state, profile_name,
     # allow_production=True: this IS the dashboard, which - like the
     # scheduler - is production doing its job (docs/ARCHITECTURE.md §9). A
     # bare CLI/module run does not pass this, and is refused by default.
+    #
+    # The channel's publisher lock (D-022 F6): the headless `topup` command
+    # writes this same state file from another process, which
+    # can_start_scheduling_task cannot see. Whoever holds the lock sends; the
+    # other refuses. The state is re-read under the lock, and a row is sent
+    # only if it is still schedulable and stored exactly as this job read it.
+    # A row the other process scheduled, or re-dated (which changes the key a
+    # stale copy hashes to), is dropped here and never sent twice.
     try:
-        return csv_pipeline.schedule_pass(
-            rows, channel_id, state, profile_name=profile_name,
-            max_new=max_new, slot_limit=slot_limit, platform=platform,
-            identity_slug=resolved.get("identity_slug"),
-            key=resolved.get("api_key"), allow_production=True), None
-    except (csv_pipeline.IdentityRefused, pm.ProductionAccessRefused) as exc:
+        with publisher_lock.channel_lock(state.path,
+                                         "dashboard job %s" % job_id):
+            state.reload()
+            rows = _rows_still_schedulable(job_id, rows, state, platform)
+            return csv_pipeline.schedule_pass(
+                rows, channel_id, state, profile_name=profile_name,
+                max_new=max_new, slot_limit=slot_limit, platform=platform,
+                identity_slug=resolved.get("identity_slug"),
+                key=resolved.get("api_key"), allow_production=True), None
+    except (csv_pipeline.IdentityRefused, pm.ProductionAccessRefused,
+            publisher_lock.PublisherBusy) as exc:
         return None, _refused(job_id, exc)
 
 
