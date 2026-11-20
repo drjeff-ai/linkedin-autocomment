@@ -53,11 +53,22 @@ USAGE_LOG = "api_usage.jsonl"
 #
 # Chosen for a US-Pacific audience and configurable per deployment. See
 # DECISIONS.md for why this is a local-time concept converted to UTC late.
+#
+# TIME_WINDOWS is every window a row may NAME (lookup and validation).
+# DEFAULT_WINDOWS is the set a caller gets without naming any: anything that
+# picks windows on its own (``csv_pipeline._window_slots``,
+# ``_first_open_slot``, ``redate_pending`` without ``windows_for``) iterates
+# DEFAULT_WINDOWS only. ``late_afternoon`` and ``night`` are opt-in
+# (DEC-046): placed only when a caller names them, so no channel's cadence
+# rises because they exist.
 TIME_WINDOWS = {
     "morning": (8, 0, 11, 0),
     "afternoon": (12, 0, 15, 0),
+    "late_afternoon": (15, 0, 17, 0),
     "evening": (17, 0, 20, 0),
+    "night": (20, 0, 22, 0),
 }
+DEFAULT_WINDOWS = ("morning", "afternoon", "evening")
 
 DEFAULT_TIMEZONE = "America/Los_Angeles"
 

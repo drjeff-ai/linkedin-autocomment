@@ -922,20 +922,23 @@ def effective_row_key(row, state, platform=None):
     return computed
 
 
-def _window_slots(day, from_window=None):
-    """``(date, window)`` for ``day`` in clock order, from ``from_window`` on."""
-    names = sorted(bc.TIME_WINDOWS, key=window_rank)
+def _window_slots(day, from_window=None, windows=bc.DEFAULT_WINDOWS):
+    """``(date, window)`` for ``day`` in clock order, from ``from_window`` on.
+
+    ``windows`` defaults to ``bc.DEFAULT_WINDOWS``: the opt-in windows are
+    only iterated when a caller passes them (DEC-046)."""
+    names = sorted(windows, key=window_rank)
     if from_window is not None:
         names = names[names.index(from_window):]
     return [(day, n) for n in names]
 
 
-def _first_open_slot(now, tz):
-    """The first ``(date, window)`` whose start is after ``now``."""
+def _first_open_slot(now, tz, windows=bc.DEFAULT_WINDOWS):
+    """The first ``(date, window)`` of ``windows`` whose start is after ``now``."""
     local = now.astimezone(tz)
     day = local.date()
     for _ in range(3):
-        for d, name in _window_slots(day):
+        for d, name in _window_slots(day, windows=windows):
             sh, sm, _eh, _em = bc.TIME_WINDOWS[name]
             if datetime(d.year, d.month, d.day, sh, sm, tzinfo=tz) > local:
                 return d, name
@@ -943,19 +946,21 @@ def _first_open_slot(now, tz):
     raise ValueError("no time window starts after %s" % local.isoformat())
 
 
-def _start_slot(start, now, tz):
-    """Normalise ``start`` to a ``(date, window)`` that has not begun."""
+def _start_slot(start, now, tz, windows=bc.DEFAULT_WINDOWS):
+    """Normalise ``start`` to a ``(date, window)`` of ``windows`` that has
+    not begun."""
     if start is None:
-        return _first_open_slot(now, tz)
+        return _first_open_slot(now, tz, windows)
     if isinstance(start, datetime):
         aware = start if start.tzinfo else start.replace(tzinfo=tz)
-        day, name = _first_open_slot(aware - timedelta(microseconds=1), tz)
+        day, name = _first_open_slot(aware - timedelta(microseconds=1), tz,
+                                     windows)
     else:
         date_str, window = start
         name = str(window or "").strip().lower()
-        if name not in bc.TIME_WINDOWS:
+        if name not in windows:
             raise ValueError("start window %r is not one of %s" % (
-                window, ", ".join(sorted(bc.TIME_WINDOWS, key=window_rank))))
+                window, ", ".join(sorted(windows, key=window_rank))))
         day = datetime.strptime(str(date_str).strip(), "%Y-%m-%d").date()
     sh, sm, _eh, _em = bc.TIME_WINDOWS[name]
     if datetime(day.year, day.month, day.day, sh, sm, tzinfo=tz) <= now.astimezone(tz):
@@ -1008,15 +1013,19 @@ def redate_pending(profile, channel, per_day, start=None, rng=None,
     rows a day, each in a different window in clock order, starting at
     ``start`` or else the next window that has not begun. ``start`` is a
     ``(YYYY-MM-DD, window)`` pair or a datetime (the first window starting at
-    or after it). ``per_day`` is 1 to the number of declared windows; with
-    fewer, a day uses its earliest windows.
+    or after it). ``per_day`` is 1 to the number of default windows
+    (``bc.DEFAULT_WINDOWS``, 3); with fewer, a day uses its earliest windows.
 
     ``per_day`` may instead be a callable ``date -> int`` giving each day its
     own count, 0 to the number of windows; a day given 0 gets no rows, and
     :data:`REDATE_MAX_EMPTY_DAYS` consecutive days placing nothing raise
     ``ValueError``. ``windows_for``, if given, is a callable ``n -> window
     names`` choosing which windows a day with ``n`` rows uses (by default its
-    earliest ``n``). On the start day only windows from ``start`` on are used:
+    earliest ``n``). With ``windows_for`` every declared window
+    (``bc.TIME_WINDOWS``, 5, the opt-in ``late_afternoon`` and ``night``
+    included) may be named, ``per_day`` may go up to 5, and ``start`` may be
+    any of them; without it only the default three exist (DEC-046).
+    On the start day only windows from ``start`` on are used:
     by default the first ``n`` of those, with ``windows_for`` its choices that
     have not begun. Every check runs before the single write, so a bad count
     or window list writes nothing.
@@ -1032,7 +1041,11 @@ def redate_pending(profile, channel, per_day, start=None, rng=None,
     """
     tz = bc.posting_timezone()
     now = now or datetime.now(timezone.utc)
-    windows = sorted(bc.TIME_WINDOWS, key=window_rank)
+    # Without windows_for, only the default windows exist for this call, so
+    # the cap stays at 3 and placement is exactly as before F5. A caller that
+    # names windows may name any declared one, the opt-in ones included.
+    windows = sorted(bc.DEFAULT_WINDOWS if windows_for is None
+                     else bc.TIME_WINDOWS, key=window_rank)
     count = _per_day_counter(per_day, len(windows))
     if state is None:
         state = PipelineState(profile_name=profile, platform=channel)
@@ -1045,7 +1058,7 @@ def redate_pending(profile, channel, per_day, start=None, rng=None,
     if not waiting:
         return []
 
-    day, window = _start_slot(start, now, tz)
+    day, window = _start_slot(start, now, tz, windows)
     slots = []
     first = True
     empty_run = 0

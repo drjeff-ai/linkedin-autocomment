@@ -1029,7 +1029,8 @@ names this explicitly rather than trying and failing.
 
 **Waiting rows go out in clock order (F2).** `pending_rows` and `held_rows`
 order by date, then by `window_rank(time_window)` (the window's start minute
-in `buffer_client.TIME_WINDOWS`, so morning, afternoon, evening), then by
+in `buffer_client.TIME_WINDOWS`, so morning, afternoon, late_afternoon,
+evening, night), then by
 queue time. An undeclared window name sorts after every declared one. Before
 F2 the window sorted by name, so a day's evening row went ahead of its morning
 row when slots were scarce.
@@ -1059,7 +1060,24 @@ nothing (`REDATE_MAX_EMPTY_DAYS`) raise `ValueError` before the write. The
 calendar itself lives in the caller (for Tinderbox, operator scratch), not
 the app.
 
-*Verification anchor (10.2): 2026-11-17, branch `f4-per-day-count`
+**Opt-in windows (F5, DEC-046).** `buffer_client.TIME_WINDOWS` declares five
+windows, Pacific: morning 8-11, afternoon 12-15, `late_afternoon` 15-17,
+evening 17-20, `night` 20-22. It is the lookup and validation table: `due_at`,
+`validate_row` (so a CSV row) and `window_rank` accept and order all five.
+`buffer_client.DEFAULT_WINDOWS` is the three a caller gets without naming
+any. Everything that picks windows on its own iterates only those:
+`_window_slots`, `_first_open_slot`, `_start_slot`, and `redate_pending`
+without `windows_for` (cap 3, start must be a default window). With
+`windows_for`, `redate_pending` may name any of the five, `per_day` may go up
+to 5, and the default start is the next of the five not yet begun. So the new
+windows are placed only when a caller names them, and LinkedIn, X and
+Pinterest placement without one is unchanged
+(`tests/fixtures/window_placement_golden.json`, generated before F5). The
+dashboard's add-one-post dropdown still offers the three defaults.
+
+*Verification anchor (10.2): 2026-11-20, branch `f5-extra-windows`
+(`tests/test_extra_windows.py`, `tests/test_window_defaults_golden.py`);
+2026-11-17, branch `f4-per-day-count`
 (`tests/test_redate_pending.py`); 2026-11-16, branch `f3-redate-pending`
 (`tests/test_redate_pending.py`); `f2-window-order`
 (`tests/test_window_order.py`); before that 2026-11-14, branch

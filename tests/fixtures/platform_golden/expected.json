@@ -6709,7 +6709,7 @@
           "compose": "Window that does not exist.",
           "schedule": {
             "errors": [
-              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
             ],
             "identity_fetches": 1,
             "note": null,
@@ -6718,14 +6718,14 @@
             "status": "failed"
           },
           "validate": [
-            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
           ]
         },
         "<>": {
           "compose": "Window that does not exist.",
           "schedule": {
             "errors": [
-              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
             ],
             "identity_fetches": 0,
             "note": null,
@@ -6734,14 +6734,14 @@
             "status": "failed"
           },
           "validate": [
-            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
           ]
         },
         "<LinkedIn>": {
           "compose": "Window that does not exist.",
           "schedule": {
             "errors": [
-              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
             ],
             "identity_fetches": 0,
             "note": null,
@@ -6750,14 +6750,14 @@
             "status": "failed"
           },
           "validate": [
-            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
           ]
         },
         "<None>": {
           "compose": "Window that does not exist.",
           "schedule": {
             "errors": [
-              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
             ],
             "identity_fetches": 0,
             "note": null,
@@ -6766,14 +6766,14 @@
             "status": "failed"
           },
           "validate": [
-            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
           ]
         },
         "<X>": {
           "compose": "Window that does not exist.",
           "schedule": {
             "errors": [
-              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
             ],
             "identity_fetches": 1,
             "note": null,
@@ -6782,7 +6782,7 @@
             "status": "failed"
           },
           "validate": [
-            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
           ]
         },
         "<linkedin >": {
@@ -6793,14 +6793,14 @@
             "raised": "IdentityRefused: refusing to schedule on linkedin : no browser session to confirm the LinkedIn identity with - refusing. Nothing was created."
           },
           "validate": [
-            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
           ]
         },
         "<linkedin>": {
           "compose": "Window that does not exist.",
           "schedule": {
             "errors": [
-              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
             ],
             "identity_fetches": 0,
             "note": null,
@@ -6809,14 +6809,14 @@
             "status": "failed"
           },
           "validate": [
-            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
           ]
         },
         "<mastodon>": {
           "compose": "Window that does not exist.",
           "schedule": {
             "errors": [
-              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
             ],
             "identity_fetches": 1,
             "note": null,
@@ -6825,14 +6825,14 @@
             "status": "failed"
           },
           "validate": [
-            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
           ]
         },
         "<x>": {
           "compose": "Window that does not exist.",
           "schedule": {
             "errors": [
-              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+              "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
             ],
             "identity_fetches": 1,
             "note": null,
@@ -6841,7 +6841,7 @@
             "status": "failed"
           },
           "validate": [
-            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, morning"
+            "unknown time_window 'midnight-ish' - expected one of afternoon, evening, late_afternoon, morning, night"
           ]
         }
       },
