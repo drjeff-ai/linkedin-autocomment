@@ -1181,7 +1181,8 @@ builds `PipelineState(profile_name=..., platform=...)`, applies
 `_production_gate`, reads slots, and calls `_gated_schedule_pass`, the helper
 `_scheduled_schedule_job` also uses. That helper is `schedule_pass(...,
 platform=, identity_slug=, key=, allow_production=True)`, with the same
-refusals. There is one copy of the gate, not two.
+refusals. There is one copy of the gate, not two. Since D-022 the helper runs
+under the channel's publisher lock and re-reads the state first (§10.11).
 
 `recent_runs` entries carry `platform`; `status()["held_count"]` is the total
 across channels; the panel's slot count is read for the first channel holding
@@ -1356,3 +1357,63 @@ publishers draining one channel would double-post.
 `tests/test_pinterest.py` compares the captured createPost input with
 `pin.publisher`'s shape and covers board lookup, the row rules, identity and the
 drain.*
+
+### 10.11 Headless top-up and the publisher lock (F6, DEC-048)
+
+`linkedin_automation/topup.py`, run as `tools/run_scheduled_posts.py topup
+--profile P --platform C [--reserve N] [--dry-run] [--log-file F]`, is the one
+headless path that sends **PENDING** rows to Buffer. A Windows task
+(`tools/setup_topup_task.ps1`, 07:00, 13:00 and 21:00 local) runs it; the
+dashboard does not need to be open. In order, it:
+
+1. resolves the channel with `pm.resolve_scheduled` (no key fallback) and reads
+   the overlay's top-up config (`topup_config`): `approved_boards`, `cadence`
+   and `topup_reserve` (default 2) in `scheduled_posting.platforms.<C>`.
+   Missing `approved_boards` or `cadence` is a refusal, never a default;
+2. applies `check_declared_production(..., allow_production=False)`: a
+   declared-production identity is refused (exit 3);
+3. refuses while the post drain is on for the profile (the engine's
+   `drain_config(...)["enabled"]`) or the overlay's own `drain` is truthy;
+4. takes the channel's publisher lock and re-reads the state under it;
+5. reads `scheduled_slots(max_age=0)`; `N = free - reserve`; `N <= 0` is a
+   clean exit 0;
+6. if the first PENDING row's window has begun, re-dates every PENDING row
+   with `redate_pending` and the cadence (`Cadence.per_day`,
+   `Cadence.windows_for`), from the first window that has not begun and is after
+   the last SCHEDULED `due_at` (DEC-033: keys and order do not move);
+7. walks PENDING rows in `_waiting_sort_key` order. A row on a board not in
+   `approved_boards`, or not resolvable in `channel_boards` (read once), or
+   whose link fails `link_problem` (2xx only, no redirect hop since redirects
+   are not followed, a title that is present and neither "Redirecting..." nor
+   "Page not found"), is skipped, stays PENDING, and the next row takes its
+   place. Each URL is fetched once per run;
+8. sends the chosen rows one `schedule_pass` call at a time (`max_new=1`, the
+   boards read in step 7 injected) and stops at the first row that does not
+   come back SCHEDULED (exit 1);
+9. prints and logs one summary line: free, reserve, N, scheduled, skipped with
+   reasons, re-dated count, the last Buffer due time, the first pending slot.
+
+`--dry-run` does steps 1 to 7 on a copy of the state whose `save()` is a no-op:
+no Buffer write and no state write. It reads slots and boards and fetches
+links, and prints what it would send.
+
+**The publisher lock** (`publisher_lock.channel_lock(state_path, holder)`) is an
+OS byte-range lock on `<state file>.lock` (`msvcrt` on Windows, `fcntl`
+elsewhere). The OS drops it when the holder dies, so a crash never leaves a
+channel locked. It never waits: the second publisher refuses with the holder's
+name. `topup` holds it for its whole run. `dashboard._gated_schedule_pass`
+(the Schedule button and the post drain's feed) holds it around
+`schedule_pass`, after `PipelineState.reload()`, and first drops rows that
+changed since the job read them (`_rows_still_schedulable`): a row now
+scheduled, a row stored differently, or a row pinned to a key it no longer
+hashes to. Without that, a stale copy of a row a top-up had re-dated would hash
+to a new key and be posted a second time. The CLI's `schedule --csv` pass does
+not take the lock.
+
+*Verification anchor (10.11): 2026-11-20, branch `f6-topup`;
+`tests/test_topup.py` covers N and the reserve, order, each board and link
+failure, the overdue re-date, both directions of the lock (a drain and a
+Schedule-button job run from inside a live top-up are refused), the
+read-then-top-up interleaving, the drain-on refusal, a dry run against a
+snapshot, missing config, and the task script parsed (never run) by
+PowerShell's parser.*

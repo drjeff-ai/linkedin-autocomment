@@ -469,6 +469,12 @@ class PipelineState:
             raise
         return data.get("rows", {}) if isinstance(data, dict) else {}
 
+    def reload(self):
+        """Re-read the file, dropping what this object held in memory. Called
+        under the channel's publisher lock, so a pass acts on what another
+        process wrote, not on what it read before it got the lock."""
+        self.rows = self._load()
+
     def get(self, key):
         return self.rows.get(key) or {"status": PENDING}
 
