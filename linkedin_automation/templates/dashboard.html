@@ -1903,6 +1903,30 @@ header {
       <div id="schpQueue"></div>
     </div>
 
+    <!-- Books and holds (F7). Shown only for a channel whose overlay has a
+         books section. Add, Recheck and Release each show the dry-run plan
+         first and write only after a confirm. None of them writes to Buffer:
+         topup sends what they queue. -->
+    <div class="schp-card" id="schpBooksCard" style="display:none">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">📚 Books and holds</div>
+          <div class="panel-subtitle">Books in this channel's content folder. Add queues a
+            book's new pins as <strong>Pending</strong> (the plan is shown first); pins that
+            fail the board or link check are held with the reason. Nothing here sends to
+            Buffer: the top-up task does.</div>
+        </div>
+        <div><button class="btn btn-sm" onclick="schpLoadBooks()">Refresh</button></div>
+      </div>
+      <div id="schpBooksMsg" style="margin-bottom:0.5rem"></div>
+      <div id="schpBooksList"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:0.8rem">
+        <h3 style="margin:0;font-size:0.95rem">Holds</h3>
+        <button class="btn btn-sm" onclick="schpRecheckHolds()">Recheck board and link holds</button>
+      </div>
+      <div id="schpHoldsList" style="margin-top:0.4rem"></div>
+    </div>
+
     <!-- Content calendar (U1). READ-ONLY: no drag, no edit, no delete. It reads
          /calendar, which reads local state files only and calls no network.
          Moving a post is a later phase, because a move must go through
@@ -3182,6 +3206,7 @@ function switchMode(mode) {
   if (mode === 'scheduled') {
     loadScheduledQueue();
     schpLoadCalendar();
+    schpLoadBooks();
     loadDrain(true);
     loadFirstCommentDrain();
   }
@@ -3260,6 +3285,7 @@ function schpSetPlatform(p) {
   // Re-read rather than re-render: the two platforms are separate stores, so
   // the rows on screen belong to the other account until this returns.
   loadScheduledQueue();
+  schpLoadBooks();
   // The settings panel is scoped to (profile, platform) too - a visible
   // panel left showing the OTHER platform's saved values after a switch
   // would be exactly the stale-header bug the queue re-read above exists to
@@ -3535,6 +3561,114 @@ function schpRow(r, readOnly) {
           schpEsc(bits.join(' · ')) + '</div>' +
       '</div>' +
     '</div></div>';
+}
+
+// ─── Books and holds (F7) ───────────────────────────────
+//
+// Every write is two requests: the first without confirm (the server runs
+// the command as a dry run and returns the plan), then, only if the person
+// confirms that plan, the same request with confirm: true.
+
+function schpBooksUrl(path) {
+  return schpQ(`/api/scheduled/${currentProfile}/${path}`);
+}
+
+function schpBooksSay(html) {
+  const box = document.getElementById('schpBooksMsg');
+  if (box) box.innerHTML = html;
+}
+
+async function schpLoadBooks() {
+  if (!currentProfile) return;
+  const card = document.getElementById('schpBooksCard');
+  let d;
+  try {
+    const res = await fetch(schpBooksUrl('books'));
+    d = await res.json();
+    if (d.configured === false) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    if (!res.ok) throw new Error(d.refused || d.error || 'failed to load books');
+  } catch (e) {
+    card.style.display = '';
+    schpBooksSay('<div class="error-box">' + schpEsc(e.message) + '</div>');
+    return;
+  }
+  document.getElementById('schpBooksList').innerHTML =
+    '<table style="width:100%;font-size:0.8rem;border-collapse:collapse">' +
+    '<tr style="color:var(--text-dim);text-align:left"><th>Book</th><th>Series</th>' +
+    '<th>Pins</th><th>In queue</th><th>Held</th><th>New</th><th></th></tr>' +
+    (d.books || []).map(b =>
+      '<tr><td>' + schpEsc(b.book) + '</td><td>' + schpEsc(b.series || '—') + '</td>' +
+      '<td>' + b.pins + '</td><td>' + b.in_state + '</td><td>' + b.held + '</td>' +
+      '<td>' + b.new + '</td><td>' +
+      (b.new ? '<button class="btn btn-sm" data-book="' + schpEsc(b.book) + '" ' +
+               'onclick="schpAddBook(this.dataset.book)">Add</button>' : '') +
+      '</td></tr>').join('') + '</table>';
+  const holds = d.holds || [];
+  document.getElementById('schpHoldsList').innerHTML = holds.length
+    ? holds.map(h =>
+      '<div style="padding:0.4rem 0.6rem;border:1px solid var(--border);border-radius:6px;' +
+      'margin-bottom:0.3rem;font-size:0.8rem;display:flex;gap:0.6rem;align-items:center">' +
+      '<span style="color:#c4a6ff;white-space:nowrap">' + schpEsc(h.kind) + '</span>' +
+      '<span style="flex:1;min-width:0">' + schpEsc((h.row || {}).title || h.source_id) +
+      '<br><span style="color:var(--text-dim)">' + schpEsc(h.book) + ' · ' +
+      schpEsc(h.reason) + '</span></span>' +
+      '<button class="btn btn-sm" data-key="' + schpEsc(h.source_id) + '" ' +
+      'onclick="schpReleaseHold(this.dataset.key)">Release</button></div>').join('')
+    : '<div style="color:var(--text-dim);font-size:0.8rem">No holds.</div>';
+}
+
+function schpBooksPlanText(d) {
+  const q = d.queued || [], h = d.held || [];
+  const lines = ['Queue ' + q.length + ' pin(s) as Pending, hold ' + h.length + '.'];
+  q.slice(0, 12).forEach(x => lines.push('  queue: ' + x.date + ' ' + x.time_window + '  ' + (x.title || x.source_id)));
+  if (q.length > 12) lines.push('  ... and ' + (q.length - 12) + ' more');
+  h.slice(0, 12).forEach(x => lines.push('  hold (' + x.kind + '): ' + (x.title || x.source_id) + ' - ' + x.reason));
+  if (h.length > 12) lines.push('  ... and ' + (h.length - 12) + ' more');
+  lines.push('', 'Nothing is sent to Buffer. Go ahead?');
+  return lines.join('\n');
+}
+
+async function schpBooksPost(path, payload) {
+  const res = await fetch(`/api/scheduled/${currentProfile}/${path}`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(Object.assign({platform: schpPlatform}, payload))
+  });
+  const d = await res.json();
+  if (!res.ok) throw new Error(d.refused || d.error || ('failed: ' + path));
+  return d;
+}
+
+// Plan first; write only on a confirm of that plan.
+async function schpBooksConfirmed(path, payload) {
+  try {
+    const plan = await schpBooksPost(path, Object.assign({}, payload, {confirm: false}));
+    if (!(plan.queued || []).length && !(plan.held || []).length) {
+      schpBooksSay('<div style="font-size:0.8rem">Nothing to do.</div>');
+      return;
+    }
+    if (!confirm(schpBooksPlanText(plan))) return;
+    const done = await schpBooksPost(path, Object.assign({}, payload, {confirm: true}));
+    schpBooksSay('<div style="font-size:0.8rem">Queued ' + (done.queued || []).length +
+                 ', held ' + (done.held || []).length + '.</div>');
+  } catch (e) {
+    schpBooksSay('<div class="error-box">' + schpEsc(e.message) + '</div>');
+  }
+  schpLoadBooks();
+  loadScheduledQueue();
+  schpLoadCalendar();
+}
+
+function schpAddBook(book) {
+  return schpBooksConfirmed('books/add', {book: book});
+}
+
+function schpRecheckHolds() {
+  return schpBooksConfirmed('holds/recheck', {});
+}
+
+function schpReleaseHold(key) {
+  return schpBooksConfirmed('holds/release', {key: key});
 }
 
 // ─── Content calendar (U1) ──────────────────────────────

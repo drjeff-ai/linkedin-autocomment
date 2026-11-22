@@ -816,12 +816,18 @@ def test_still_no_commenting_route_exists():
     `settings/test` makes exactly one read-only Buffer call (getChannel) to
     report whether the configured channel resolves - see
     tests/test_scheduled_settings.py's test_the_test_connection_route_never_
-    creates_a_post - and creates nothing.
+    creates_a_post - and creates nothing. `books/add`, `holds/recheck` and
+    `holds/release` (F7, D-025) queue rows PENDING in our own state file and
+    write our own hold file; they read Buffer's board list and nothing else,
+    and cannot create a post or comment (tests/test_books.py).
     """
     writes = sorted(str(r) for r in dashboard.app.url_map.iter_rules()
                     if str(r).startswith("/api/scheduled")
                     and {"POST", "PUT", "DELETE", "PATCH"} & r.methods)
-    assert writes == ["/api/scheduled/<profile_name>/reconcile",
+    assert writes == ["/api/scheduled/<profile_name>/books/add",
+                      "/api/scheduled/<profile_name>/holds/recheck",
+                      "/api/scheduled/<profile_name>/holds/release",
+                      "/api/scheduled/<profile_name>/reconcile",
                       "/api/scheduled/<profile_name>/rows",
                       "/api/scheduled/<profile_name>/rows/<key>",
                       "/api/scheduled/<profile_name>/rows/delete",

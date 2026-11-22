@@ -20,6 +20,16 @@ slots minus a reserve, from stored state (no CSV), after the board and link
 checks in the profile overlay (linkedin_automation/topup.py). It is what the
 Windows task from tools/setup_topup_task.ps1 runs.
 
+Books and holds (F7, linkedin_automation/books.py), for a channel whose
+overlay has a `books` section. None of these writes to Buffer:
+
+    books          --profile P --platform C    every book: pins, in state, held, new
+    add-book       --profile P --platform C --book FOLDER [--dry-run]
+    recheck-holds  --profile P --platform C [--kind board|link] [--dry-run]
+    release-hold   --profile P --platform C --key SOURCE_ID ... [--dry-run]
+    hold           --profile P --platform C --key SOURCE_ID ... --kind K --reason R
+    holds          --profile P --platform C    every hold with its reason
+
 `comment` is the one to put on a schedule - every 15 minutes is ample, since it
 does nothing for rows whose posts have not published yet.
 
@@ -43,6 +53,7 @@ from linkedin_automation import csv_pipeline as cp  # noqa: E402
 from linkedin_automation import platforms  # noqa: E402
 from linkedin_automation import profile_manager as pm  # noqa: E402
 from linkedin_automation import topup  # noqa: E402
+from linkedin_automation import books  # noqa: E402
 
 load_dotenv()
 
@@ -66,12 +77,50 @@ def _make_output_unicode_safe():
             pass
 
 
+def _books_command(ap, args):
+    """F7: books and holds. None of these writes to Buffer."""
+    if not args.profile:
+        ap.error("%s needs --profile" % args.pass_name)
+    name = args.pass_name
+    try:
+        if name == "books":
+            code, _s = books.list_books(args.profile, args.platform)
+        elif name == "holds":
+            code, _s = books.list_holds(args.profile, args.platform)
+        elif name == "add-book":
+            if not args.book:
+                ap.error("add-book needs --book")
+            code, _s = books.add_book(args.profile, args.platform, args.book,
+                                      dry_run=args.dry_run)
+        elif name == "recheck-holds":
+            code, _s = books.recheck_holds(args.profile, args.platform,
+                                           kinds=args.kind,
+                                           dry_run=args.dry_run)
+        elif name == "release-hold":
+            if not args.key:
+                ap.error("release-hold needs --key")
+            code, _s = books.release_hold(args.profile, args.platform,
+                                          args.key, dry_run=args.dry_run)
+        else:
+            if not args.key or not args.reason or not args.kind or len(args.kind) != 1:
+                ap.error("hold needs --key, one --kind and --reason")
+            code, _s = books.hold_pins(args.profile, args.platform, args.key,
+                                       args.kind[0], args.reason,
+                                       dry_run=args.dry_run)
+    except books.BooksRefused as exc:
+        print("%s: REFUSED: %s" % (name, exc))
+        return books.EXIT_REFUSED
+    return code
+
+
 def main():
     _make_output_unicode_safe()
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("pass_name", choices=["schedule", "comment", "status", "topup"])
+    ap.add_argument("pass_name", choices=[
+        "schedule", "comment", "status", "topup",
+        "books", "add-book", "recheck-holds", "release-hold", "hold", "holds"])
     ap.add_argument("--csv", help="the content calendar (schedule pass)")
     ap.add_argument("--channel-id",
                     help="Buffer channel id. Defaults to the resolved "
@@ -98,6 +147,15 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="topup: say what would be sent; no Buffer or state "
                          "write")
+    ap.add_argument("--book", default=None,
+                    help="add-book: the book folder under the content root")
+    ap.add_argument("--kind", action="append", default=None,
+                    choices=["board", "link", "review", "operator"],
+                    help="recheck-holds: board or link (repeatable; default "
+                         "both). hold: the hold kind")
+    ap.add_argument("--key", nargs="+", default=None, metavar="SOURCE_ID",
+                    help="release-hold / hold: the pins' source ids")
+    ap.add_argument("--reason", default=None, help="hold: why")
     ap.add_argument("--log-file", default=None,
                     help="also append this run's log to this file")
     ap.add_argument("--verbose", action="store_true")
@@ -113,6 +171,10 @@ def main():
         handler.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)s %(name)s %(message)s"))
         logging.getLogger().addHandler(handler)
+
+    if args.pass_name in ("books", "add-book", "recheck-holds", "release-hold",
+                          "hold", "holds"):
+        return _books_command(ap, args)
 
     if args.pass_name == "topup":
         if not args.profile:

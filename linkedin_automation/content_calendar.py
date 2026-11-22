@@ -214,3 +214,51 @@ def collect(profile, date_from, date_to, sources, platform=None):
         per = counts.setdefault(item["day"], {})
         per[item["group"]] = per.get(item["group"], 0) + 1
     return {"items": items, "undated": undated, "counts": counts}
+
+
+def item_from_hold(platform, hold, row_view=None):
+    """One undated calendar item for one app hold (F7). A held pin has no
+    slot, so it sits in ``undated``, beside the grid."""
+    row = hold.get("row") or {}
+    reason = "%s: %s" % (hold.get("kind"), hold.get("reason"))
+    text = (row.get("post_text") or "").strip()
+    item = {
+        "platform": platform,
+        "platform_label": channels.resolve(platform).label,
+        "key": hold.get("source_id"),
+        "state": "app_hold",
+        "group": "held",
+        "title": (row.get("title") or "").strip() or None,
+        "preview": text[:160],
+        "image_url": None,
+        "day": None,
+        "due_at": None,
+        "time_window": None,
+        "time_label": None,
+        "sort_minute": None,
+        "hold_reason": reason,
+        "errors": [],
+    }
+    if row_view is not None:
+        detail = row_view(hold.get("source_id"), {
+            "status": csv_pipeline.HELD, "row": row, "text": text,
+            "hold_reason": reason})
+        detail.update(label="Held (not queued)",
+                      meaning="not in the queue: %s" % reason,
+                      action=("re-checked by Recheck holds" if hold.get("kind")
+                              in ("board", "link") else "released only by "
+                              "Release"),
+                      date=None, time_window=None, planned=None)
+        item["detail"] = detail
+    return item
+
+
+def hold_items(profile, row_view=None):
+    """Every app hold of every channel the profile has a hold file for."""
+    from . import holds as hl
+    for platform in channels.REGISTRY:
+        path = hl.holds_path(state_path(profile, platform))
+        if not os.path.exists(path):
+            continue
+        for hold in hl.HoldStore(path).of_kind():
+            yield item_from_hold(platform, hold, row_view=row_view)

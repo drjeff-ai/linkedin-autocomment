@@ -1458,3 +1458,74 @@ Schedule-button job run from inside a live top-up are refused), the
 read-then-top-up interleaving, the drain-on refusal, a dry run against a
 snapshot, missing config, and the task script parsed (never run) by
 PowerShell's parser.*
+
+### 10.12 Books and app holds (F7)
+
+`linkedin_automation/books.py` moves the Tinderbox operator flow (DEC-042,
+DEC-043, DEC-044, scratch `tinderbox_map.map_all`, `ops6.round_robin`,
+`ops7.plan`) into the app. A channel opts in with
+`scheduled_posting.platforms.<C>.books`: `content_root`, `series_order`,
+`csv_board_series` (series whose CSV `board` is used), `board_map`
+(`source_id -> board` for the rest) and `link_keep_prefix_series`. A channel
+without it is refused by these commands; nothing else reads it. The app never
+reads `$STRAT`: the board maps were copied into the overlay.
+
+**Identity and dedupe.** A pin is its `pins.csv` `source_id`. State rows carry
+no source id, so a state row is matched to a pin by its resolved `image_path`
+(`PinIndex.pin_of_row`, case and separator folded). A pin in the state file in
+any state, or in the hold file, is never queued again; two pins sharing an id
+refuse the whole run.
+
+**Mapping.** Order within a series: one cover per book (books in name order),
+then round-robin across its books in file order. Board: the CSV board for a
+`csv_board_series` pin, else `board_map`; it must be approved and resolve on
+the channel's live board list (`topup.board_problem`, boards read once per
+run). Link: a `link_keep_prefix_series` pin uses its CSV link; any other uses
+`/books/<folder minus its series prefix>`, never the prefixed form
+(DEC-043(2)); it must pass `topup.link_problem` (each URL fetched once). Then
+`validate_row` on a provisional slot.
+
+**Queueing.** Passing pins are queued PENDING with `queue_rows` (boards
+injected) on the provisional slot, interleaved into the pending queue by
+`merge` (the round-robin across `series_order`, existing rows emitted in their
+own order: `ops7.plan`), then the whole pending queue is re-dated with the
+overlay `cadence` from the first window after the last SCHEDULED `due_at`, via
+`redate_pending(..., order=)`. `order` is an optional list naming every
+PENDING key once; without it `redate_pending` is unchanged. After the re-date
+the module asserts the pending order is the merged order and the existing
+rows' relative order is unchanged; keys are pinned as in DEC-033.
+
+**Holds** (`linkedin_automation/holds.py`, the only writer) live in
+`<state dir>/pin_holds.json`, keyed by source id, each with the full source
+row, the mapped row, `kind` (`board`, `link`, `review`, `operator`), reason,
+`held_at` (kept across updates) and `checked_at`. **Held pins are not in the
+state file**, so `topup`, `pending_rows` and every state reader are
+unchanged, and `csv_pipeline` has no new state. A failing pin goes to holds;
+`recheck-holds` re-runs the checks on `board` and `link` holds; `review` and
+`operator` holds move only by `release-hold`, which re-runs the checks (a pin
+that still fails stays held under the failing check's kind). The state is
+saved before the hold file, so a crash between leaves a pin queued and still
+listed as held, which dedupe reads as present.
+
+**Commands** (`tools/run_scheduled_posts.py`): `books`, `holds`, `add-book`,
+`recheck-holds`, `release-hold`, `hold`, each with `--dry-run` where it
+writes. Each resolves the channel (`pm.resolve_scheduled`), runs the
+production gate, and holds the channel's publisher lock (§10.11) for the whole
+run, so it and `topup`, the drain and the Schedule button refuse each other.
+A dry run works on copies whose `save()` is a no-op. **None writes to
+Buffer**; `topup` sends what they queue.
+
+**Dashboard.** `GET /api/scheduled/<p>/books` (books and holds, or
+`configured: false`), `POST .../books/add`, `.../holds/recheck`,
+`.../holds/release` call the same functions. A POST writes only with
+`"confirm": true`; otherwise it is a dry run returning the plan, which the
+Books and holds card shows in a confirm dialog first. The calendar's sources
+include the hold files, so held pins appear in its `undated` side list.
+
+*Verification anchor (10.12): 2026-11-22, branch `f7-books`;
+`tests/test_books.py` covers config refusal and validation, parity with the
+scratch mapper on two real books' structure (`tests/fixtures/books`), board,
+link and row failures to holds, the round-robin and merge, the re-date keeping
+keys and order, dedupe across states and holds, dry runs against a snapshot,
+the lock both ways, the routes' confirm and lock, and the calendar's held
+list.*

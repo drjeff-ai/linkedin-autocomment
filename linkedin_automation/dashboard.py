@@ -34,6 +34,7 @@ from . import first_comment as fc
 from . import buffer_client
 from . import csv_pipeline
 from . import content_calendar
+from . import books as books_mod
 from . import publisher_lock
 
 load_dotenv()
@@ -2047,9 +2048,116 @@ def _calendar_state_source(profile_name):
                                              row_view=_scheduled_row_view)
 
 
+def _calendar_hold_source(profile_name):
+    return content_calendar.hold_items(profile_name,
+                                       row_view=_scheduled_row_view)
+
+
 #: Where the calendar's items come from, in order. A new channel kind adds a
 #: source here (``profile -> items``); the route below does not change.
-_CALENDAR_SOURCES = [_calendar_state_source]
+#: App holds (F7) have no date, so they land in the calendar's side list.
+_CALENDAR_SOURCES = [_calendar_state_source, _calendar_hold_source]
+
+
+# ─── Books and holds (F7) ────────────────────────────────────────────────────
+#
+# The same commands as the CLI (books.py), so the same production gate and the
+# same per-channel publisher lock as topup. A write needs "confirm": true in
+# the body; without it the route runs the command as a dry run and returns the
+# plan, which is what the page shows before asking.
+
+def _books_response(code, summary):
+    status = {books_mod.EXIT_OK: 200, books_mod.EXIT_REFUSED: 409,
+              books_mod.EXIT_PRODUCTION_REFUSED: 403,
+              books_mod.EXIT_BUFFER_ERROR: 502}.get(code, 500)
+    body = {k: v for k, v in summary.items()}
+    body["exit"] = code
+    return jsonify(body), status
+
+
+def _quiet(_line):
+    return None
+
+
+@app.route('/api/scheduled/<profile_name>/books', methods=['GET'])
+def scheduled_books(profile_name):
+    """GET - the channel's books (pins, in state, held, new) and its holds.
+    ``configured: false`` for a channel with no books config."""
+    try:
+        platform = _req_platform()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    try:
+        books_mod.books_config(profile_name, platform)
+    except books_mod.BooksRefused as exc:
+        return jsonify({"configured": False, "reason": str(exc)})
+    code, summary = books_mod.list_books(profile_name, platform, out=_quiet)
+    if code != books_mod.EXIT_OK:
+        return _books_response(code, summary)
+    hcode, hsummary = books_mod.list_holds(profile_name, platform, out=_quiet)
+    if hcode != books_mod.EXIT_OK:
+        return _books_response(hcode, hsummary)
+    summary["holds"] = hsummary["holds"]
+    summary["configured"] = True
+    return _books_response(code, summary)
+
+
+def _confirmed(body):
+    return body.get("confirm") is True
+
+
+@app.route('/api/scheduled/<profile_name>/books/add', methods=['POST'])
+def scheduled_books_add(profile_name):
+    """POST {platform, book, confirm} - add-book. Without ``confirm: true``
+    it is a dry run: the plan, nothing written."""
+    body = request.get_json(silent=True) or {}
+    try:
+        platform = _req_platform()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    book = str(body.get("book") or "").strip()
+    if not book:
+        return jsonify({"error": "book is required"}), 400
+    code, summary = books_mod.add_book(profile_name, platform, book,
+                                       dry_run=not _confirmed(body), out=_quiet)
+    return _books_response(code, summary)
+
+
+@app.route('/api/scheduled/<profile_name>/holds/recheck', methods=['POST'])
+def scheduled_holds_recheck(profile_name):
+    """POST {platform, kind?, confirm} - recheck-holds (board and link
+    holds). Without ``confirm: true`` it is a dry run."""
+    body = request.get_json(silent=True) or {}
+    try:
+        platform = _req_platform()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    kind = body.get("kind")
+    try:
+        code, summary = books_mod.recheck_holds(
+            profile_name, platform, kinds=[kind] if kind else None,
+            dry_run=not _confirmed(body), out=_quiet)
+    except books_mod.BooksRefused as exc:
+        return jsonify({"error": str(exc)}), 400
+    return _books_response(code, summary)
+
+
+@app.route('/api/scheduled/<profile_name>/holds/release', methods=['POST'])
+def scheduled_holds_release(profile_name):
+    """POST {platform, key, confirm} - release-hold. Without ``confirm:
+    true`` it is a dry run."""
+    body = request.get_json(silent=True) or {}
+    try:
+        platform = _req_platform()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    key = str(body.get("key") or "").strip()
+    if not key:
+        return jsonify({"error": "key is required"}), 400
+    code, summary = books_mod.release_hold(profile_name, platform, [key],
+                                           dry_run=not _confirmed(body),
+                                           out=_quiet)
+    return _books_response(code, summary)
 
 
 @app.route('/api/scheduled/<profile_name>/calendar', methods=['GET'])

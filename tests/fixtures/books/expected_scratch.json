@@ -1,0 +1,82 @@
+{
+  "lumora-the-loudest-color": {
+    "board": {
+      "bsv1-308cb70a0db88161": "Picture Books About School",
+      "bsv1-600bfce7b7175662": "Picture Books About Being Brave",
+      "bsv1-8d4a287b4b8b8a8d": "Picture Books About Being Brave",
+      "bsv1-96da7f3e71fcf5d6": "Picture Books About Being Brave",
+      "bsv1-a329db5ec7465a94": "Picture Books About Being Brave",
+      "bsv1-a64c1724e153d395": "Picture Books About School",
+      "bsv1-b184bd3c4d5905a6": "Picture Books About School",
+      "bsv1-b39bbbc9db8d0b88": "Picture Books About Being Brave",
+      "bsv1-d7f944735866e044": "Picture Books About Being Brave",
+      "bsv1-e233f48eec58e037": "Picture Books About School",
+      "bsv1-f4d7efa96ebff632": "Picture Books About Being Brave"
+    },
+    "link": {
+      "bsv1-308cb70a0db88161": "https://tinderboxpublishing.com/books/the-loudest-color",
+      "bsv1-600bfce7b7175662": "https://tinderboxpublishing.com/books/the-loudest-color",
+      "bsv1-8d4a287b4b8b8a8d": "https://tinderboxpublishing.com/books/the-loudest-color",
+      "bsv1-96da7f3e71fcf5d6": "https://tinderboxpublishing.com/books/the-loudest-color",
+      "bsv1-a329db5ec7465a94": "https://tinderboxpublishing.com/books/the-loudest-color",
+      "bsv1-a64c1724e153d395": "https://tinderboxpublishing.com/books/the-loudest-color",
+      "bsv1-b184bd3c4d5905a6": "https://tinderboxpublishing.com/books/the-loudest-color",
+      "bsv1-b39bbbc9db8d0b88": "https://tinderboxpublishing.com/books/the-loudest-color",
+      "bsv1-d7f944735866e044": "https://tinderboxpublishing.com/books/the-loudest-color",
+      "bsv1-e233f48eec58e037": "https://tinderboxpublishing.com/books/the-loudest-color",
+      "bsv1-f4d7efa96ebff632": "https://tinderboxpublishing.com/books/the-loudest-color"
+    },
+    "order": [
+      "bsv1-8d4a287b4b8b8a8d",
+      "bsv1-600bfce7b7175662",
+      "bsv1-b184bd3c4d5905a6",
+      "bsv1-e233f48eec58e037",
+      "bsv1-96da7f3e71fcf5d6",
+      "bsv1-f4d7efa96ebff632",
+      "bsv1-d7f944735866e044",
+      "bsv1-308cb70a0db88161",
+      "bsv1-b39bbbc9db8d0b88",
+      "bsv1-a329db5ec7465a94",
+      "bsv1-a64c1724e153d395"
+    ],
+    "scratch_source": "ops7_map.json",
+    "series": "lumora"
+  },
+  "wild-littles-two-houses-now": {
+    "board": {
+      "bsv1-10ded89b9f9c6256": "Picture Books About Kindness and Friendship",
+      "bsv1-1f1aef03d70ebfd9": "Picture Books About Being Brave",
+      "bsv1-82de13fe1f1712b3": "Picture Books About Big Feelings",
+      "bsv1-90780d89ddcc974b": "Picture Books About Big Feelings",
+      "bsv1-ab28c6853f37618d": "Picture Books About Kindness and Friendship",
+      "bsv1-d2761f3674375076": "Picture Books About Big Feelings",
+      "bsv1-e790289f148c5070": "Picture Books About Kindness and Friendship",
+      "bsv1-eb85971691daf0b7": "Picture Books About Kindness and Friendship",
+      "bsv1-f398e951175f8408": "Picture Books About Kindness and Friendship"
+    },
+    "link": {
+      "bsv1-10ded89b9f9c6256": "https://tinderboxpublishing.com/books/two-houses-now",
+      "bsv1-1f1aef03d70ebfd9": "https://tinderboxpublishing.com/books/two-houses-now",
+      "bsv1-82de13fe1f1712b3": "https://tinderboxpublishing.com/books/two-houses-now",
+      "bsv1-90780d89ddcc974b": "https://tinderboxpublishing.com/books/two-houses-now",
+      "bsv1-ab28c6853f37618d": "https://tinderboxpublishing.com/books/two-houses-now",
+      "bsv1-d2761f3674375076": "https://tinderboxpublishing.com/books/two-houses-now",
+      "bsv1-e790289f148c5070": "https://tinderboxpublishing.com/books/two-houses-now",
+      "bsv1-eb85971691daf0b7": "https://tinderboxpublishing.com/books/two-houses-now",
+      "bsv1-f398e951175f8408": "https://tinderboxpublishing.com/books/two-houses-now"
+    },
+    "order": [
+      "bsv1-90780d89ddcc974b",
+      "bsv1-ab28c6853f37618d",
+      "bsv1-d2761f3674375076",
+      "bsv1-e790289f148c5070",
+      "bsv1-eb85971691daf0b7",
+      "bsv1-f398e951175f8408",
+      "bsv1-1f1aef03d70ebfd9",
+      "bsv1-82de13fe1f1712b3",
+      "bsv1-10ded89b9f9c6256"
+    ],
+    "scratch_source": "ops6_map.json",
+    "series": "wild-littles"
+  }
+}

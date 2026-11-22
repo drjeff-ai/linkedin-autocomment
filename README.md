@@ -275,6 +275,26 @@ for the counts.** Files on disk are derived output, never state.
   a Windows task that runs it daily at 07:00, 13:00 and 21:00, logging to
   `data/logs/topup.log`. Run it yourself; nothing registers it for you.
 
+### Books and holds (Pinterest)
+- For a channel whose overlay has a `books` section (`content_root`,
+  `series_order`, `csv_board_series`, `board_map`, `link_keep_prefix_series`),
+  new books in the content folder are queued from the app, without a dispatch:
+  - `run_scheduled_posts.py books --profile <p> --platform <ch>`: every book
+    folder with its pins, already queued, held, and new.
+  - `add-book --book <folder> [--dry-run]`: map the book's new pins, queue the
+    ones that pass the board and link checks as Pending (interleaved by series
+    and re-dated with the overlay cadence; no row key moves), and hold the rest
+    with the reason.
+  - `recheck-holds [--kind board|link] [--dry-run]`, `release-hold --key <source_id>`,
+    `hold --key <id> --kind <k> --reason <r>`, `holds`.
+- Holds live in `data/<p>/<ch>/pin_holds.json`, never in the state file. None of
+  these commands writes to Buffer; `topup` sends what they queue. They take the
+  same production gate and per-channel lock as `topup`.
+- The dashboard's Scheduled Posting tab shows a Books and holds card for such a
+  channel. Add, Recheck and Release show the plan first and act on a confirm.
+- The Content calendar card on the same tab shows every post on its day (read
+  only), with held pins listed beside it.
+
 ### Multi-Profile
 - Manage multiple LinkedIn accounts
 - Per-profile Chrome sessions (no cookie conflicts)
