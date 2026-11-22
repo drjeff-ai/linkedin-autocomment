@@ -1903,6 +1903,38 @@ header {
       <div id="schpQueue"></div>
     </div>
 
+    <!-- Content calendar (U1). READ-ONLY: no drag, no edit, no delete. It reads
+         /calendar, which reads local state files only and calls no network.
+         Moving a post is a later phase, because a move must go through
+         redate_pending so row keys never move (DEC-033). -->
+    <div class="schp-card" id="schpCalendarCard">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">📅 Content calendar</div>
+          <div class="panel-subtitle">Every post of this profile on its day, on every
+            platform. Read-only: nothing here changes a post. Times are Pacific.
+            Shows last-known state; the queue below asks Buffer first.</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin-bottom:0.6rem">
+        <button class="btn btn-sm" id="schpCalMonthBtn" onclick="schpCalSetView('month')">Month</button>
+        <button class="btn btn-sm" id="schpCalWeekBtn" onclick="schpCalSetView('week')">Week</button>
+        <button class="btn btn-sm" onclick="schpCalStep(-1)" title="Previous">&larr;</button>
+        <button class="btn btn-sm" onclick="schpCalToday()">Today</button>
+        <button class="btn btn-sm" onclick="schpCalStep(1)" title="Next">&rarr;</button>
+        <strong id="schpCalRangeLabel" style="font-size:0.9rem"></strong>
+        <select class="input" id="schpCalPlatform" style="max-width:180px"
+                onchange="schpCalSetPlatform(this.value)">
+          <option value="">All platforms</option>
+        </select>
+        <button class="btn btn-sm" onclick="schpLoadCalendar()">Refresh</button>
+      </div>
+      <div id="schpCalLegend" style="display:flex;gap:0.4rem;flex-wrap:wrap;margin-bottom:0.5rem"></div>
+      <div id="schpCalGrid"></div>
+      <div id="schpCalUndated" style="margin-top:0.6rem"></div>
+      <div id="schpCalDetail" style="margin-top:0.6rem"></div>
+    </div>
+
   </div><!-- end mode-scheduled -->
 
 </div>
@@ -3149,6 +3181,7 @@ function switchMode(mode) {
   }
   if (mode === 'scheduled') {
     loadScheduledQueue();
+    schpLoadCalendar();
     loadDrain(true);
     loadFirstCommentDrain();
   }
@@ -3362,8 +3395,12 @@ function schpWhen(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   if (isNaN(d)) return schpEsc(iso);
+  // Pacific, with the zone named (U1): the windows are Pacific, so a time
+  // shown in the browser's own zone would not line up with them.
   return d.toLocaleString([], {month: 'short', day: 'numeric',
-                               hour: '2-digit', minute: '2-digit'});
+                               hour: '2-digit', minute: '2-digit',
+                               timeZone: 'America/Los_Angeles',
+                               timeZoneName: 'short'});
 }
 
 function schpToggleText(key) {
@@ -3404,10 +3441,13 @@ async function schpDeleteRow(key, hasPost, postId) {
   await loadScheduledQueue();
 }
 
-function schpRow(r) {
+// readOnly: the same detail with no control at all (no checkbox, no delete),
+// for the calendar, which has no write action of any kind.
+function schpRow(r, readOnly) {
   const badge = SCHP_BADGE[r.status] || SCHP_BADGE.pending;
   const bits = [];
   if (r.due_at) bits.push('due ' + schpWhen(r.due_at));
+  else if (r.planned) bits.push('planned ' + r.planned);
   if (r.post_id) bits.push('buffer ' + schpEsc(r.post_id));
   if (r.image_url) bits.push('image');
   if (r.first_comment_link) bits.push('comment link');
@@ -3460,7 +3500,7 @@ function schpRow(r) {
 
   const img = schpImageCell(r);
 
-  const del = '<button class="btn btn-sm" title="Remove from the queue" ' +
+  const del = readOnly === true ? '' : '<button class="btn btn-sm" title="Remove from the queue" ' +
     'style="margin-top:0.4rem;font-size:0.72rem;padding:0.15rem 0.5rem;' +
     'color:#ff9a72" onclick="schpDeleteRow(\'' + r.key + '\',' +
     (r.has_post ? 'true' : 'false') + ',\'' + schpEsc(r.post_id || '') + '\')">' +
@@ -3470,7 +3510,7 @@ function schpRow(r) {
   // this just paints whatever that set already says, so a re-render (filter
   // change, reconcile) that repaints this row restores it from the same place
   // every time.
-  const check = '<input type="checkbox" class="schp-check" ' +
+  const check = readOnly === true ? '' : '<input type="checkbox" class="schp-check" ' +
     'title="Select this row" style="margin-top:0.15rem;cursor:pointer" ' +
     (schpSelected.has(r.key) ? 'checked ' : '') +
     'onchange="schpToggleSelect(\'' + r.key + '\', this.checked)">';
@@ -3495,6 +3535,215 @@ function schpRow(r) {
           schpEsc(bits.join(' · ')) + '</div>' +
       '</div>' +
     '</div></div>';
+}
+
+// ─── Content calendar (U1) ──────────────────────────────
+//
+// READ-ONLY. Nothing in this block writes: no drag, no edit, no delete. The
+// detail it shows is schpRow(item.detail, true), the queue row's own detail
+// with every control left out. Day arithmetic is on UTC dates, so a DST
+// change never shifts a square; the day of each item comes from the server,
+// already in Pacific.
+
+let schpCalView = 'month';
+let schpCalAnchor = null;      // 'YYYY-MM-DD', the day the view is built around
+let schpCalPlatform = '';      // '' = every platform
+let schpCalItems = [];         // the last response's items, indexed by chip id
+
+// Each calendar group borrows the queue badge of the state it stands for, so
+// a colour means the same thing in both places.
+const SCHP_CAL_GROUP_BADGE = {
+  queued: 'pending', held: 'held', in_buffer: 'scheduled',
+  sent: 'commented', failed: 'failed'
+};
+
+function schpCalBadge(group) {
+  return SCHP_BADGE[SCHP_CAL_GROUP_BADGE[group]] || SCHP_BADGE.pending;
+}
+
+function schpCalTodayPT() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(new Date());
+  const get = t => parts.find(p => p.type === t).value;
+  return get('year') + '-' + get('month') + '-' + get('day');
+}
+
+function schpCalParse(day) {
+  const [y, m, d] = day.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d));
+}
+
+function schpCalFmt(dt) {
+  return dt.toISOString().slice(0, 10);
+}
+
+function schpCalAdd(dt, days) {
+  const out = new Date(dt.getTime());
+  out.setUTCDate(out.getUTCDate() + days);
+  return out;
+}
+
+// [first, last] day shown, both Sunday-aligned weeks.
+function schpCalRange() {
+  const anchor = schpCalParse(schpCalAnchor || schpCalTodayPT());
+  if (schpCalView === 'week') {
+    const start = schpCalAdd(anchor, -anchor.getUTCDay());
+    return [start, schpCalAdd(start, 6)];
+  }
+  const first = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), 1));
+  const last = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth() + 1, 0));
+  return [schpCalAdd(first, -first.getUTCDay()), schpCalAdd(last, 6 - last.getUTCDay())];
+}
+
+function schpCalSetView(v) {
+  schpCalView = v;
+  schpLoadCalendar();
+}
+
+function schpCalSetPlatform(p) {
+  schpCalPlatform = p;
+  schpLoadCalendar();
+}
+
+function schpCalToday() {
+  schpCalAnchor = schpCalTodayPT();
+  schpLoadCalendar();
+}
+
+function schpCalStep(dir) {
+  const anchor = schpCalParse(schpCalAnchor || schpCalTodayPT());
+  const next = schpCalView === 'week'
+    ? schpCalAdd(anchor, 7 * dir)
+    : new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth() + dir, 1));
+  schpCalAnchor = schpCalFmt(next);
+  schpLoadCalendar();
+}
+
+function schpCalPaintControls() {
+  const sel = document.getElementById('schpCalPlatform');
+  if (sel && sel.options.length === 1) {
+    SCHP_CHANNELS.forEach(c => {
+      const o = document.createElement('option');
+      o.value = c.id; o.textContent = c.label;
+      sel.appendChild(o);
+    });
+  }
+  if (sel) sel.value = schpCalPlatform;
+  ['month', 'week'].forEach(v => {
+    const b = document.getElementById(v === 'month' ? 'schpCalMonthBtn' : 'schpCalWeekBtn');
+    if (b) b.style.background = schpCalView === v ? 'var(--accent, #2b6cb0)' : '';
+  });
+}
+
+async function schpLoadCalendar() {
+  if (!currentProfile) return;
+  if (!schpCalAnchor) schpCalAnchor = schpCalTodayPT();
+  schpCalPaintControls();
+  const [start, end] = schpCalRange();
+  const grid = document.getElementById('schpCalGrid');
+  grid.innerHTML = '<div style="color:var(--text-dim)">Loading…</div>';
+  let url = `/api/scheduled/${currentProfile}/calendar?from=${schpCalFmt(start)}&to=${schpCalFmt(end)}`;
+  if (schpCalPlatform) url += '&platform=' + encodeURIComponent(schpCalPlatform);
+  try {
+    const res = await fetch(url);
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || 'failed to load the calendar');
+    schpRenderCalendar(d, start, end);
+  } catch (e) {
+    grid.innerHTML = '<div class="error-box">' + schpEsc(e.message) + '</div>';
+  }
+}
+
+function schpCalChip(item, idx, withTime) {
+  const b = schpCalBadge(item.group);
+  const name = item.title || item.preview || '(no text)';
+  const time = withTime && item.time_label ? item.time_label + ' · ' : '';
+  return '<div class="schp-cal-chip" role="button" tabindex="0" ' +
+    'title="' + schpEsc(item.platform_label + ' · ' + (item.time_label || '') + ' · ' + name) + '" ' +
+    'onclick="schpCalShow(' + idx + ')" ' +
+    'style="cursor:pointer;margin-top:0.2rem;padding:0.1rem 0.35rem;border-radius:4px;' +
+    'font-size:0.68rem;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
+    'background:' + b.bg + ';color:' + b.fg + '">' +
+    schpEsc(time + name) + '</div>';
+}
+
+function schpRenderCalendar(d, start, end) {
+  schpCalItems = (d.items || []).concat(d.undated || []);
+  const groups = d.groups || {};
+  document.getElementById('schpCalLegend').innerHTML = Object.keys(groups).map(g => {
+    const b = schpCalBadge(g);
+    return '<span style="padding:0.15rem 0.5rem;border-radius:999px;font-size:0.72rem;' +
+      'background:' + b.bg + ';color:' + b.fg + '">' + schpEsc(groups[g]) + '</span>';
+  }).join('');
+
+  const anchor = schpCalParse(schpCalAnchor);
+  document.getElementById('schpCalRangeLabel').textContent = schpCalView === 'week'
+    ? schpCalFmt(start) + ' to ' + schpCalFmt(end)
+    : anchor.toLocaleString('en-US', {month: 'long', year: 'numeric', timeZone: 'UTC'});
+
+  const byDay = {};
+  (d.items || []).forEach((it, i) => { (byDay[it.day] = byDay[it.day] || []).push([it, i]); });
+  const today = schpCalTodayPT();
+  const cap = schpCalView === 'week' ? Infinity : 4;
+  let html = '<div style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px">';
+  ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(n => {
+    html += '<div style="font-size:0.72rem;color:var(--text-dim);text-align:center">' + n + '</div>';
+  });
+  for (let dt = start; dt <= end; dt = schpCalAdd(dt, 1)) {
+    const day = schpCalFmt(dt);
+    const list = byDay[day] || [];
+    const outside = schpCalView === 'month' && dt.getUTCMonth() !== anchor.getUTCMonth();
+    const counts = (d.counts || {})[day] || {};
+    const countLine = list.length
+      ? '<span style="font-size:0.66rem;color:var(--text-dim)">' + list.length + ' · ' +
+        Object.keys(counts).map(g => schpEsc((groups[g] || g) + ' ' + counts[g])).join(', ') +
+        '</span>'
+      : '';
+    const chips = list.slice(0, cap).map(([it, i]) => schpCalChip(it, i, schpCalView === 'week')).join('');
+    const more = list.length > cap
+      ? '<div style="font-size:0.66rem;color:var(--text-dim);margin-top:0.2rem">+' +
+        (list.length - cap) + ' more (week view shows all)</div>'
+      : '';
+    html += '<div style="min-height:' + (schpCalView === 'week' ? '10rem' : '5.5rem') + ';' +
+      'padding:0.3rem;border:1px solid ' + (day === today ? '#7fd0ff' : 'var(--border)') + ';' +
+      'border-radius:6px;background:var(--panel);opacity:' + (outside ? 0.5 : 1) + ';min-width:0">' +
+      '<div style="display:flex;justify-content:space-between;gap:0.3rem">' +
+        '<strong style="font-size:0.75rem">' + dt.getUTCDate() + '</strong>' + countLine +
+      '</div>' + chips + more + '</div>';
+  }
+  html += '</div>';
+  document.getElementById('schpCalGrid').innerHTML = html;
+
+  // Rows with no day cannot sit on a square, so they are listed beside it.
+  const undated = d.undated || [];
+  const base = (d.items || []).length;
+  document.getElementById('schpCalUndated').innerHTML = undated.length
+    ? '<div style="font-size:0.8rem;margin-bottom:0.2rem"><strong>No date (' +
+      undated.length + ')</strong> <span style="color:var(--text-dim)">' +
+      'held or not yet dated</span></div>' +
+      undated.map((it, j) => schpCalChip(it, base + j, false)).join('')
+    : '';
+  document.getElementById('schpCalDetail').innerHTML = '';
+}
+
+function schpCalCloseDetail() {
+  const box = document.getElementById('schpCalDetail');
+  if (box) box.innerHTML = '';
+}
+
+function schpCalShow(idx) {
+  const it = schpCalItems[idx];
+  const box = document.getElementById('schpCalDetail');
+  if (!it || !box) return;
+  const head = '<div style="font-size:0.78rem;color:var(--text-dim);margin-bottom:0.3rem">' +
+    schpEsc(it.platform_label) + ' · ' + schpEsc(it.day || 'no date') +
+    (it.time_label ? ' · ' + schpEsc(it.time_label) : '') +
+    (it.title ? ' · <strong>' + schpEsc(it.title) + '</strong>' : '') +
+    ' <button class="btn btn-sm" style="margin-left:0.5rem;font-size:0.7rem;padding:0.1rem 0.4rem" ' +
+    'onclick="schpCalCloseDetail()">Close</button></div>';
+  box.innerHTML = head + (it.detail ? schpRow(it.detail, true)
+    : '<div style="color:var(--text-dim)">No detail for this item.</div>');
 }
 
 // What happened to a row's image, as a thumbnail plus one line of text.
@@ -3896,7 +4145,7 @@ function schpRenderQueueBody(d) {
     html += '<div style="margin:0.9rem 0 0.4rem;font-size:0.78rem;' +
       'color:var(--text-dim);text-transform:uppercase;letter-spacing:0.05em">' +
       schpEsc(lbl) + ' (' + rows.length + ')' + mn + '</div>';
-    html += rows.map(schpRow).join('');
+    html += rows.map(r => schpRow(r)).join('');
   });
   box.innerHTML = html || ('<div style="color:var(--text-dim);padding:1rem 0">' +
     'No rows match this filter.</div>');

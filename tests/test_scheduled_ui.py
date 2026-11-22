@@ -1417,7 +1417,7 @@ def test_the_row_checkbox_is_painted_from_the_selection_set_not_the_dom(client):
     filter change) restores the same checked state rather than defaulting
     every box to unchecked."""
     html = client.get("/").get_data(as_text=True)
-    row_fn = _js_function(html, "function schpRow(r)")
+    row_fn = _js_function(html, "function schpRow(r, readOnly)")
     assert "schpSelected.has(r.key)" in row_fn
     assert "onchange=\\'schpToggleSelect" in row_fn or \
         "onchange=\"schpToggleSelect" in row_fn or \

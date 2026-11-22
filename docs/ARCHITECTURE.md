@@ -436,6 +436,47 @@ The pipeline is five steps — Scrape → Review Posts → Generate → Review C
 Post — plus one lifecycle chip per status. All of these views read the store
 (§1.4).
 
+### 2.1 Content calendar and due times (U1)
+
+**Every queue row says when it goes out.** `_scheduled_row_view` carries
+`date`, `time_window` and `planned` (`content_calendar.planned_label`, e.g.
+`Tue 11-24 morning, 8-11 PT`) from the stored row, alongside `due_at`. The row
+shows `due <exact time>` once Buffer has a `due_at`, otherwise `planned
+<label>`. Times are shown in Pacific with the zone named (`schpWhen`).
+
+**The calendar** is the `📅 Content calendar` card in the Scheduled Posting
+section: month and week views, previous/next, a platform filter, per-day counts
+and one chip per post, coloured by group: queued (PENDING), held (HELD),
+in Buffer (SCHEDULED), sent (PUBLISHED, COMMENTED, COMMENT_FAILED), failed
+(FAILED). Clicking a chip shows `schpRow(detail, true)`, the queue row's own
+detail with no checkbox and no Delete. **It has no write action of any kind.**
+Moving a post is a later phase, because a move must go through
+`redate_pending` so keys never move (DEC-033).
+
+`GET /api/scheduled/<p>/calendar?from=YYYY-MM-DD&to=YYYY-MM-DD[&platform=C]`
+(`scheduled_calendar`) returns `{items, undated, counts, groups, timezone}`.
+`items` are ordered by Pacific day, then time (`due_at`, else the window's
+start; none last), then platform and key; each has platform, key, state,
+group, title, preview, image url, day, `due_at` or window, `time_label`,
+`hold_reason`, errors and `detail`. `undated` holds rows with no day, which
+the panel lists beside the grid. The day of a Buffer row comes from its
+`due_at` in Pacific, not from the UTC date. It reads **local files only**: no
+reconcile-on-render (unlike the queue), no Buffer or other network call, no
+write (state paths are computed by `content_calendar.state_path`, so not even
+a data directory is created). It therefore shows last-known state.
+
+The route collects from `dashboard._CALENDAR_SOURCES`, a list of callables
+`profile -> items`. Today there is one, every scheduled-posting state file the
+profile has (`content_calendar.state_file_items`). A new kind of channel
+(YouTube, V1) adds a source; the route does not change.
+
+*Verification anchor (2.1): 2026-11-22, branch `u1-calendar`;
+`tests/test_content_calendar.py` covers the view fields for PENDING, HELD and
+SCHEDULED rows, the label of all five windows, the route's range, states,
+order and counts against fixture state files, a no-network guard that is
+shown to fail on a real attempt, no write, and the rendered panel with no
+write action.*
+
 ---
 
 ## 3. Scraper — `post_finder.py` _(sketch)_
