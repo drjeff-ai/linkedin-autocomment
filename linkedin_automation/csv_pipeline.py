@@ -1010,7 +1010,7 @@ def _day_windows(n, windows, windows_for):
 
 
 def redate_pending(profile, channel, per_day, start=None, rng=None,
-                   now=None, state=None, windows_for=None):
+                   now=None, state=None, windows_for=None, order=None):
     """Give the channel's queued, unscheduled rows consecutive dates.
 
     Acts on PENDING rows only: SCHEDULED and later rows already have a Buffer
@@ -1042,6 +1042,12 @@ def redate_pending(profile, channel, per_day, start=None, rng=None,
     for every row; here ``bc.due_at`` is only used (with ``rng``) to prove each
     new slot is in the future. One atomic write of the state file.
 
+    ``order``, if given, is the list of every PENDING key in the order the
+    rows are to take the slots (F7: new rows interleaved into the queue). It
+    must name each PENDING row exactly once, or ``ValueError`` is raised and
+    nothing is written. Without it the order is :func:`pending_rows` order,
+    exactly as before.
+
     Returns ``[{"key", "date", "time_window", "old_date", "old_window"}]`` in
     order.
     """
@@ -1061,6 +1067,16 @@ def redate_pending(profile, channel, per_day, start=None, rng=None,
     waiting = [(k, v) for k, v in state.rows.items()
                if v.get("status") == PENDING and v.get("row")]
     waiting.sort(key=_waiting_sort_key)
+    if order is not None:
+        order = list(order)
+        by_key = dict(waiting)
+        if len(order) != len(set(order)) or set(order) != set(by_key):
+            raise ValueError(
+                "order must name every PENDING row exactly once: %d given, "
+                "%d pending, %d unknown, %d missing"
+                % (len(order), len(by_key), len(set(order) - set(by_key)),
+                   len(set(by_key) - set(order))))
+        waiting = [(k, by_key[k]) for k in order]
     if not waiting:
         return []
 
