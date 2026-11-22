@@ -33,6 +33,7 @@ from . import first_comment_drain as first_comment_drain_mod
 from . import first_comment as fc
 from . import buffer_client
 from . import csv_pipeline
+from . import content_calendar
 from . import publisher_lock
 
 load_dotenv()
@@ -1610,6 +1611,12 @@ def _scheduled_row_view(key, rec):
         # can be in. The table renders this, never a bare blank.
         "image": _scheduled_image_view(rec),
         "first_comment_link": rec.get("first_comment_link"),
+        # When the row is planned to go out, for a row Buffer has not dated
+        # yet (U1). Additive: a row with a due_at still shows due_at.
+        "date": source_row.get("date") or None,
+        "time_window": source_row.get("time_window") or None,
+        "planned": content_calendar.planned_label(
+            source_row.get("date"), source_row.get("time_window")),
         "errors": rec.get("errors") or [],
         "updated_at": rec.get("updated_at"),
         # Anything with a post_id exists on LinkedIn. The UI uses this to refuse
@@ -2033,6 +2040,48 @@ def scheduled_queue(profile_name):
             "config_layout": channels.resolve(platform).config_layout,
         },
     })
+
+
+def _calendar_state_source(profile_name):
+    return content_calendar.state_file_items(profile_name,
+                                             row_view=_scheduled_row_view)
+
+
+#: Where the calendar's items come from, in order. A new channel kind adds a
+#: source here (``profile -> items``); the route below does not change.
+_CALENDAR_SOURCES = [_calendar_state_source]
+
+
+@app.route('/api/scheduled/<profile_name>/calendar', methods=['GET'])
+def scheduled_calendar(profile_name):
+    """GET ?from=YYYY-MM-DD&to=YYYY-MM-DD[&platform=P] - the content calendar.
+
+    READ-ONLY, and local only: it reads the profile's state files and makes no
+    Buffer or other network call (no reconcile-on-render, unlike the queue).
+    Every platform the profile has a state file for, unless ``platform`` names
+    one.
+    """
+    try:
+        start = content_calendar.parse_day(request.args.get("from"), "from")
+        end = content_calendar.parse_day(request.args.get("to"), "to")
+        platform = (request.args.get("platform") or "").strip().lower() or None
+        if platform and platform not in channels.REGISTRY:
+            raise ValueError("unknown platform %r" % platform)
+        if not profile_name or os.path.basename(profile_name) != profile_name \
+                or profile_name in (".", ".."):
+            raise ValueError("bad profile name %r" % profile_name)
+        out = content_calendar.collect(profile_name, start, end,
+                                       _CALENDAR_SOURCES, platform=platform)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    out.update({
+        "from": start.isoformat(),
+        "to": end.isoformat(),
+        "platform": platform,
+        "groups": content_calendar.GROUP_LABELS,
+        "timezone": content_calendar.zone_name(buffer_client.posting_timezone()),
+    })
+    return jsonify(out)
 
 
 @app.route('/api/scheduled/<profile_name>/rows', methods=['POST'])
