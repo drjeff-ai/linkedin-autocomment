@@ -378,7 +378,7 @@ def test_auto_cycle_job_happy_path_runs_all_three_in_order(env, routed_subproces
     # GENERATED record is seeded directly for post to find - this test is
     # about subprocess call ORDER, not real data flow from one stage into
     # the next (that is what run_auto_cycle's fakes test, in isolation).
-    _seed_store([_rec(1, NEW), _rec(2, GENERATED, comment="nice point")])
+    _seed_store([_rec(1, NEW), _rec(2, GENERATED, comment="nice point", reviewed_at="t", approved_hash=post_store.text_hash("nice point"))])
 
     result = dash._auto_cycle_job("j1", "demo", _cycle_cfg())
 
@@ -420,7 +420,7 @@ def test_auto_cycle_job_zero_scrape_posts_still_runs_generate_and_post(env, rout
     """A quiet scrape (0 posts) is not a failure - the cycle continues."""
     _write(env.timeline / "ai_posts_20260101_000000.json",
            {"quality_found": 0, "quality_posts": []})
-    _seed_store([_rec(1, NEW), _rec(2, GENERATED, comment="already drafted")])
+    _seed_store([_rec(1, NEW), _rec(2, GENERATED, comment="already drafted", reviewed_at="t", approved_hash=post_store.text_hash("already drafted"))])
 
     result = dash._auto_cycle_job("j4", "demo", _cycle_cfg())
 
@@ -431,3 +431,23 @@ def test_auto_cycle_job_zero_scrape_posts_still_runs_generate_and_post(env, rout
         "linkedin_automation.comment_generator",
         "linkedin_automation.comment_poster",
     ]
+
+
+@pytest.mark.parametrize("extra, why", [
+    ({}, "never approved"),
+    ({"reviewed_at": "t"}, "stamped before E0, no hash"),
+    ({"reviewed_at": "t", "approved_hash": post_store.text_hash("old text")},
+     "edited after approval"),
+])
+def test_auto_cycle_posts_nothing_unapproved(env, routed_subprocess, extra, why):
+    """E0 False direction: an unapproved draft never reaches the poster."""
+    _write(env.timeline / "ai_posts_20260101_000000.json",
+           {"quality_found": 0, "quality_posts": []})
+    _seed_store([_rec(1, NEW), _rec(2, GENERATED, comment="a draft", **extra)])
+
+    result = dash._auto_cycle_job("j5", "demo", _cycle_cfg())
+
+    assert result["ok"] is True, why
+    assert "linkedin_automation.comment_poster" not in routed_subprocess.calls, why
+    assert result["post"]["posted"] == 0
+    assert result["post"]["note"] == "0 posted: 1 not approved"

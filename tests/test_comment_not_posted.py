@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from linkedin_automation import comment_poster as cpm  # noqa: E402
 from linkedin_automation import profile_manager as pm  # noqa: E402
+from approval_helpers import approve_txt  # noqa: E402
 
 
 class FakeElement:
@@ -321,7 +322,9 @@ def _run_with(poster, tmp_path, comments, outcome):
     poster.login = lambda: True
     poster.driver = None
     poster.post_single_comment = outcome
-    return poster.run(str(path), post_count=10)
+    return poster.run(approve_txt(poster.profile_name, str(path),
+                                  parse=poster.parse_comments_file),
+                      post_count=10)
 
 
 def test_a_run_that_posted_nothing_reports_failures_not_success(poster, tmp_path,

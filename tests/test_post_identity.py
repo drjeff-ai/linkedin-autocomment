@@ -21,6 +21,7 @@ from linkedin_automation import profile_manager as pm
 from linkedin_automation.post_finder import LinkedInScraper
 
 from fake_post_page import FakePostPage, FEED_URL
+from approval_helpers import approve_txt  # noqa: E402
 
 Poster = cpm.LinkedInCommentPoster
 
@@ -289,7 +290,7 @@ def test_the_run_log_uses_the_qualified_id(poster, monkeypatch, tmp_path):
     txt.write_text(comment_fields.comments_to_txt(
         [{"url": GROUP_URL, "comment": "A point.", "post_preview": "p",
           "author": "a"}], "ts"), encoding="utf-8")
-    poster.run(str(txt), post_count=1)
+    poster.run(approve_txt(poster.profile_name, str(txt)), post_count=1)
     with open(poster.run_log_path, encoding="utf-8") as f:
         log = f.read()
     assert "COMMENT post=groupPost:%s outcome=posted" % GROUP_ID in log

@@ -11,6 +11,7 @@ from linkedin_automation import profile_manager as pm
 from linkedin_automation import dashboard as linkedin_dashboard
 from linkedin_automation import comment_poster as post_linkedin_comments
 from linkedin_automation.comment_poster import LinkedInCommentPoster
+from approval_helpers import approve_txt  # noqa: E402
 
 URL = "https://www.linkedin.com/feed/update/urn:li:activity:{}/"
 
@@ -72,7 +73,7 @@ def test_one_failing_comment_does_not_abort_run(poster):
 
     p.post_single_comment = fake_post
 
-    result = p.run(txt, post_count=10)
+    result = p.run(approve_txt(p.profile_name, txt), post_count=10)
     assert result["posted"] == 5
     assert result["failed"] == 1          # NOT skipped
     assert result["skipped"] == 0
@@ -90,7 +91,7 @@ def test_failed_post_returns_false_is_counted_as_a_failure(poster):
 
     p.post_single_comment = fake_post
 
-    result = p.run(txt, post_count=10)
+    result = p.run(approve_txt(p.profile_name, txt), post_count=10)
     assert result["posted"] == 2
     # post_single_comment returning False means the comment was attempted and
     # did not go out. That is a failure, and the summary must say so.
@@ -104,7 +105,7 @@ def test_post_count_limit_respected(poster):
     txt = _write_txt(comments_dir, comments)
     p.post_single_comment = lambda c, *a, **k: True
 
-    result = p.run(txt, post_count=2)
+    result = p.run(approve_txt(p.profile_name, txt), post_count=2)
     assert result["posted"] == 2
 
 
@@ -120,7 +121,7 @@ def test_a_failing_comment_is_logged_loudly_with_its_reason(poster, caplog):
 
     p.post_single_comment = fake_post
     with caplog.at_level("WARNING"):
-        p.run(txt, post_count=10)
+        p.run(approve_txt(p.profile_name, txt), post_count=10)
     # ERROR, not a warning about a "skip": a typed comment that never posted is
     # the failure this whole module exists to make impossible to miss.
     failures = [r for r in caplog.records if r.levelname == "ERROR"]

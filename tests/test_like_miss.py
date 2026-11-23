@@ -23,6 +23,7 @@ from linkedin_automation import comment_poster as cpm
 from linkedin_automation import profile_manager as pm
 
 from fake_post_page import FakePostPage
+from approval_helpers import approve_txt  # noqa: E402
 
 URL = "https://www.linkedin.com/feed/update/urn:li:activity:1010101010101010/"
 URL2 = "https://www.linkedin.com/feed/update/urn:li:activity:1100110011001100/"
@@ -140,7 +141,7 @@ def test_the_run_summary_counts_the_misses(failures, monkeypatch, tmp_path):
         encoding="utf-8")
     poster = cpm.LinkedInCommentPoster(profile_name="t")
     poster.LIKE_WAIT_SECONDS = 0.05
-    poster.run(str(txt), post_count=2)
+    poster.run(approve_txt(poster.profile_name, str(txt)), post_count=2)
     with open(poster.run_log_path, encoding="utf-8") as f:
         assert "like_misses=2" in f.read()
 

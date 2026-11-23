@@ -24,6 +24,7 @@ from linkedin_automation import post_store
 from linkedin_automation import profile_manager as pm
 
 from fake_post_page import FakePostPage
+from approval_helpers import approve_txt  # noqa: E402
 
 SLOW = "https://www.linkedin.com/feed/update/urn:li:activity:1011011011011011/"
 FINE = "https://www.linkedin.com/feed/update/urn:li:activity:1101101101101101/"
@@ -117,7 +118,7 @@ def test_the_run_continues_to_the_next_comment(env, monkeypatch, tmp_path):
           "author": "a"} for i, u in enumerate((SLOW, FINE))], "ts"),
         encoding="utf-8")
     poster = cpm.LinkedInCommentPoster(profile_name="t")
-    result = poster.run(str(txt), post_count=2)
+    result = poster.run(approve_txt(poster.profile_name, str(txt)), post_count=2)
 
     assert page.gets == [SLOW, FINE]
     assert page.published == [(FINE, "A point 1.")]

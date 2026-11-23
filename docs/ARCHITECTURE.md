@@ -162,6 +162,7 @@ accumulator, not a queue.
 | `unavailable_reason` `unavailable_at` | Set only by `mark_unavailable` |
 | `comment` `comment_meta` | The draft, and its style/approach/word_count |
 | `scraped_at` `generated_at` `commented_at` `reviewed_at` `updated_at` | Timestamps |
+| `approved_hash` | sha256 of the approved `comment` (E0, §4.1). Absent or `None` means not approved; no schema bump, because absent already denies |
 
 **Identity** is the post's URL, else `hash:md5(author + text[:100])` —
 `post_store.post_key`. There is exactly one identity function in the codebase;
@@ -520,6 +521,46 @@ and an on-topic relevance check before `mark_generated`.
 Cost discipline: every paid call is appended to `api_usage.jsonl`; the
 `PROJECT.md` per-session cap applies.
 
+### 4.1 Approval: the generator's output waits for a human (E0, DEC-060)
+
+A draft leaves the generator `GENERATED` and **unapproved**. Approval is per
+item, on the record: `reviewed_at` plus `approved_hash`, the sha256 of the exact
+approved text (`post_store.approve`). `post_store.is_approved(record)` is the
+one shared check: `status == GENERATED`, `reviewed_at` set, and `approved_hash`
+equal to the hash of the current `comment`. `approval_refusal` names the reason
+when it is not (`wrong_status`, `not_reviewed`, `no_approved_hash`,
+`edited_after_approval`, `no_record`).
+
+- **Review panel.** Each card has an Approve button
+  (`POST /api/comments/<p>/approve`, `{key, comment}`): the text in the box is
+  the text approved. "Approve all shown (N)" states the count and asks to
+  confirm; `/approve_all` refuses unless `confirm` is the JSON `true` and
+  `count` equals the number of items.
+- **Save stores edits only.** `/save` calls `save_edit`, which approves
+  nothing, and an edit that changes the text clears `reviewed_at` and
+  `approved_hash`, so the draft is back in the queue. `mark_generated` clears
+  both too: a regenerated draft is a new draft.
+- **Records stamped before E0** (`reviewed_at`, no hash) are not approved and
+  are back in the review queue (`unapproved_reviewed_count`). A legacy
+  `ready_*.json` seeds unapproved: a file is not an approval.
+- `review_queue()` is the GENERATED drafts that are not approved, and
+  `reviewed_count()` the approved ones, so queue + approved = the bin.
+
+Every engagement post path calls the check at its last step before posting
+and posts nothing that fails it, logging each refusal with its reason and
+saying `0 posted: N not approved`:
+
+| Path | Where |
+|---|---|
+| Dashboard Post route | `dashboard.post_comments`: approved only; the old "fall back to the rest of the bin" and the hand-built `comments_file` are gone |
+| Scheduler `post_comments` | `Scheduler._fire_post_comments` |
+| `auto_cycle` post stage | `dashboard._auto_cycle_job.run_post`. A draft the cycle just generated is never approved, so the cycle posts only what a human approved earlier |
+| `comment_poster` subprocess | `LinkedInCommentPoster.approval_refusal`, re-reading the store before each comment of the TXT handoff (§5), and the `--test-url` mode |
+
+*Verification anchor (4.1): 2026-11-22, branch `e0-approval-gate`;
+`tests/test_approval_gate.py`, `tests/test_generate_from_lifecycle.py`
+(`test_auto_cycle_posts_nothing_unapproved`).*
+
 ---
 
 ## 5. Comment poster — `comment_poster.py`
@@ -530,9 +571,17 @@ through `human_behavior.py`. Writes `posting_progress.json` and **never the
 store** (§1.5). The DOM facts behind every step are in `docs/MAINTENANCE.md`
 §6–§7.
 
+The TXT file is a handoff, not an authority (E0). The poster is only ever
+given approved store records serialized to TXT, and before each comment it
+re-reads the store: the URL's record must be `post_store.is_approved` and its
+text must equal the text in the file, or the comment is refused with its
+reason and counted `not_approved` in the run summary. `--test-url` posts only
+an approved record's text; free text is refused.
+
 Per post, in order:
 
 1. **Ledger check.** A URL already in `posted_comments` is skipped.
+   **Approval check.** `approval_refusal` against the store, as above.
 2. **Navigate and classify** (`classify_navigation`, one bounded budget):
    `OK`, `UNAVAILABLE` (redirected off the activity id, or an explicit removed
    marker — recorded in `unavailable_posts`, terminal), or `UNCLEAR` (anything
@@ -552,6 +601,9 @@ Per post, in order:
 **Terminal vs transient is the design axis.** Only a positive signal marks a
 record terminal (`posted_comments`, `unavailable_posts`); every ambiguous
 outcome leaves it `GENERATED` for the next run.
+
+*Verification anchor (5, approval re-check): 2026-11-22, branch
+`e0-approval-gate`; `tests/test_approval_gate.py` (`test_poster_*`).*
 
 ---
 
