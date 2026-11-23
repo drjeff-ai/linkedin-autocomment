@@ -38,6 +38,8 @@ GROUP_LABELS = {
     "in_buffer": "In Buffer",
     "sent": "Sent",
     "failed": "Failed",
+    # V1: uploaded private, made public by YouTube at its publishAt.
+    "scheduled_youtube": "Scheduled on YouTube",
 }
 
 #: The longest range one request may ask for. A month view with its leading

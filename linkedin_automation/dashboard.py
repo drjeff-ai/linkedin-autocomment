@@ -36,6 +36,7 @@ from . import csv_pipeline
 from . import content_calendar
 from . import books as books_mod
 from . import publisher_lock
+from . import youtube_channel
 
 load_dotenv()
 
@@ -2053,10 +2054,16 @@ def _calendar_hold_source(profile_name):
                                        row_view=_scheduled_row_view)
 
 
+def _calendar_youtube_source(profile_name):
+    """V1: the YouTube channel's own state (``data/<p>/youtube/``), read only."""
+    return youtube_channel.calendar_items(profile_name)
+
+
 #: Where the calendar's items come from, in order. A new channel kind adds a
 #: source here (``profile -> items``); the route below does not change.
 #: App holds (F7) have no date, so they land in the calendar's side list.
-_CALENDAR_SOURCES = [_calendar_state_source, _calendar_hold_source]
+_CALENDAR_SOURCES = [_calendar_state_source, _calendar_hold_source,
+                     _calendar_youtube_source]
 
 
 # ─── Books and holds (F7) ────────────────────────────────────────────────────
@@ -2173,7 +2180,9 @@ def scheduled_calendar(profile_name):
         start = content_calendar.parse_day(request.args.get("from"), "from")
         end = content_calendar.parse_day(request.args.get("to"), "to")
         platform = (request.args.get("platform") or "").strip().lower() or None
-        if platform and platform not in channels.REGISTRY:
+        # Every declared channel, not only the Buffer ones: YouTube is on
+        # the calendar too (V1).
+        if platform and platform not in channels.CHANNELS:
             raise ValueError("unknown platform %r" % platform)
         if not profile_name or os.path.basename(profile_name) != profile_name \
                 or profile_name in (".", ".."):

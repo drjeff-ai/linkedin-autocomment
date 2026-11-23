@@ -295,6 +295,27 @@ for the counts.** Files on disk are derived output, never state.
 - The Content calendar card on the same tab shows every post on its day (read
   only), with held pins listed beside it.
 
+### YouTube Shorts (`youtube-*`)
+- For a profile with a `scheduled_posting.platforms.youtube` overlay (`vp_brand`,
+  `vp_root`, `channel_id`, `content_root`, `publish_time`, `tz`, `per_day`,
+  `quota`). It goes through the YouTube Data API, not Buffer
+  (`linkedin_automation/youtube_channel.py`, docs/ARCHITECTURE.md §10.13).
+- Auth, once per channel. It opens Google's consent page in your browser and
+  stores the token in `data/<p>/youtube/oauth_token.json` (gitignored):
+  `.venv\Scripts\python.exe tools\youtube_auth.py --profile <p> --client-secrets <file.json>`.
+  It refuses a Google account whose channel is not `channel_id`.
+- `run_scheduled_posts.py youtube-cutover --profile <p> [--dry-run]` takes the
+  channel over from video-publisher. It imports its history and lists the brand
+  in video-publisher's `config/moved_to_platform.yaml`, after which
+  video-publisher refuses that brand. Until then the commands below refuse to
+  upload.
+- `youtube-intake [--dry-run]` queues new `C-NNN-<slug>/` folders (Shorts text
+  from `youtube.md`, verbatim). `youtube-schedule [--max-uploads N] [--dry-run]`
+  dates them one a day at `publish_time` and uploads each as private with
+  `publishAt`, within the daily quota. `youtube-status` shows state and quota.
+  `youtube-import [--dry-run]` re-reads video-publisher's history.
+- No task or drain runs these; you run them.
+
 ### Multi-Profile
 - Manage multiple LinkedIn accounts
 - Per-profile Chrome sessions (no cookie conflicts)

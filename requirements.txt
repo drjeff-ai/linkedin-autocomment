@@ -30,3 +30,13 @@ botocore==1.43.89
 # is exactly why it is called out here. Without it the scheduler raises
 # ZoneInfoNotFoundError on a clean Windows checkout.
 tzdata==2026.3
+# YouTube channel (V1, DEC-058/DEC-059): OAuth refresh, the installed-app
+# consent tools/youtube_auth.py runs, and the resumable videos.insert. The same
+# three libraries video-publisher uploads with. Exact pins, as everywhere here.
+google-api-python-client==2.202.0
+google-auth==2.63.1
+google-auth-oauthlib==1.5.0
+# Reads video-publisher's manifests and its moved_to_platform.yaml marker with
+# the same parser video-publisher writes them with (YAML), during the V1-M
+# import and the cutover. Was already in the dev venv through pre-commit.
+PyYAML==6.0.3

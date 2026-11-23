@@ -30,6 +30,16 @@ overlay has a `books` section. None of these writes to Buffer:
     hold           --profile P --platform C --key SOURCE_ID ... --kind K --reason R
     holds          --profile P --platform C    every hold with its reason
 
+YouTube Shorts (V1, linkedin_automation/youtube_channel.py), for a profile with
+a scheduled_posting.platforms.youtube overlay. Each takes the production gate
+and the channel's publisher lock; none is run by any task or drain:
+
+    youtube-intake    --profile P [--dry-run]   queue new C-NNN folders
+    youtube-schedule  --profile P [--max-uploads N] [--dry-run]
+                      date queued items, upload them private with publishAt
+    youtube-status    --profile P               local state and today's quota
+    youtube-import    --profile P [--dry-run]   video-publisher's history (V1-M)
+    youtube-cutover   --profile P [--dry-run]   move the brand here (Jeff runs it)
 `comment` is the one to put on a schedule - every 15 minutes is ample, since it
 does nothing for rows whose posts have not published yet.
 
@@ -54,6 +64,7 @@ from linkedin_automation import platforms  # noqa: E402
 from linkedin_automation import profile_manager as pm  # noqa: E402
 from linkedin_automation import topup  # noqa: E402
 from linkedin_automation import books  # noqa: E402
+from linkedin_automation import youtube_channel as yt  # noqa: E402
 
 load_dotenv()
 
@@ -120,7 +131,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("pass_name", choices=[
         "schedule", "comment", "status", "topup",
-        "books", "add-book", "recheck-holds", "release-hold", "hold", "holds"])
+        "books", "add-book", "recheck-holds", "release-hold", "hold", "holds",
+        "youtube-intake", "youtube-schedule", "youtube-status", "youtube-import",
+        "youtube-cutover"])
     ap.add_argument("--csv", help="the content calendar (schedule pass)")
     ap.add_argument("--channel-id",
                     help="Buffer channel id. Defaults to the resolved "
@@ -156,6 +169,8 @@ def main():
     ap.add_argument("--key", nargs="+", default=None, metavar="SOURCE_ID",
                     help="release-hold / hold: the pins' source ids")
     ap.add_argument("--reason", default=None, help="hold: why")
+    ap.add_argument("--max-uploads", type=int, default=None, metavar="N",
+                    help="youtube-schedule: upload at most N this run")
     ap.add_argument("--log-file", default=None,
                     help="also append this run's log to this file")
     ap.add_argument("--verbose", action="store_true")
@@ -175,6 +190,23 @@ def main():
     if args.pass_name in ("books", "add-book", "recheck-holds", "release-hold",
                           "hold", "holds"):
         return _books_command(ap, args)
+
+    if args.pass_name.startswith("youtube-"):
+        if not args.profile:
+            ap.error("%s needs --profile" % args.pass_name)
+        if args.max_uploads is not None and args.max_uploads < 0:
+            ap.error("--max-uploads must be >= 0")
+        name = args.pass_name[len("youtube-"):]
+        if name == "schedule":
+            code, _s = yt.schedule(args.profile, max_uploads=args.max_uploads,
+                                   dry_run=args.dry_run)
+        elif name == "status":
+            code, _s = yt.status(args.profile)
+        else:
+            code, _s = {"intake": yt.intake, "import": yt.import_history,
+                        "cutover": yt.cutover}[name](args.profile,
+                                                    dry_run=args.dry_run)
+        return code
 
     if args.pass_name == "topup":
         if not args.profile:

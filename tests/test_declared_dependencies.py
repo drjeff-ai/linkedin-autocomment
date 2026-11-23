@@ -30,6 +30,10 @@ IMPORT_TO_DISTRIBUTION = {
     "bs4": "beautifulsoup4",
     "dotenv": "python-dotenv",
     "webdriver_manager": "webdriver-manager",
+    "google": "google-auth",
+    "googleapiclient": "google-api-python-client",
+    "google_auth_oauthlib": "google-auth-oauthlib",
+    "yaml": "pyyaml",
 }
 
 # Shipped with Python, so never declared.

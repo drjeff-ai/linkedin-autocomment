@@ -14,7 +14,12 @@ LINKEDIN = "linkedin"
 X = "x"
 PINTEREST = "pinterest"
 
-#: Every platform id, in a fixed order.
+#: YouTube Shorts (V1, DEC-058). Published through the YouTube Data API, not
+#: Buffer, so it is not in ``ALL``: ``ALL`` is the Buffer channels plus the
+#: engagement stores, and every reader of it means those.
+YOUTUBE = "youtube"
+
+#: Every Buffer and engagement platform id, in a fixed order.
 ALL = (LINKEDIN, X, PINTEREST)
 
 #: The platform a call means when it names none. LinkedIn, for history: its

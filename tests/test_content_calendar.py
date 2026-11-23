@@ -236,8 +236,10 @@ def test_route_groups_states_and_carries_reasons(client, data_root,
     assert by["l_comment_failed"]["errors"] == ["comment box missing"]
     assert by["p_failed"]["group"] == "failed"
     assert by["p_failed"]["errors"] == ["board not found"]
+    # scheduled_youtube is V1's: a YouTube video uploaded private until its
+    # publishAt. No Buffer state maps to it.
     assert set(d["groups"]) == {"queued", "held", "in_buffer", "sent",
-                                "failed"}
+                                "failed", "scheduled_youtube"}
     # Every pipeline state has a group: none falls through as itself.
     assert set(cal.STATE_GROUPS) == {cp.PENDING, cp.HELD, cp.SCHEDULED,
                                      cp.PUBLISHED, cp.COMMENTED,
