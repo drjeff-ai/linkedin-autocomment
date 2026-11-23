@@ -19,6 +19,10 @@ PINTEREST = "pinterest"
 #: engagement stores, and every reader of it means those.
 YOUTUBE = "youtube"
 
+#: Instagram engagement (D-027 E2/E3): comments and likes in a browser, on
+#: other people's posts. No publishing channel, so not in ``ALL`` either.
+INSTAGRAM = "instagram"
+
 #: Every Buffer and engagement platform id, in a fixed order.
 ALL = (LINKEDIN, X, PINTEREST)
 

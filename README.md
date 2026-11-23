@@ -76,6 +76,8 @@ linkedin-automation/
 │   ├── comment_poster.py               # Posts comments via Selenium
 │   ├── engagement_adapter.py           # Engagement adapter interface + shared approval check
 │   ├── linkedin_adapter.py             # LinkedIn's adapter: poster/finder wrapper, TXT handoff
+│   ├── instagram_engage.py             # Instagram config, draft rules, account filter (E2)
+│   ├── instagram_adapter.py            # Instagram's Selenium adapter + live selector pass (E3, offline only)
 │   ├── auto_connector.py               # Sends connection requests
 │   ├── post_generator.py               # Generates LinkedIn posts (thought leadership + articles)
 │   ├── poster.py                       # Publishes posts to the LinkedIn feed
@@ -334,6 +336,18 @@ for the counts.** Files on disk are derived output, never state.
   most one approved comment, within the pacing rules (a 3-5-10-20 a day ramp,
   20 replies a day, 08:00-21:00 Pacific, a 25-90 minute gap, one per creator per
   3 days), or says when the next one is allowed. No task runs it.
+
+### Instagram engagement (E2/E3, not live yet)
+- An Instagram adapter exists but has never run live: every selector is
+  unverified (docs/ARCHITECTURE.md §12.1). It refuses a live browser until a
+  live selector-health pass is recorded for the dev account.
+- Config, in the profile's `scheduled_posting.platforms.instagram` overlay:
+  `identity_slug` (the dev account's handle) and
+  `engagement.max_followers` (no default: unset skips every account).
+- The live pass is read-only (it clicks and types nothing). Sign in to the dev
+  Instagram account by hand in the profile's browser first, then:
+  `.venv\Scripts\python.exe -m linkedin_automation.instagram_adapter health --profile <p> --post-url https://www.instagram.com/p/<code>/`
+  (a post on someone else's account with at least one comment).
 
 ### Multi-Profile
 - Manage multiple LinkedIn accounts

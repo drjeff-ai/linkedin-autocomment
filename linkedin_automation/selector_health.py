@@ -45,6 +45,7 @@ from .post_finder import LinkedInScraper
 from .auto_connector import LinkedInAutoConnector
 from .comment_poster import LinkedInCommentPoster
 from . import linkedin_adapter
+from . import instagram_adapter
 from .poster import LinkedInPoster
 from .failure_capture import capture_failure
 from . import x_selectors as xs
@@ -581,6 +582,16 @@ SELECTOR_REGISTRY: Dict[str, Dict] = {
         "fix_symbol": "x_selectors.SEARCH_FILTER_SELECTORS",
         "note": "losing these costs filtering, not results",
     },
+    # ─── Instagram (page="ig_feed" / "ig_post" / "ig_profile"), D-027 E3 ─────
+    #
+    # Defined beside the adapter that uses them
+    # (instagram_adapter.registry_entries). EVERY ONE IS UNVERIFIED: written
+    # from the nine-month-stale instagram_bot reference, carried as
+    # "verified": False, and checked only offline against
+    # tests/fixtures/instagram/ until the live pass
+    # (python -m linkedin_automation.instagram_adapter health) runs on the dev
+    # account. The ig_* pages are invisible to every LinkedIn and X check.
+    **instagram_adapter.registry_entries(),
 }
 
 

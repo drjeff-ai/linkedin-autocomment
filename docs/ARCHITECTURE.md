@@ -1911,3 +1911,100 @@ LinkedIn and X prompts with OpenAI faked, the selector registry, and
 verdict both ways on LinkedIn's fake page and on stubbed YouTube reads, the
 selector contract held and broken, the registry's selectors against the
 golden's, the shared approval check, `engage_one`).*
+
+### 12.1 Instagram (E2, E3, D-027): offline only, every selector unverified
+
+Instagram is a **browser** adapter, `instagram_adapter.InstagramAdapter`, in
+Selenium, written fresh. `instagram_bot` (Playwright, read only) was the
+reference for the selectors, the `/p/<shortcode>/` permalink, the og-meta
+reading and the pacing; nothing is imported from it. It has never run live.
+
+**Policy (E2).** `policy_for("instagram")` is
+`content/engagement/instagram-register.md`, copied verbatim (DEC-005), with a
+golden test against the copy in `tests/fixtures/engagement/`
+(`tests/test_instagram_policy_golden.py`). LinkedIn, X and YouTube are pinned
+unchanged in the same test. `input_chars` is the shared 500 (one caption).
+The id is `platforms.INSTAGRAM`, outside `platforms.ALL` (no Buffer channel).
+
+**Rules that are data checks (E2).** `instagram_engage.draft_refusals(text,
+caption=, cfg=, previous=)` returns named reasons, each tested both ways
+(`tests/test_instagram_rules.py`):
+
+| Rule | Check |
+|---|---|
+| length | over the register's `hard_max` (300 chars); `empty` |
+| emoji | `emoji_count > 1`. Emoji blocks; a ZWJ sequence, flag pair, keycap or skin-tone variant is one; ©, ™, arrows are not emoji |
+| hashtags, links, @-mentions, promotion | as Y1's validator: `#tag`, a URL or bare domain, `@name`, "follow me", "check out my", "link in bio"..., our `identity_slug`, the register's banned openers. No `identity_slug` refuses everything |
+| caption language | `detect_language`, stdlib: dominant Unicode script, then function-word hits for en/es/fr/de/pt/it/nl (at least 2 hits, leading the runner-up by 1.5x). Only a confident disagreement refuses; short text is `latin`/`unknown` and passes; other Latin languages read as `latin`; Russian and Ukrainian are both `cyrillic` |
+| near-duplicates | Jaccard similarity of character trigrams (lowercased, NFKC, punctuation as spaces) against our COMMENTED comments and other approved drafts to the same `author_handle`; refused at `NEAR_DUPLICATE_THRESHOLD = 0.6` |
+| appearance | `APPEARANCE_PATTERNS`, an English phrase list ("you look", "your smile", "you're so pretty", ...), the backstop to the register's craft rule 3 |
+
+A refusal at engage time is `instagram_rules: <reasons>`; `send_back_to_review`
+withdraws the approval and keeps the text and the reason in `comment_meta`.
+`approve_refusal(profile, rec, text)` is the same check for an approve route
+(none is wired yet: the Review routes still serve LinkedIn and YouTube only).
+
+**Config.** `scheduled_posting.platforms.instagram` =
+`{identity_slug, engagement: {max_followers, skip_verified}}`; unknown keys
+and wrong types refuse. `identity_slug` is the account we act as. The account
+filter (`account_refusal`, used by `find`) skips an author over
+`max_followers`, with a verified badge (when `skip_verified`, default true),
+or with either one unread. `max_followers` has **no default**: unset skips
+every account.
+
+**Store.** `PostStore(platform="instagram")`, `data/<p>/instagram/posts_db.json`,
+keyed by shortcode, with an `instagram` block (`author_handle`, `followers`,
+`verified`, `filter_reason`, outcome, like state). `find` lands a filtered
+author's post as `TRASH(instagram_account_skipped)` so the skip is counted.
+A comment submitted but not seen is `TRASH(instagram_unverified)`, never
+retried; gone is UNAVAILABLE; already commented and posted are COMMENTED;
+anything unclear stays GENERATED and approved.
+
+**Selectors.** Every one is a class constant on `InstagramAdapter`, with an
+`UNVERIFIED` comment naming its source, registered through
+`instagram_adapter.registry_entries()` with `"verified": False` on pages
+`ig_feed`, `ig_post`, `ig_profile` (invisible to every LinkedIn and X check).
+The offline gate is `tests/fixtures/instagram/*.html`, hand-written and
+synthetic, also marked unverified. The action-bar like is scoped to
+`section` because the thread's own Like hearts are decoys; the submit is the
+one `Post` inside the form.
+
+**The live gate.** The adapter treats every driver as live unless it declares
+`IG_OFFLINE_FIXTURE = True` (only the test fake does). A live run needs
+`live_pass_problem()` to be None: `data/<p>/instagram/selector_health_live.json`
+exists, is a live run, HEALTHY, for the configured `identity_slug`, for the
+exact selectors now in the code (sha256 fingerprint), covering all three
+pages, and is under 7 days old. It is written only by
+`python -m linkedin_automation.instagram_adapter health --profile <p>
+--post-url <post>`, which opens the feed, the post and our own profile,
+counts every entry and clicks and types nothing. An identity in
+`PRODUCTION_IDENTITY_SLUGS` is refused with no override, on top of
+`create_driver`'s own guard.
+
+**Verdicts.** `classify`: `gone` only on Instagram's "page isn't available"
+text; signed out is `unclear(auth_wall)`; the configured account not proven
+signed in (its avatar link outside the post) is `unclear(identity_unproven)`;
+a post that does not render as its own shortcode within the bounded wait is
+`unclear`. `already_commented` asks the shown thread for a comment by
+`identity_slug` (Instagram shows only part of a long thread). `like` is
+`placed` only when the liked state is read after the click, `already_liked`
+on the liked state, otherwise a named `miss`. `post_and_verify` re-checks the
+E0 gate, refuses text ChromeDriver cannot type (outside the BMP, so most
+emoji), checks the typed value, and reports posted only when a comment by
+`identity_slug` with the exact text is in the thread, and still there after a
+reload (Instagram draws a new comment before the server keeps it, so the
+first sighting alone is not proof). Every wait is one
+bounded, polled deadline; every failure is captured as `failure_ig_<reason>`.
+`engage_item(profile, key, adapter)` is the one-item path: E0 gate, E2 rules,
+live gate, `engage_one` with a fresh store read last, then the store outcome.
+
+**Not here yet (E4).** No live call has been made. No CLI or dashboard
+button posts, no scheduler job exists, nothing is enabled. DEC-061's pacing
+pins (ramp, window, gap, one per creator per 3 days) are not applied to
+Instagram; they belong with E4's run path.
+
+*Verification anchor (12.1): 2026-11-22, branch `e3-instagram`;
+`tests/test_instagram_policy_golden.py`, `tests/test_instagram_rules.py`,
+`tests/test_instagram_adapter.py` (each verifier True and False against the
+synthetic fixtures, the live gate shut and opened by a recorded pass, the
+fixture gate per page, the registry entries unverified).*
