@@ -40,6 +40,19 @@ and the channel's publisher lock; none is run by any task or drain:
     youtube-status    --profile P               local state and today's quota
     youtube-import    --profile P [--dry-run]   video-publisher's history (V1-M)
     youtube-cutover   --profile P [--dry-run]   move the brand here (Jeff runs it)
+
+YouTube commenting (Y1, linkedin_automation/youtube_engage.py, DEC-061). Same
+gate and lock. Nothing here is on a schedule, and engage posts at most one
+approved comment per run:
+
+    youtube-discover  --profile P --query Q [--dry-run]   suggest channels; adds nothing
+    youtube-watch     --profile P [--add ID [--title T] | --remove ID]
+                      show or edit the watch list
+    youtube-find      --profile P [--dry-run]   recent watch-list videos and
+                      viewers' comments on our videos, as NEW
+    youtube-draft     --profile P [--limit N] [--dry-run]   NEW -> GENERATED
+    youtube-engage    --profile P [--dry-run]   post one approved comment if
+                      pacing allows, else say when the next is allowed
 `comment` is the one to put on a schedule - every 15 minutes is ample, since it
 does nothing for rows whose posts have not published yet.
 
@@ -65,6 +78,7 @@ from linkedin_automation import profile_manager as pm  # noqa: E402
 from linkedin_automation import topup  # noqa: E402
 from linkedin_automation import books  # noqa: E402
 from linkedin_automation import youtube_channel as yt  # noqa: E402
+from linkedin_automation import youtube_engage as ye  # noqa: E402
 
 load_dotenv()
 
@@ -124,6 +138,45 @@ def _books_command(ap, args):
     return code
 
 
+def _youtube_engage_command(ap, args, name):
+    """The Y1 commands. Each returns its exit code."""
+    if name == "discover":
+        if not args.query:
+            ap.error("youtube-discover needs --query")
+        return ye.discover(args.profile, args.query, dry_run=args.dry_run)[0]
+    if name == "find":
+        return ye.find(args.profile, dry_run=args.dry_run)[0]
+    if name == "draft":
+        if args.limit < 0:
+            ap.error("--limit must be >= 0")
+        return ye.draft(args.profile, limit=args.limit, dry_run=args.dry_run)[0]
+    if name == "engage":
+        return ye.engage(args.profile, dry_run=args.dry_run)[0]
+    # watch
+    if args.add and args.remove:
+        ap.error("youtube-watch takes --add or --remove, not both")
+    try:
+        if args.add:
+            added = ye.add_to_watch_list(args.profile, args.add, title=args.title)
+            print("youtube-watch %s: %s %s" % (
+                args.profile, "added" if added else "already listed:", args.add))
+        elif args.remove:
+            removed = ye.remove_from_watch_list(args.profile, args.remove)
+            print("youtube-watch %s: %s %s" % (
+                args.profile, "removed" if removed else "not listed:", args.remove))
+        cfg = ye.engage_config(args.profile)
+    except yt.YouTubeRefused as exc:
+        print("youtube-watch %s: REFUSED: %s" % (args.profile, exc))
+        return ye.EXIT_REFUSED
+    for e in cfg.watch_list:
+        subs = e.get("subscribers")
+        print("  %s  %-40s %s" % (e["channel_id"], (e.get("title") or "")[:40],
+                                  "-" if subs is None else "%s subscribers" % subs))
+    print("youtube-watch %s: %d channel(s) on the watch list"
+          % (args.profile, len(cfg.watch_list)))
+    return ye.EXIT_OK
+
+
 def main():
     _make_output_unicode_safe()
     ap = argparse.ArgumentParser(
@@ -133,7 +186,8 @@ def main():
         "schedule", "comment", "status", "topup",
         "books", "add-book", "recheck-holds", "release-hold", "hold", "holds",
         "youtube-intake", "youtube-schedule", "youtube-status", "youtube-import",
-        "youtube-cutover"])
+        "youtube-cutover", "youtube-discover", "youtube-watch", "youtube-find",
+        "youtube-draft", "youtube-engage"])
     ap.add_argument("--csv", help="the content calendar (schedule pass)")
     ap.add_argument("--channel-id",
                     help="Buffer channel id. Defaults to the resolved "
@@ -171,6 +225,16 @@ def main():
     ap.add_argument("--reason", default=None, help="hold: why")
     ap.add_argument("--max-uploads", type=int, default=None, metavar="N",
                     help="youtube-schedule: upload at most N this run")
+    ap.add_argument("--query", default=None,
+                    help="youtube-discover: what to search channels for")
+    ap.add_argument("--add", default=None, metavar="CHANNEL_ID",
+                    help="youtube-watch: add this channel to the watch list")
+    ap.add_argument("--remove", default=None, metavar="CHANNEL_ID",
+                    help="youtube-watch: remove this channel")
+    ap.add_argument("--title", default="",
+                    help="youtube-watch --add: the channel's title, shown in lists")
+    ap.add_argument("--limit", type=int, default=5,
+                    help="youtube-draft: draft at most N (default 5)")
     ap.add_argument("--log-file", default=None,
                     help="also append this run's log to this file")
     ap.add_argument("--verbose", action="store_true")
@@ -197,6 +261,8 @@ def main():
         if args.max_uploads is not None and args.max_uploads < 0:
             ap.error("--max-uploads must be >= 0")
         name = args.pass_name[len("youtube-"):]
+        if name in ("discover", "watch", "find", "draft", "engage"):
+            return _youtube_engage_command(ap, args, name)
         if name == "schedule":
             code, _s = yt.schedule(args.profile, max_uploads=args.max_uploads,
                                    dry_run=args.dry_run)

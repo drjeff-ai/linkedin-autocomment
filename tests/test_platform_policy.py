@@ -29,6 +29,7 @@ import pytest
 
 from linkedin_automation import comment_generator as gen
 from linkedin_automation import platform_policy as pp
+from linkedin_automation import platforms
 from linkedin_automation import post_store
 from linkedin_automation import profile_manager as pm
 
@@ -168,7 +169,9 @@ def test_platform_identifiers_match_the_store():
     """A store addressed as "x" and a policy as "twitter" would silently diverge."""
     assert pp.LINKEDIN == post_store.LINKEDIN
     assert pp.X == post_store.X
-    assert set(pp.PLATFORMS) == {post_store.LINKEDIN, post_store.X}
+    # YouTube joined in D-027 Y1; its id is platforms.YOUTUBE, as V1's store uses.
+    assert pp.YOUTUBE == platforms.YOUTUBE
+    assert set(pp.PLATFORMS) == {post_store.LINKEDIN, post_store.X, platforms.YOUTUBE}
 
 
 # ─── Job two: X is a different platform, not a shorter LinkedIn ───────────────

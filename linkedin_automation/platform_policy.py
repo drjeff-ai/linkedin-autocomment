@@ -33,14 +33,14 @@ project repeatedly — and it would fail *invisibly*, by generating LinkedIn-voi
 text for X rather than by raising.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Tuple
 
 # Platform identifiers, from the one module that defines them. A store
 # addressed as "x" and a policy addressed as "twitter" would silently diverge,
 # so neither spells its own. ``test_platform_policy.py`` still asserts the two
 # agree.
-from .platforms import LINKEDIN, X  # noqa: E402
+from .platforms import LINKEDIN, X, YOUTUBE  # noqa: E402
 
 # Length units.
 WORDS = "words"
@@ -172,6 +172,11 @@ class PlatformPolicy:
     name: str
     length: LengthPolicy
     register: Register
+    # How much of the item's text the draft prompt quotes. 500 is the literal
+    # LinkedIn and X always used; YouTube's input is a title, description,
+    # chapters and up to 20 top comments (D-027 Y1), which 500 would cut to the
+    # title and half a description.
+    input_chars: int = 500
 
 
 # ─── LinkedIn — today's behaviour, expressed as data ──────────────────────────
@@ -357,17 +362,88 @@ _X = PlatformPolicy(
 )
 
 
-PLATFORMS = {LINKEDIN: _LINKEDIN, X: _X}
+# ─── YouTube (D-027 Y1) ───────────────────────────────────────────────────────
+#
+# Every value below is copied verbatim from the strategist's register,
+# ``content/engagement/youtube-register.md`` (DEC-005, DEC-061(6)). The coder
+# never edits this text; Jeff edits the register and the copy is retaken.
+# ``tests/test_youtube_policy_golden.py`` parses the copy in
+# ``tests/fixtures/engagement/`` and compares every field. The register's
+# bullet lists are laid out as the prompt's bullet lines (``- item``, numbered
+# items keep their number), as LinkedIn's and X's are.
+
+_YOUTUBE = PlatformPolicy(
+    name=YOUTUBE,
+    length=LengthPolicy(
+        unit='chars',
+        preferred=(30, 300),
+        hard_max=500,
+        hard_max_is_postable_limit=False,
+        buckets=('Very short - 30-80 characters (one reaction to one moment)', 'Short - 80-160 characters (one clear point)', 'Medium - 160-260 characters (a point plus one specific detail)', 'Longer - 260-400 characters (a real question or a short first-hand detail)'),
+        bucket_weights=(0.3, 0.4, 0.22, 0.08),
+        typical_cap_phrase='under 160 characters (most of the time)',
+        aim_below=260,
+    ),
+    register=Register(
+        surface='YouTube',
+        article='a',
+        item='video',
+        item_plural='videos',
+        action='comment',
+        action_plural='comments',
+        system_voice="You're someone who builds with AI, leaving a comment under a video you just watched. Write like a viewer talking to the creator: direct, specific, relaxed. Keep it short.",
+        voice_identity='a viewer who works with this technology, reacting to this one video',
+        banned_openers=('Great video', 'Great content', 'Awesome video', 'Thanks for sharing', 'This is so helpful', 'As someone who', 'Love this', 'Amazing'),
+        tone_rule='Friendly and genuine. Curious beats clever. Never snarky, never dismissive, never a pitch.',
+        sentence_style='- Mix short and medium sentences\n- Plain words, no corporate phrasing\n- Commas and periods, never dashes as punctuation\n- A fragment is fine when it lands',
+        tone_balance='TONE BALANCE:\n- 50% specific reaction to one moment or claim\n- 30% a real question the creator could answer in a reply\n- 20% a respectful different take or a first-hand detail',
+        opening_styles='- Name the moment: "the part where the eval scores flipped"\n- A real question: "did this hold up on longer contexts"\n- One detail they got right: "the latency comparison is the useful bit here"\n- A first-hand number: "we saw the same drop past 32k tokens"\n- Gentle pushback: "fair, though this depends a lot on the dataset"',
+        overuse_guidance="Avoid overusing:\n- Opening with praise\n- Ending every comment with a question\n- Restating the video's title",
+        craft_rules="1. React to ONE specific thing from the video's title, description or chapters, never to the video in general\n2. Keep {cap}\n3. Only ask a question you would actually want answered\n4. First-hand experience only when it is relevant (about 20% of comments)\n5. Be specific or say less\n6. Never mention our channel, our videos, or that we make videos\n7. No links, no hashtags, no @-mentions, no calls to subscribe or watch anything\n8. No summarising the video back to the creator",
+        good_question_endings='"did this hold on bigger models"\n"what did the eval set look like"\n"how long did the fine-tune take"\n"would this work without the GPU"',
+        short_examples='"the part about eval drift is the bit nobody covers"\n"did this hold on longer contexts? we saw it fall off past 32k"\n"fair, though the benchmark choice is doing a lot of work here"\n"the side by side at 4:10 made it click"\n"how long did the fine-tune take on that setup"',
+        extra_rules="\n\nTHIS IS A YOUTUBE COMMENT UNDER SOMEONE ELSE'S VIDEO:\n- You are a viewer, not a creator. Nothing in the comment may promote anything.\n- No greeting, no sign-off, no 'great video' opener.\n- Never claim you watched a part the input does not describe. If only the title and description are known, react to those.\n- One thought. Stop when it lands.\n- Emoji only if the video itself is playful, and never more than one.",
+    ),
+    input_chars=3000,
+)
+
+# The own-video reply variant: the same register with the two fields the
+# register's "own-video replies" section replaces.
+_YOUTUBE_REPLY = replace(_YOUTUBE, register=replace(
+    _YOUTUBE.register,
+    system_voice="You're the creator of this Short, replying to a viewer's comment. Short, warm, specific to what they said.",
+    extra_rules="\n\nTHIS IS A REPLY TO A VIEWER ON YOUR OWN VIDEO:\n- Answer what they said, nothing else.\n- No 'thanks for watching', no ask to subscribe, no link to another video.\n- If they asked a question, answer it in one or two sentences, or say plainly that you don't know.\n- Never argue. If they disagree, acknowledge the point once.",
+))
 
 
-def policy_for(platform: str) -> PlatformPolicy:
+PLATFORMS = {LINKEDIN: _LINKEDIN, X: _X, YOUTUBE: _YOUTUBE}
+
+#: A variant is a second voice on one platform's surface. YouTube's ``reply``
+#: is the creator answering a viewer under our own Short.
+REPLY = "reply"
+VARIANTS = {(YOUTUBE, REPLY): _YOUTUBE_REPLY}
+
+
+def policy_for(platform: str, variant: str = None) -> PlatformPolicy:
     """Return the declared policy for ``platform``. **Required — never defaults.**
 
     Raises :class:`UnknownPlatform` for an unknown or empty value rather than
     quietly handing back LinkedIn's. A silent default here would not fail loudly;
     it would generate LinkedIn-voiced text for another platform and pass every
     automated gate on the way out.
+
+    ``variant`` names a second declared voice on the platform (``REPLY`` on
+    YouTube). An undeclared variant raises too; it never falls back to the
+    platform's main voice.
     """
+    if variant:
+        try:
+            return VARIANTS[(platform, variant)]
+        except KeyError:
+            raise UnknownPlatform(
+                f"no {variant!r} variant declared for platform {platform!r}; "
+                f"known: {', '.join(sorted('%s/%s' % k for k in VARIANTS))}"
+            ) from None
     if not platform:
         raise UnknownPlatform(
             "platform is required (no default). Pass platform_policy.LINKEDIN or "

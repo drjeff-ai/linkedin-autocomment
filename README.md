@@ -316,6 +316,23 @@ for the counts.** Files on disk are derived output, never state.
   `youtube-import [--dry-run]` re-reads video-publisher's history.
 - No task or drain runs these; you run them.
 
+### YouTube commenting (`youtube-*`, Y1)
+- Comments as the channel on watch-list creators' videos, and replies to
+  viewers on our own Shorts, through the API (docs/ARCHITECTURE.md §11). Set
+  `scheduled_posting.platforms.youtube.engagement.channel_name` and
+  `channel_handle` first: the no-promotion check needs them.
+- `youtube-discover --profile <p> --query "<q>" [--dry-run]` suggests channels
+  (100 quota units) and adds nothing. `youtube-watch --profile <p>
+  [--add <channel id> [--title T] | --remove <channel id>]` shows or edits the
+  watch list; the dashboard's Review panel, YouTube tab, does the same.
+- `youtube-find` lands recent videos and unanswered viewer comments as NEW;
+  `youtube-draft [--limit N]` drafts them for review. Approve each in the
+  Review panel's YouTube tab.
+- `youtube-engage --profile <p> [--dry-run]`, or the tab's Post button, posts at
+  most one approved comment, within the pacing rules (a 3-5-10-20 a day ramp,
+  20 replies a day, 08:00-21:00 Pacific, a 25-90 minute gap, one per creator per
+  3 days), or says when the next one is allowed. No task runs it.
+
 ### Multi-Profile
 - Manage multiple LinkedIn accounts
 - Per-profile Chrome sessions (no cookie conflicts)

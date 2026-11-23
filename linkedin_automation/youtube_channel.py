@@ -95,7 +95,10 @@ TOKEN_NAME = "oauth_token.json"
 USAGE_LOG = "api_usage.jsonl"
 
 CONFIG_KEYS = {"vp_brand", "vp_root", "channel_id", "content_root",
-               "publish_time", "tz", "per_day", "quota", "category_id"}
+               "publish_time", "tz", "per_day", "quota", "category_id",
+               # Y1's commenting settings (youtube_engage.parse_engagement
+               # validates them). Publishing never reads this key.
+               "engagement"}
 REQUIRED_KEYS = ("vp_brand", "vp_root", "channel_id", "content_root",
                  "publish_time", "tz")
 QUOTA_KEYS = {"daily_limit", "upload_units", "comment_units"}

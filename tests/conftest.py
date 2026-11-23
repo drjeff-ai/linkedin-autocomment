@@ -4,6 +4,8 @@ All fixtures keep tests hermetic: storage is redirected into a temp dir, the
 browser/network boundary is never crossed, and no OpenAI/LinkedIn calls happen.
 """
 
+import socket
+
 import pytest
 
 from linkedin_automation import profile_manager as pm
@@ -100,6 +102,67 @@ def _no_live_buffer_calls(tmp_path, monkeypatch):
                         str(tmp_path / "api_usage.jsonl"))
 
     buffer_client.clear_caches()
+
+
+class RealNetworkAccess(BaseException):
+    """A test tried to leave the machine. A ``BaseException`` on purpose: code
+    under test that catches ``Exception`` (``youtube_api._call`` maps every
+    transport failure to an ambiguous ``YouTubeApiError``) cannot swallow it."""
+
+
+_LOOPBACK = ("127.0.0.1", "::1", "localhost", "")
+
+
+def _host_of(address):
+    if isinstance(address, tuple) and address:
+        return str(address[0])
+    return None  # AF_UNIX path or similar: local by definition
+
+
+@pytest.fixture(autouse=True)
+def _no_real_network(monkeypatch):
+    """Any connect or name lookup off the loopback fails the test (D-027 Y1).
+
+    The Buffer guard above closes one transport. This closes the socket layer
+    itself, so a Google client, an OpenAI client or anything else that slips
+    past a mock fails loudly instead of reaching a real service. Loopback stays
+    open. ``test_network_guard.py`` proves it fires.
+    """
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+    real_getaddrinfo = socket.getaddrinfo
+    real_create = socket.create_connection
+
+    def refuse(what):
+        raise RealNetworkAccess("a test tried to reach %s for real. The suite is "
+                                "hermetic: mock the boundary instead." % (what,))
+
+    def connect(self, address):
+        host = _host_of(address)
+        if host is not None and host not in _LOOPBACK:
+            refuse(address)
+        return real_connect(self, address)
+
+    def connect_ex(self, address):
+        host = _host_of(address)
+        if host is not None and host not in _LOOPBACK:
+            refuse(address)
+        return real_connect_ex(self, address)
+
+    def getaddrinfo(host, *args, **kwargs):
+        if host is not None and str(host) not in _LOOPBACK:
+            refuse(host)
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    def create_connection(address, *args, **kwargs):
+        if _host_of(address) not in _LOOPBACK:
+            refuse(address)
+        return real_create(address, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(socket, "create_connection", create_connection)
 
 
 @pytest.fixture(autouse=True)

@@ -556,6 +556,7 @@ saying `0 posted: N not approved`:
 | Scheduler `post_comments` | `Scheduler._fire_post_comments` |
 | `auto_cycle` post stage | `dashboard._auto_cycle_job.run_post`. A draft the cycle just generated is never approved, so the cycle posts only what a human approved earlier |
 | `comment_poster` subprocess | `LinkedInCommentPoster.approval_refusal`, re-reading the store before each comment of the TXT handoff (§5), and the `--test-url` mode |
+| YouTube `youtube-engage` and the panel's Post button | `youtube_engage._post_one`: a fresh read of the YouTube store and `approval_refusal` just before the insert (§11) |
 
 *Verification anchor (4.1): 2026-11-22, branch `e0-approval-gate`;
 `tests/test_approval_gate.py`, `tests/test_generate_from_lifecycle.py`
@@ -1674,3 +1675,143 @@ lock both ways, atomic writes, the import's mapping and idempotence and
 conflicts, cutover's refusals and dry run, auth, the calendar route, and a
 socket guard shown to fail on a real connect. video-publisher's
 `tests/test_moved_brands.py` covers each refusing path both ways.*
+
+---
+
+## 11. Engagement on YouTube (Y1, D-027, DEC-061)
+
+Comments post as our channel, through the YouTube Data API, in two places: on
+other creators' videos from a watch list Jeff picks, and as replies under
+viewers' comments on our own Shorts. `youtube_engage.py` holds the path;
+`youtube_api.py` stays the only module that imports Google (the engagement
+reads and the two inserts were added there). V1's config, token, quota ledger,
+production gate and publisher lock are reused (§10.13). Nothing here is on a
+schedule, no scheduler job knows about it, and no automation is enabled.
+
+**Policy.** `platform_policy.policy_for("youtube")` is the strategist's
+`content/engagement/youtube-register.md`, copied verbatim (DEC-005); the
+register's bullet lists are laid out as prompt bullet lines, as LinkedIn's and
+X's are. `policy_for("youtube", platform_policy.REPLY)` is the own-video reply
+variant: the same policy with the register's two replaced fields
+(`system_voice`, `extra_rules`). `VARIANTS` declares it; an undeclared variant
+raises, never falls back. `PlatformPolicy.input_chars` is how much of an item's
+text the draft prompt quotes: 500 for LinkedIn and X (the literal they always
+used), 3,000 for YouTube, whose input is a title, description, chapters and up
+to 20 top comments. The register writes banned openers capitalised, so the
+generator's opener check lowers them (X's were already lower case: no change
+there). `tests/fixtures/engagement/youtube-register.md` is the build-time copy
+the golden test parses; nothing reads the strategy repo at runtime.
+
+**Config.** `scheduled_posting.platforms.youtube.engagement`:
+`channel_name`, `channel_handle` (the validator's own-channel check; both
+missing is itself a refusal) and `watch_list`, a list of `{channel_id, title,
+subscribers, added_at}`. Unknown keys refuse, at both levels; a channel id must
+be `UC` plus 22 characters and may appear once. V1's `CONFIG_KEYS` gained
+`engagement`, which publishing never reads. The watch list is edited by
+`youtube-watch --add/--remove` or the dashboard, through
+`add_to_watch_list`/`remove_from_watch_list`, which rewrite the stored config
+file (never the default-merged one).
+
+**Files**, beside V1's under `data/<p>/youtube/`: `posts_db.json`, the shared
+per-platform `PostStore(platform="youtube")` (no LinkedIn reconcile runs on
+it), keyed by videoId, or for a reply by the viewer's top-level comment id;
+and `engage_ledger.json`: `comments` (every attempt with its outcome, kind,
+creator and whether it may be live), `ramp_started_at`, `next_allowed_at`,
+`attempting`, and cached `uploads_playlists`. Each YouTube record carries a
+`youtube` object (kind, video id, creator channel, title, description, parent
+id, outcome, comment id). V1's `youtube_state.json` is only read, for our own
+videos' titles.
+
+**The path** (each step a function an E1 adapter can wrap):
+
+- `youtube-discover --query Q` (`discover`): `search.list` type=channel (100
+  units) and one `channels.list` (1 unit) for titles and subscriber counts. It
+  lists suggestions, flags those already listed, drops our own channel, and
+  **adds nothing**. The dashboard's discover box is the same call; its Add
+  button is the separate add route.
+- `youtube-find` (`find`): the watch list's uploads playlists (one cached
+  `channels.list`, then `playlistItems.list`, 1 unit a page, at most 2 pages,
+  stopping at the first video older than 7 days), and our channel's threads
+  (`commentThreads.list allThreadsRelatedToChannelId`, 1 unit) that are not
+  ours, have no reply from us and are under 7 days old. Both land NEW. A key
+  already in the store, in any state, or in the ledger, is never re-added.
+- `youtube-draft --limit N` (`draft`): the shared generator with the YouTube
+  policy (the reply variant for replies). A video's input is its title,
+  description, the description's chapter lines and up to 20 top comments
+  (`commentThreads.list order=relevance`, 1 unit); a reply's is our video's
+  title (local first, else `videos.list`) and the viewer's comment. No
+  transcript, nothing outside the API. The result is GENERATED and
+  unapproved. The no-promotion check runs on it and its findings are stored
+  in `comment_meta.promotion`.
+- Review: the panel's YouTube tab (`?platform=youtube` on the comment, approve,
+  approve_all, save and reject routes; no parameter is LinkedIn, unchanged).
+  Approve on YouTube runs the no-promotion validator on the exact text and
+  refuses (409, with the reason) until it passes. Save edits the store only.
+- `youtube-engage` (`engage`), and the panel's "Post one approved comment"
+  button: posts **at most one** comment per call, else says when the next is
+  allowed. Below.
+
+**Engage, in order.** An `attempting` mark left by a run that died mid-insert
+is resolved first: that record is closed `TRASH(youtube_ambiguous)` and counted
+live, never retried. Then: `split_approved` over the GENERATED drafts (none
+approved: `0 posted: N not approved`); the window and the gap; per draft,
+oldest approval first, the daily cap for its kind, one per creator per 3 days
+and one per item; the no-promotion validator, whose refusal withdraws the
+approval (`reviewed_at` and `approved_hash` cleared, text kept) so the draft is
+back in review. The first draft through is the one. Live: a quota pre-check for
+the worst case (1 + 3 + 50 + 1 units), the identity check (`channels.list
+mine`, the token must answer for `channel_id`), and dedupe on YouTube
+(`commentThreads.list` for the video matched on our channel id, or the thread's
+replies, at most 3 pages). Found: the record is COMMENTED with outcome
+`already_commented`, nothing inserted. Then **the last step: a fresh read of
+the store and `post_store.approval_refusal` on it**, plus the text must equal
+the text selected. Then the `attempting` mark is written, the insert is charged
+(50) and made, once.
+
+**Outcomes.** `posted_visible`: the insert returned a comment id and the
+comment is in the public listing (1 unit). `posted_held`: the insert returned
+an id but the comment is not listed, or the listing failed. Held is never
+re-posted (the record is COMMENTED with `youtube.outcome = posted_held`) and is
+never reported as posted. `failed`: a 4xx closes the record
+`TRASH(youtube_post_failed)` and does not count against pacing; no HTTP answer,
+a 5xx, or a success with no id is **ambiguous**: closed
+`TRASH(youtube_ambiguous)`, counted against pacing, never retried. A Google
+quota error created nothing: the draft stays GENERATED and approved. A 404 on
+dedupe closes the record UNAVAILABLE; `commentsDisabled` closes it
+`TRASH(youtube_comments_disabled)`; any other read error stops the run with the
+draft untouched. Every live or ambiguous comment sets `next_allowed_at` to now
+plus the random gap and, for others' content, starts the ramp if it has not
+started.
+
+**DEC-061 pins** (`youtube_engage.py` constants, each refusal naming itself):
+
+| Pin | Code | Refusal |
+|---|---|---|
+| Ramp on others' videos: days 1-7 3/day, 8-14 5, 15-21 10, then 20; day 1 is the Pacific date of the first live comment on others' content | `RAMP`, `RAMP_MAX`, `ramp_day`, `cap_refusal` | `daily_cap: N of C ... (ramp day D)` |
+| Replies on our own videos: 20/day, counted separately | `REPLY_DAILY_CAP` | `reply_daily_cap: N of 20` |
+| 08:00-21:00 Pacific | `WINDOW_START`, `WINDOW_END`, `window_refusal` | `outside_window` |
+| Random 25-90 minute gap after any comment | `GAP_MINUTES`, `draw_gap`, `gap_refusal` | `gap: ... runs to <time>` |
+| One comment per creator (the video's channel) per 3 days | `CREATOR_COOLDOWN`, `creator_refusal` | `creator_3_days` |
+| One comment per item (video, or viewer comment) | `item_refusal`, the store, YouTube dedupe | `already_commented_on_item` |
+| No promotion: links, @-mentions, hashtags, "subscrib", our channel's name and handle, the register's banned openers | `promotion_refusals` | `promotion: <what>`, back to review |
+
+Pacing counts ledger entries marked `live` (visible, held, ambiguous) on their
+Pacific date. Each pacing refusal carries the time the next comment is allowed.
+
+**Quota.** Every call is charged to V1's `quota_ledger.json` and logged to
+`api_usage.jsonl` before it is made (`_Google.spend`); a call that would go
+over the daily limit is not made. One comment costs 53 units with a one-page
+dedupe (1 identity + 1 dedupe + 50 insert + 1 verify), at most 55.
+
+*Verification anchor (11): 2026-11-22, branch `y1-youtube-comments`;
+`tests/test_youtube_engage.py` (every pin both ways, each promotion kind, the
+approval gate True and False: approved, unapproved, edited after approval,
+wrong status, withdrawn mid-run; dedupe local, remote page 2, the 3-page cap,
+replies, 404; the three outcomes plus ambiguous, quota and the mid-insert
+crash; exact quota charges with each fake Google call asserting its ledger
+lines were written first; discover adds nothing; find and draft inputs; the
+CLI), `tests/test_youtube_engage_dashboard.py` (the YouTube tab's routes),
+`tests/test_youtube_policy_golden.py` (every field against the register copy;
+LinkedIn and X against `tests/goldens/platform_policies_main.json` from main
+913a5ec), and `tests/test_network_guard.py` (the suite-wide socket guard fails
+a raw connect, a lookup, urllib and a real Google client call).*
