@@ -61,6 +61,17 @@ LEGACY = "legacy"
 #: ``data/<profile>/<id>/scheduled_posts_state.json``.
 PLATFORM_DIR = "platform_dir"
 
+#: For a channel with no Buffer side: the account is proven when the OAuth
+#: token is minted, by the channel id the token answers for, and that id is
+#: checked against the configured one before every upload (``youtube_channel``).
+OAUTH_CHANNEL = "oauth_channel"
+
+# ── publisher: what sends this channel's posts ──────────────────────────────
+#: Buffer, through ``csv_pipeline.schedule_pass``. Every channel before V1.
+BUFFER = "buffer"
+#: The YouTube Data API, through ``youtube_channel`` (V1, DEC-058).
+YOUTUBE_API = "youtube_api"
+
 #: The one Buffer key variable a channel with a fixed key reads.
 FIXED_BUFFER_KEY_ENV = "BUFFER_API_KEY"
 
@@ -136,6 +147,11 @@ class Channel:
     #: The row names a board that is resolved to Buffer's board serviceId
     #: before anything is sent.
     board_lookup: bool = False
+    #: What sends this channel's posts (:data:`BUFFER` or :data:`YOUTUBE_API`).
+    #: Only a Buffer channel is in :data:`REGISTRY`, which every Buffer path
+    #: (queue, drain, Schedule, the panel's pills) iterates. Last, with a
+    #: default, so every declaration before it is unchanged (DEC-059).
+    publisher: str = BUFFER
 
     def __post_init__(self):
         names = [column.name for column in self.extra_columns]
@@ -248,18 +264,40 @@ PINTEREST = Channel(
     board_lookup=True,
 )
 
-#: Every declared channel, by id.
-REGISTRY = {c.id: c for c in (LINKEDIN, X, PINTEREST)}
+YOUTUBE = Channel(
+    id=platforms.YOUTUBE,
+    label="YouTube",
+    # A Short has no link field the uploader fills; the description is verbatim.
+    link_placement=NO_LINK,
+    text_limit=None,
+    identity_check=OAUTH_CHANNEL,
+    # scheduled_posting.platforms.youtube holds the channel's settings.
+    config_layout=OVERLAY,
+    key_env=None,
+    # data/<profile>/youtube/, where youtube_channel keeps its own files.
+    state_path=PLATFORM_DIR,
+    # Nothing to reconcile against Buffer.
+    reconcile_statuses=(),
+    publisher=YOUTUBE_API,
+)
+
+#: Every declared channel, by id, in declaration order.
+CHANNELS = {c.id: c for c in (LINKEDIN, X, PINTEREST, YOUTUBE)}
+
+#: The channels Buffer publishes, by id. Every Buffer path iterates this, so
+#: a channel with another publisher never reaches a Buffer call.
+REGISTRY = {cid: c for cid, c in CHANNELS.items() if c.publisher == BUFFER}
 
 
 def get(channel_id: str) -> Channel:
-    """The declaration for ``channel_id``. Raises :class:`UnknownChannel`."""
+    """The declaration for ``channel_id``, whatever its publisher. Raises
+    :class:`UnknownChannel`."""
     try:
-        return REGISTRY[channel_id]
+        return CHANNELS[channel_id]
     except KeyError:
         raise UnknownChannel(
             "no channel declared for %r; known channels: %s"
-            % (channel_id, ", ".join(sorted(REGISTRY)))) from None
+            % (channel_id, ", ".join(sorted(CHANNELS)))) from None
 
 
 def undeclared(channel_id: str) -> Channel:

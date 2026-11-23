@@ -467,15 +467,20 @@ a data directory is created). It therefore shows last-known state.
 
 The route collects from `dashboard._CALENDAR_SOURCES`, a list of callables
 `profile -> items`. Today there is one, every scheduled-posting state file the
-profile has (`content_calendar.state_file_items`). A new kind of channel
-(YouTube, V1) adds a source; the route does not change.
+profile has (`content_calendar.state_file_items`), then the app holds, then
+the YouTube channel's own state (`youtube_channel.calendar_items`, V1,
+§10.13). A YouTube video sits on its `publishAt` day in Pacific: uploaded
+and still private reads "Scheduled on YouTube" (group `scheduled_youtube`),
+past its `publishAt` (or live with none, on its upload day) reads "Sent".
+`?platform=` accepts any declared channel (`channels.CHANNELS`).
 
 *Verification anchor (2.1): 2026-11-22, branch `u1-calendar`;
 `tests/test_content_calendar.py` covers the view fields for PENDING, HELD and
 SCHEDULED rows, the label of all five windows, the route's range, states,
 order and counts against fixture state files, a no-network guard that is
 shown to fail on a real attempt, no write, and the rendered panel with no
-write action.*
+write action. Refreshed 2026-11-22, branch `v1-youtube`: the route shows
+YouTube items from `tests/test_youtube_channel.py`'s fixture state.*
 
 ---
 
@@ -1243,7 +1248,8 @@ limit and the drain feeding X, but not yet the CLI's `--platform` or
 ### 10.9 Platform ids and the channel registry
 
 **One spelling of every platform id.** `linkedin_automation/platforms.py`
-defines `LINKEDIN`, `X`, `PINTEREST`, `ALL` and `DEFAULT`. The older names
+defines `LINKEDIN`, `X`, `PINTEREST`, `YOUTUBE`, `ALL` and `DEFAULT`
+(`ALL` is the Buffer and engagement ids; YouTube is not in it, §10.13). The older names
 (`platform_policy.LINKEDIN/X`, `post_store.LINKEDIN/X`,
 `csv_pipeline.X_PLATFORM`, `profile_manager.SCHEDULED_DEFAULT_PLATFORM`) are
 imports of it, not second definitions.
@@ -1267,6 +1273,7 @@ channel it is. The fields are:
 | `alt_text_column` | none | none | `alt_text` | `schedule_pass`, through `channel_post_extras`: the column's stripped value is the image's `altText` |
 | `image_required` | no | no | yes | `validate_row` (`<label> needs an image: every pin is an image.`) |
 | `board_lookup` | no | no | yes | `queue_rows` (the board list is required), `schedule_pass` (boards read once per pass, row resolved), the dashboard's CSV queue route (§10.10) |
+| `publisher` | `buffer` | `buffer` | `buffer` | `REGISTRY` is built from it (Buffer channels only); `youtube_channel` refuses unless YouTube is `youtube_api` (§10.13) |
 
 **Only fields something reads are declared.** The rest of the design
 (`media`, `drain`) arrives with the phase that first reads it; see
@@ -1338,7 +1345,9 @@ undeclared probe is `mastodon` since P5's rename commit (DEC-021), otherwise
 unchanged from P1; `tests/test_channel_metadata.py` asserts the P3 fields on
 the captured createPost input; `tests/test_dashboard_registry.py` renders the
 three shipped pills and a test channel's, and drives its settings, CSV and
-banner.*
+banner. Refreshed 2026-11-22, branch `v1-youtube`: the `publisher` field;
+`tests/test_channel_registry_golden.py` pins every Buffer channel's fields
+to their values before it.*
 
 ### 10.10 Pinterest (P5)
 
@@ -1529,3 +1538,87 @@ link and row failures to holds, the round-robin and merge, the re-date keeping
 keys and order, dedupe across states and holds, dry runs against a snapshot,
 the lock both ways, the routes' confirm and lock, and the calendar's held
 list.*
+
+### 10.13 YouTube Shorts (V1, DEC-058, DEC-059)
+
+YouTube is a channel of the platform, published through the YouTube Data API
+rather than Buffer. `channels.YOUTUBE` carries `publisher=youtube_api`; every
+other channel carries the default `buffer`. `channels.REGISTRY` is the Buffer
+channels only, so the queue, the drain, the Schedule button and the panel's
+pills never see YouTube. `channels.CHANNELS` (and `channels.get`) holds all
+four. `channels.resolve("youtube")` still answers the old else-branch, so no
+Buffer site changed. `tests/test_channel_registry_golden.py` pins every field of
+the three Buffer channels to their values before V1.
+
+**Code.** `youtube_api.py` is the only module that imports Google: credentials
+from the stored token, the refresh, `channels.list mine`, one resumable
+`videos.insert`, and the installed-app consent. It never retries: an upload
+error stops the run. `youtube_channel.py` holds the rest, ported from
+video-publisher (reference only, not imported).
+
+**Config.** `scheduled_posting.platforms.youtube` of a profile:
+`vp_brand`, `vp_root`, `channel_id`, `content_root`, `publish_time`, `tz`,
+`per_day`, optional `quota {daily_limit, upload_units, comment_units}` (10,000
+/ 1,600 / 50 by default) and `category_id` (27). Unknown keys are refused. The
+profile must be registered. `topfive` is publishing-only, automations off.
+
+**Files**, under `data/<profile>/youtube/`, all written temp-then-rename:
+`youtube_state.json` (one record per video, keyed by its source folder name
+without video-publisher's `-yt`), `quota_ledger.json` (units per Pacific
+date, charged before each call), and `oauth_token.json` (from
+`tools/youtube_auth.py`; never printed). An unreadable state file refuses: it
+never reads as empty. Every paid call is also logged to `api_usage.jsonl`
+first.
+
+**States.** `queued`, `attempting` (saved before the upload call), `uploaded`
+(shown as *scheduled* while `publish_at` is ahead, *live* after) and `failed`.
+Any `attempting` record refuses the whole next upload run until a person has
+checked Studio and set the record by hand: nobody knows whether that upload
+created a video. A Google quota error is the one exception: nothing was
+created, so the item returns to `queued`.
+
+**Commands** (`tools/run_scheduled_posts.py`). Each takes the declared
+production gate on `channel_id` and the channel's `publisher_lock` on the
+state file:
+
+- `youtube-intake`: queues every new `C-NNN-<slug>/` under `content_root` in
+  C-number order, with the `### YouTube Shorts` section of `youtube.md`
+  verbatim and the one `-vertical.mp4`. `_posted/` and `ready-to-publish/` are
+  skipped. Over a YouTube limit is a skip, never a cut.
+- `youtube-schedule`: refuses unless `vp_brand` is in video-publisher's
+  marker, the token exists and nothing is `attempting`. It dates undated queued
+  items: the next day with a free slot at `publish_time` that is at least 15
+  minutes ahead. Held days are never reused, and existing dates never change.
+  It then checks that the token answers for `channel_id` (1 unit), and uploads
+  dated items earliest first. Each upload is private with `status.publishAt`,
+  refused if under 15 minutes ahead, and refused if the quota day would go over
+  the limit. It stops at the first error.
+- `youtube-status`: read-only, from the state, the ledger and the marker.
+- `youtube-import` (V1-M): reads video-publisher's `content/<brand>/{queue,
+  published}` manifests and the latest `publish_log` row per item, opened
+  `mode=ro` and closed at once, never through its `get_connection`. It
+  excludes Instagram. It is idempotent. It never moves an existing date. Two
+  video ids for one item are a conflict, reported and left alone.
+- `youtube-cutover`: checks the token (no network), then checks that
+  video-publisher has no `attempting` item and no undated queued item it has
+  not published. It re-runs the import, adds `vp_brand` to the marker, and
+  prints the state before and after. `--dry-run` writes nothing except the
+  lock file.
+
+**One publisher (DEC-058(2)).** The marker is
+`<vp_root>/config/moved_to_platform.yaml`, `{brands: [names]}`. The platform
+uploads only for a listed brand. video-publisher's `src/moved.py` refuses a
+listed brand in `publish`, `scheduled_publish.py`, `schedule_youtube.py`,
+`retry-failed` and `_publish_youtube_item`, before any `publish_log` row. An
+unreadable marker refuses on both sides. No task or drain runs any of this.
+
+*Verification anchor (10.13): 2026-11-22, branch `v1-youtube`;
+`tests/test_youtube_channel.py` covers config refusals, the eight topfive
+layouts (synthetic text), dates (today vs tomorrow at the 15-minute edge,
+held days, per_day 2, DST), the request body, every schedule refusal (marker
+absent, other brand or unreadable, no token, attempting, quota, near time,
+wrong channel, production), the attempting record saved before the call, the
+lock both ways, atomic writes, the import's mapping and idempotence and
+conflicts, cutover's refusals and dry run, auth, the calendar route, and a
+socket guard shown to fail on a real connect. video-publisher's
+`tests/test_moved_brands.py` covers each refusing path both ways.*
