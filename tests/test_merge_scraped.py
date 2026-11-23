@@ -140,17 +140,16 @@ def test_get_comments_returns_store_generated_bin(api_client, comments_dir):
     assert len(data["comments"]) + data["reviewed_count"] == data["counts"]["GENERATED"]
 
 
-def test_get_comments_excludes_already_curated_ready_files(api_client, comments_dir):
-    """A draft seeded from ready_*.json was already curated, so it is seeded
-    reviewed and stays out of the review queue — expressed as store state
-    (reviewed_at) rather than as which file the draft happens to live in."""
+def test_get_comments_seeds_ready_files_unapproved(api_client, comments_dir):
+    """E0: a draft seeded from ready_*.json is NOT approved. A file is not an
+    approval, so it waits in the review queue like any other draft."""
     _write_comments(comments_dir, "comments_1.json", [{"post_url": "cu1", "comment": "review me"}])
     _write_comments(comments_dir, "ready_1.json",
                     [{"post_url": "cuR", "comment": "already curated"}], curated=True)
 
     data = api_client.get("/api/comments/demo").get_json()
-    assert {c["url"] for c in data["comments"]} == {"cu1"}
-    assert data["reviewed_count"] == 1
+    assert {c["url"] for c in data["comments"]} == {"cu1", "cuR"}
+    assert data["reviewed_count"] == 0
     # ...but it is still a drafted post, so it remains in the GENERATED bin and
     # is visible when the caller asks for everything.
     assert data["counts"]["GENERATED"] == 2

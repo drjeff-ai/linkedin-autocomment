@@ -81,8 +81,12 @@ def client(env):
     return dash.app.test_client()
 
 
-def _rec(i, status, comment=None, reviewed_at=None, url=None):
+def _rec(i, status, comment=None, reviewed_at=None, url=None, approved=False):
+    """A store record. ``approved`` stamps a real E0 approval (time + hash)."""
+    if approved:
+        reviewed_at = reviewed_at or "2026-11-22T09:00:00"
     return {
+        "approved_hash": post_store.text_hash(comment) if approved else None,
         "key": ACTIVITY.format(i) if url is None else url,
         "url": ACTIVITY.format(i) if url is None else url,
         "author": f"Author {i}", "text": f"Post body {i} about AI agents.",
@@ -300,12 +304,14 @@ def test_review_queue_equals_generated_bin_when_nothing_reviewed(env, client):
 def test_review_queue_plus_reviewed_always_reconstructs_the_bin(env, client):
     """The invariant that replaces 'the queue is empty because files moved'."""
     _seed(env, [_rec(1, GENERATED, comment="a"),
-                _rec(2, GENERATED, comment="b", reviewed_at="2026-07-29T00:00:00"),
-                _rec(3, GENERATED, comment="c", reviewed_at="2026-07-29T00:00:00")])
+                _rec(2, GENERATED, comment="b", approved=True),
+                _rec(3, GENERATED, comment="c", approved=True),
+                # Stamped before E0, no hash: NOT approved, back in the queue.
+                _rec(4, GENERATED, comment="d", reviewed_at="2026-07-29T00:00:00")])
     data = client.get("/api/comments/demo").get_json()
-    assert len(data["comments"]) == 1
+    assert sorted(c["comment"] for c in data["comments"]) == ["a", "d"]
     assert data["reviewed_count"] == 2
-    assert len(data["comments"]) + data["reviewed_count"] == data["counts"]["GENERATED"] == 3
+    assert len(data["comments"]) + data["reviewed_count"] == data["counts"]["GENERATED"] == 4
 
 
 def test_review_queue_survives_deletion_of_every_comment_file(env, client):
@@ -317,15 +323,18 @@ def test_review_queue_survives_deletion_of_every_comment_file(env, client):
     assert all(c["comment"].startswith("draft") for c in data["comments"])
 
 
-def test_saving_marks_reviewed_in_the_store_and_persists_edits(env, client):
+def test_saving_persists_edits_and_approves_nothing(env, client):
+    """E0: Save stores the edit on the record and approves nothing."""
     _seed(env, [_rec(1, GENERATED, comment="original")])
     resp = client.post("/api/comments/demo/save", json={"comments": [
         {"key": ACTIVITY.format(1), "url": ACTIVITY.format(1), "comment": "edited by user"}]})
     assert resp.status_code == 200
+    assert resp.get_json()["approved"] == 0
     rec = PostStore("demo").get(ACTIVITY.format(1))
     assert rec["comment"] == "edited by user"     # the store, not just the TXT
-    assert rec["reviewed_at"] is not None
-    assert rec["status"] == GENERATED             # reviewing is not posting
+    assert rec["reviewed_at"] is None
+    assert not post_store.is_approved(rec)
+    assert rec["status"] == GENERATED
 
 
 def test_regenerating_clears_the_reviewed_flag(env):
@@ -348,17 +357,19 @@ def test_include_reviewed_returns_the_whole_bin(env, client):
 # Post step — sourced from the store, never from a stale file
 # ══════════════════════════════════════════════════════════════════════════════
 
-def test_post_step_prefers_reviewed_drafts(env, client, monkeypatch):
+def test_post_step_posts_only_approved_drafts(env, client, monkeypatch):
+    """E0: the "then fall back to the rest of the bin" is gone."""
     _seed(env, [_rec(1, GENERATED, comment="unreviewed"),
-                _rec(2, GENERATED, comment="approved", reviewed_at="2026-07-29T00:00:00")])
+                _rec(2, GENERATED, comment="approved", approved=True)])
     captured = {}
     monkeypatch.setattr(dash, "run_job",
                         lambda job_id, fn, *a, **k: captured.update(args=a))
     monkeypatch.setattr(dash, "can_start_browser_task", lambda *a, **k: True)
 
-    assert client.post("/api/post/demo", json={"count": 1}).status_code == 200
+    assert client.post("/api/post/demo", json={"count": 5}).status_code == 200
     body = open(captured["args"][1], encoding="utf-8").read()
-    assert body.index("approved") < body.index("unreviewed")
+    assert "approved" in body
+    assert "unreviewed" not in body
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -453,7 +464,7 @@ def test_review_render_explains_a_short_queue(client_source):
     ambiguity is what made 87 GENERATED / 0 shown look like data loss."""
     body = _function_body(client_source, "renderComments")
     assert "reviewed_count" in body
-    assert "already reviewed" in body
+    assert "approved and awaiting posting" in body
 
 
 def _code_only(source):
@@ -510,8 +521,8 @@ def test_removed_comment_becomes_trash_and_leaves_generated_bin(env, client):
 
 def test_removed_comment_is_never_offered_by_the_post_step(env, client, monkeypatch):
     """A comment 'removed' in Review Comments must not still be postable."""
-    _seed(env, [_rec(1, GENERATED, comment="keep me"),
-                _rec(2, GENERATED, comment="remove me")])
+    _seed(env, [_rec(1, GENERATED, comment="keep me", approved=True),
+                _rec(2, GENERATED, comment="remove me", approved=True)])
     client.post("/api/posts/demo/reject", json={"key": ACTIVITY.format(2)})
 
     captured = {}

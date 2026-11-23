@@ -510,6 +510,9 @@ def real_store_for(monkeypatch, tmp_path):
             stamp = (now - age).isoformat()
             s.posts[url] = _rec(url, post_store.GENERATED,
                                 generated_at=stamp, updated_at=stamp)
+            # Approved (E0): only approved drafts reach the poster input.
+            s.posts[url]["reviewed_at"] = stamp
+            s.posts[url]["approved_hash"] = post_store.text_hash(s.posts[url]["comment"])
         s.save()
         monkeypatch.setattr(post_store, "load_synced_store", lambda p=None, **kw: s)
         cfg = {"scheduler": {"enabled": True,

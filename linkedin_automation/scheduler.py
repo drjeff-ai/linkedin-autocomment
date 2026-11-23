@@ -818,12 +818,27 @@ class Scheduler:
         return {"action": "error", "count": 0, "note": f"unknown job {job_type}"}
 
     def _fire_post_comments(self, profile, job_cfg, now):
-        """Post a random count of GENERATED drafts; no-op when the queue is empty.
-        Drafts older than ``draft_max_age_days`` are trashed first (S1)."""
+        """Post a random count of APPROVED drafts; no-op when none is approved.
+        Drafts older than ``draft_max_age_days`` are trashed first (S1).
+
+        Only ``post_store.is_approved`` records are written to the poster's
+        input (E0, DEC-060). A GENERATED draft nobody approved is refused with
+        its reason, never posted, and the run says "0 posted: N not approved".
+        """
         store = post_store.load_synced_store(profile)
         expire_stale_drafts(store, self._config_fn(profile) or {}, now)
-        generated = store.by_status(post_store.GENERATED)
+        drafts = store.by_status(post_store.GENERATED)
+        generated, refused = post_store.split_approved(drafts)
+        for rec, reason in refused:
+            logger.info("Scheduler[%s] post_comments: refused %s (%s)",
+                        profile, rec.get("key"), reason)
         if not generated:
+            if refused:
+                note = post_store.not_approved_message(len(refused))
+                logger.info("Scheduler[%s] post_comments: %s, skipping "
+                            "scheduled run", profile, note)
+                return {"action": ACTION_QUEUE_EMPTY, "count": 0,
+                        "note": note, "not_approved": len(refused)}
             logger.info("Scheduler[%s] post_comments: No comments queued, "
                         "skipping scheduled run", profile)
             return {"action": ACTION_QUEUE_EMPTY, "count": 0,

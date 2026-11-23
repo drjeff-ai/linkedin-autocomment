@@ -30,6 +30,7 @@ from linkedin_automation import profile_manager as pm
 from linkedin_automation import run_log
 
 from fake_post_page import FakePostPage
+from approval_helpers import approve_txt  # noqa: E402
 
 ACT = "https://www.linkedin.com/feed/update/urn:li:activity:{}/"
 URLS = [ACT.format(str(d) * 16) for d in (1, 2, 3, 4)]
@@ -84,7 +85,7 @@ def _run(env, monkeypatch, page, urls):
     # A poll that must exhaust (the missing Like) keeps a real deadline.
     poster.LIKE_WAIT_SECONDS = 0.2
     t0 = time.monotonic()
-    result = poster.run(_comments_file(env, urls), post_count=len(urls))
+    result = poster.run(approve_txt(poster.profile_name, _comments_file(env, urls)), post_count=len(urls))
     wall = time.monotonic() - t0
     with open(poster.run_log_path, encoding="utf-8") as f:
         return poster, result, wall, f.read()
@@ -164,7 +165,7 @@ def test_a_run_that_cannot_log_in_still_writes_its_summary(env, monkeypatch):
                         lambda name=None, headless=False, allow_production=False: (FakePostPage(), {}))
     poster = cpm.LinkedInCommentPoster(profile_name="t")
     with pytest.raises(pm.LoginRequiredError):
-        poster.run(_comments_file(env, URLS[:1]), post_count=1)
+        poster.run(approve_txt(poster.profile_name, _comments_file(env, URLS[:1])), post_count=1)
     with open(poster.run_log_path, encoding="utf-8") as f:
         assert "RUN profile=t attempted=0" in f.read()
 

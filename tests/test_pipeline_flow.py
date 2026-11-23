@@ -86,15 +86,28 @@ def test_originals_archived_after_save(client):
     assert glob.glob(str(comments_dir / "archived" / "comments_*.json"))
 
 
-def test_review_empty_after_save_because_drafts_are_reviewed(client):
-    """Saving empties the Review queue via store state (``reviewed_at``), not by
-    archiving files — and the drafts are still in the GENERATED bin, which is what
-    the count now says out loud instead of them appearing to vanish."""
+def _approve_all(c, comments):
+    items = [{"key": x.get("key") or x.get("post_url") or x.get("url"),
+              "comment": x["comment"]} for x in comments]
+    resp = c.post("/api/comments/demo/approve_all",
+                  json={"items": items, "count": len(items), "confirm": True})
+    assert resp.status_code == 200, resp.get_json()
+    return resp
+
+
+def test_save_approves_nothing_and_approve_empties_the_queue(client):
+    """E0: Save keeps every draft in Review. Approval empties the queue via
+    store state, and the drafts are still in the GENERATED bin, which the
+    count says out loud instead of them appearing to vanish."""
     c, comments_dir = client
     comments = [_generator_comment(i) for i in range(1, 4)]
     _seed_review_file(comments_dir, comments)
 
     c.post("/api/comments/demo/save", json={"comments": comments})
+    after_save = c.get("/api/comments/demo").get_json()
+    assert len(after_save["comments"]) == 3          # Save approved nothing
+    assert after_save["reviewed_count"] == 0
+    _approve_all(c, after_save["comments"])
     resp = c.get("/api/comments/demo")
     assert resp.status_code == 200
     data = resp.get_json()
@@ -166,6 +179,7 @@ def test_post_builds_input_from_the_store_not_a_file_glob(client, monkeypatch):
     comments = [_generator_comment(i) for i in range(1, 4)]
     _seed_review_file(comments_dir, comments)
     c.post("/api/comments/demo/save", json={"comments": comments})
+    _approve_all(c, c.get("/api/comments/demo").get_json()["comments"])
 
     # A stale EMPTY txt that is newer than everything else — the old glob would
     # have picked exactly this file.

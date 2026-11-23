@@ -286,7 +286,7 @@ ROW_PUBLISHED = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
 JOB_ROUTES = [
     ("POST", "/api/posts/{p}/scrape", {}),
     ("POST", "/api/comments/{p}/generate", {}),
-    ("POST", "/api/post/{p}", {"comments_file": "hand_built.txt", "count": 1}),
+    ("POST", "/api/post/{p}", {"count": 1}),
     ("POST", "/api/health/{p}/selectors", {}),
     ("POST", "/api/connector/{p}/start",
      {"search_url": "https://www.linkedin.com/search/results/people/?k=x"}),
@@ -328,9 +328,13 @@ def outside_world(monkeypatch):
     monkeypatch.setattr(pm, "get_profile",
                         lambda name: {"name": name} if name in registered else None)
 
-    # generate: NEW posts in the store.
+    # generate: NEW posts in the store. post: approved drafts (E0), written
+    # to a poster input that never leaves the test.
     monkeypatch.setattr(post_store, "load_synced_store",
-                        lambda profile=None, **kw: RouteStore(new=_generated(2)))
+                        lambda profile=None, **kw: RouteStore(
+                            generated=_generated(2), new=_generated(2)))
+    monkeypatch.setattr(dashboard, "_write_poster_input",
+                        lambda profile, records: "approved.txt")
     monkeypatch.setattr(dashboard, "_write_lifecycle_input",
                         lambda profile, posts: ("lifecycle_new.json", 2))
     # schedule: a channel and one pending row.

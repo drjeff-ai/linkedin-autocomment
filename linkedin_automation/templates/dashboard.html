@@ -1199,7 +1199,8 @@ header {
         <div class="panel-subtitle" id="reviewSubtitle">Edit or remove comments before posting</div>
       </div>
       <div class="btn-group">
-        <button class="btn btn-primary btn-sm" onclick="saveComments()">Save & Continue →</button>
+        <button class="btn btn-sm" onclick="saveComments()" title="Stores your edits. Approves nothing.">Save edits</button>
+        <button class="btn btn-primary btn-sm" id="approveAllBtn" onclick="approveAllShown()">Approve all shown</button>
       </div>
     </div>
     <div id="commentsList"></div>
@@ -2192,7 +2193,8 @@ async function loadPostQueue() {
   try {
     const res = await fetch(`/api/comments/${currentProfile}?include_reviewed=1`);
     const data = await res.json();
-    postQueue = data.comments || [];
+    // Only approved drafts can post (E0): the server refuses the rest.
+    postQueue = (data.comments || []).filter(c => c.approved);
     updateCounts();
   } catch(e) { /* leave the previous render state alone on a transport error */ }
 }
@@ -2629,7 +2631,7 @@ function renderComments() {
   const reviewed = commentsData.reviewed_count || 0;
   const genBin = (commentsData.counts && commentsData.counts.GENERATED) || 0;
   const reviewedNote = reviewed
-    ? ` · ${reviewed} already reviewed and awaiting posting (${genBin} drafted in total)`
+    ? ` · ${reviewed} approved and awaiting posting (${genBin} drafted in total)`
     : '';
 
   if (!comments.length) {
@@ -2638,7 +2640,7 @@ function renderComments() {
         <div class="empty-icon">◇</div>
         <h3>Nothing to review</h3>
         <p>${reviewed
-              ? `All ${genBin} drafted comment(s) have been reviewed — continue to Post.`
+              ? `All ${genBin} drafted comment(s) are approved — continue to Post.`
               : 'Generate comments from your NEW posts first.'}</p>
       </div>`;
     document.getElementById('reviewSubtitle').textContent =
@@ -2647,7 +2649,9 @@ function renderComments() {
   }
 
   document.getElementById('reviewSubtitle').textContent =
-    `${comments.length} comments — edit or remove before posting${reviewedNote}`;
+    `${comments.length} comments — edit, approve or remove before posting${reviewedNote}`;
+  const allBtn = document.getElementById('approveAllBtn');
+  if (allBtn) allBtn.textContent = `Approve all shown (${comments.length})`;
 
   container.innerHTML = comments.map((c, i) => {
     const author = c.post_author || c.author || 'Unknown';
@@ -2662,7 +2666,10 @@ function renderComments() {
         <textarea class="comment-edit" id="cedit-${i}" rows="3">${esc(c.comment || c.text || '')}</textarea>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:0.5rem">
           <span class="comment-style">${esc(c.style || '')} · ${c.word_count || '?'} words</span>
-          <button class="btn btn-danger btn-sm" onclick='removeComment(${JSON.stringify(c.key || c.url || c.post_url || "")}, ${i})'>Remove</button>
+          <span class="btn-group">
+            <button class="btn btn-primary btn-sm" onclick='approveComment(${JSON.stringify(c.key || c.url || c.post_url || "")}, ${i})'>Approve</button>
+            <button class="btn btn-danger btn-sm" onclick='removeComment(${JSON.stringify(c.key || c.url || c.post_url || "")}, ${i})'>Remove</button>
+          </span>
         </div>
       </div>`;
   }).join('');
@@ -2691,6 +2698,48 @@ async function removeComment(key, index) {
   await loadExistingComments();
   renderComments();
   loadPostQueue();
+}
+
+// E0: approval is per item. The text in the box is the text approved; an edit
+// after approval clears it on the server, so the draft comes back here.
+function _editedText(i, c) {
+  const textarea = document.getElementById(`cedit-${i}`);
+  return textarea ? textarea.value : (c.comment || '');
+}
+
+async function approveComment(key, index) {
+  if (!currentProfile || !key) return;
+  const c = (commentsData.comments || [])[index] || {};
+  const res = await fetch(`/api/comments/${currentProfile}/approve`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, comment: _editedText(index, c) })
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    alert(err.error || 'Could not approve this comment.');
+  }
+  await loadExistingComments();
+  renderComments();
+  loadPostQueue();
+}
+
+async function approveAllShown() {
+  if (!currentProfile) return;
+  const shown = commentsData.comments || [];
+  if (!shown.length) return alert('Nothing to approve.');
+  const n = shown.length;
+  if (!confirm(`Approve all ${n} comment(s) shown, exactly as written? Each one can then be posted.`)) return;
+  const items = shown.map((c, i) => ({ key: c.key || c.url || c.post_url || '', comment: _editedText(i, c) }));
+  const res = await fetch(`/api/comments/${currentProfile}/approve_all`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items, count: n, confirm: true })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) alert(data.error || 'Could not approve.');
+  else if (data.refused && data.refused.length) alert(`${data.approved} approved, ${data.refused.length} refused.`);
+  await loadExistingComments();
+  renderComments();
+  await loadPostQueue();
 }
 
 async function saveComments() {
@@ -2726,14 +2775,11 @@ async function saveComments() {
   }
 
 
-  // Re-read both the review queue and the post queue from the store. The saved
-  // drafts are now reviewed_at-stamped, so they leave Review and appear under
-  // Post — driven by store state, not by which files still exist on disk.
+  // Save stores edits only and approves nothing (E0). An edited draft that
+  // was approved is unapproved now, so re-read both queues from the store.
   await loadExistingComments();
+  renderComments();
   await loadPostQueue();
-
-  document.getElementById('postCountInput').value = Math.min(comments.length, 3);
-  goStep('post');
 }
 
 // ─── Posting ────────────────────────────────────────────
@@ -2742,8 +2788,7 @@ async function startPosting() {
   if (!currentProfile) return alert('Select a profile first');
 
   // No comments_file: the server builds the poster input from the store's
-  // GENERATED bin (reviewed drafts first), so posting can't fall back to a
-  // stale — or empty — TXT file.
+  // APPROVED drafts only (E0), and refuses the rest with their reason.
   const body = { count: parseInt(document.getElementById('postCountInput').value) };
 
   await launchJob(

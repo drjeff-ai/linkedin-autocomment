@@ -103,6 +103,72 @@ _RANK = {TRASH: 0, NEW: 1, GENERATED: 2, COMMENTED: 3, UNAVAILABLE: 4}
 SCHEMA_VERSION = 2
 
 
+# ─── Approval (E0, DEC-060) ──────────────────────────────────────────────────
+#
+# An approval is two fields on a GENERATED record: ``reviewed_at`` (when a human
+# approved it) and ``approved_hash`` (sha256 of the exact text approved). The
+# hash is what makes an approval belong to one text: an edit after approval no
+# longer matches, so the record is unapproved until approved again. A record
+# with ``reviewed_at`` and no hash (written before E0) is NOT approved.
+#
+# Every engagement post path calls ``approval_refusal`` / ``is_approved`` at the
+# last step before posting and posts nothing that fails it.
+
+REFUSE_WRONG_STATUS = "wrong_status"
+REFUSE_NOT_REVIEWED = "not_reviewed"
+REFUSE_NO_HASH = "no_approved_hash"
+REFUSE_EDITED = "edited_after_approval"
+REFUSE_NO_RECORD = "no_record"
+REFUSE_TEXT_DIFFERS = "text_differs_from_approved"
+
+
+def text_hash(text) -> str:
+    """sha256 hex of ``text`` exactly as stored (UTF-8). ``None`` hashes as ""."""
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def approval_refusal(record: Optional[Dict]) -> Optional[str]:
+    """Why ``record`` may not be posted, or ``None`` when it is approved.
+
+    Approved means: ``status == GENERATED``, ``reviewed_at`` set, and
+    ``approved_hash`` equal to the hash of the current ``comment``.
+    """
+    if not record:
+        return REFUSE_NO_RECORD
+    if record.get("status") != GENERATED:
+        return REFUSE_WRONG_STATUS
+    if not record.get("reviewed_at"):
+        return REFUSE_NOT_REVIEWED
+    stored = record.get("approved_hash")
+    if not stored:
+        return REFUSE_NO_HASH
+    if stored != text_hash(record.get("comment")):
+        return REFUSE_EDITED
+    return None
+
+
+def is_approved(record: Optional[Dict]) -> bool:
+    """The one shared approval check. True only for an approved GENERATED record."""
+    return approval_refusal(record) is None
+
+
+def split_approved(records) -> tuple:
+    """``(approved, refused)`` where ``refused`` is ``[(record, reason), ...]``."""
+    approved, refused = [], []
+    for rec in records:
+        reason = approval_refusal(rec)
+        if reason is None:
+            approved.append(rec)
+        else:
+            refused.append((rec, reason))
+    return approved, refused
+
+
+def not_approved_message(n_refused: int, posted: int = 0) -> str:
+    """The run line every post path prints when the gate refused records."""
+    return "%d posted: %d not approved" % (posted, n_refused)
+
+
 # ─── Identity ─────────────────────────────────────────────────────────────────
 
 def post_key(item: Dict) -> str:
@@ -339,6 +405,7 @@ class PostStore:
         # for the same post had been — otherwise a regenerated comment would skip
         # the Review step silently.
         rec["reviewed_at"] = None
+        rec["approved_hash"] = None
         rec["updated_at"] = _now()
         if save:
             self.save()
@@ -382,25 +449,60 @@ class PostStore:
             self.save()
         return True
 
-    def mark_reviewed(self, key_or_url: str, comment: str = None,
-                      save: bool = False) -> bool:
-        """Record that the user approved a GENERATED draft in the Review step.
+    def save_edit(self, key_or_url: str, comment: str = None,
+                  save: bool = False) -> bool:
+        """Store the user's edited text on a GENERATED draft. Approves nothing.
 
-        ``comment``, when given, replaces the stored draft with the user's edited
-        text — otherwise an edit made in the Review tab would never reach the
-        store and the scheduler would post the unedited original. Only GENERATED
-        records are touched. Returns True when a record was updated.
+        An edit that changes the text clears any approval (``reviewed_at`` and
+        ``approved_hash``), so the record goes back to the review queue. An
+        unchanged or empty text leaves the record as it was. Returns True when
+        the text changed.
+        """
+        rec = self._resolve(key_or_url)
+        if rec is None or rec.get("status") != GENERATED:
+            return False
+        if comment is None or not comment.strip() or comment == rec.get("comment"):
+            return False
+        rec["comment"] = comment
+        rec["reviewed_at"] = None
+        rec["approved_hash"] = None
+        rec["updated_at"] = _now()
+        if save:
+            self.save()
+        return True
+
+    def approve(self, key_or_url: str, comment: str = None,
+                save: bool = False) -> bool:
+        """Approve one GENERATED draft: the exact text, by hash.
+
+        ``comment``, when given and non-empty, is the text the user approved and
+        replaces the stored draft first, so what is approved is what they saw.
+        Stores ``reviewed_at`` and ``approved_hash`` = sha256 of the text. Only
+        GENERATED records are touched. Returns True when a record was approved.
         """
         rec = self._resolve(key_or_url)
         if rec is None or rec.get("status") != GENERATED:
             return False
         if comment is not None and comment.strip():
             rec["comment"] = comment
+        if not (rec.get("comment") or "").strip():
+            return False
         rec["reviewed_at"] = _now()
+        rec["approved_hash"] = text_hash(rec.get("comment"))
         rec["updated_at"] = _now()
         if save:
             self.save()
         return True
+
+    def unapproved_reviewed_count(self) -> int:
+        """GENERATED records with ``reviewed_at`` but no valid approval.
+
+        The pre-E0 records: stamped by the old Save-all, never hashed. They are
+        not approved and are back in the review queue.
+        """
+        return sum(1 for r in self.posts.values()
+                   if r.get("status") == GENERATED and r.get("reviewed_at")
+                   and not is_approved(r))
 
     def reject(self, key_or_url: str, save: bool = False) -> bool:
         """Move any post → TRASH(manual). Keeps the draft so it can be restored."""
@@ -615,9 +717,10 @@ class PostStore:
     def review_queue(self, include_reviewed: bool = False) -> List[Dict]:
         """GENERATED drafts for the Review Comments step.
 
-        By default only *unreviewed* drafts (``reviewed_at`` is None) — approving
-        a draft is what removes it from the queue, replacing the old behaviour
-        where the queue emptied because its **files** had been archived. Pass
+        By default only drafts that are not approved (``is_approved`` is
+        False): approving a draft is what removes it from the queue. A draft
+        edited after approval, or stamped ``reviewed_at`` before E0 with no
+        ``approved_hash``, is not approved and is back here. Pass
         ``include_reviewed`` for the whole GENERATED bin.
 
         Invariant: ``len(review_queue()) + reviewed_count() == counts()["GENERATED"]``.
@@ -625,16 +728,15 @@ class PostStore:
         recs = self.by_status(GENERATED)
         if include_reviewed:
             return recs
-        return [r for r in recs if not r.get("reviewed_at")]
+        return [r for r in recs if not is_approved(r)]
 
     def reviewed_count(self) -> int:
-        """GENERATED drafts the user has already approved but not yet posted.
+        """GENERATED drafts that are approved (``is_approved``), not yet posted.
 
         Surfaced by the API so a short review queue is always explained by a
         number rather than looking like data loss.
         """
-        return sum(1 for r in self.posts.values()
-                   if r.get("status") == GENERATED and r.get("reviewed_at"))
+        return sum(1 for r in self.posts.values() if is_approved(r))
 
 
 # ─── Mapping helpers ──────────────────────────────────────────────────────────
@@ -708,9 +810,9 @@ def migrate_from_legacy(profile_name: str = None, store: PostStore = None,
                 store.upsert_scraped(post, status=TRASH, reason=REASON_LOW_QUALITY)
 
     # 2. Generated/curated comments → GENERATED (attach the draft). A draft found
-    #    in a ``ready_*.json`` was already curated by the user, so it is seeded as
-    #    reviewed and doesn't reappear in the Review Comments queue.
-    for pattern, curated in (("comments_*.json", False), ("ready_*.json", True)):
+    #    in a ``ready_*.json`` is seeded unapproved like any other (E0, DEC-062):
+    #    a file is not an approval, so it waits in the Review Comments queue.
+    for pattern in ("comments_*.json", "ready_*.json"):
         for fp in glob.glob(os.path.join(comments_dir, pattern)):
             data = _read(fp)
             if data is None:
@@ -729,8 +831,6 @@ def migrate_from_legacy(profile_name: str = None, store: PostStore = None,
                         "style": norm["style"], "approach": norm["approach"],
                         "word_count": norm["word_count"],
                     })
-                    if curated:
-                        store.mark_reviewed(key)
 
     # 3. posting_progress.json → COMMENTED (authoritative).
     progress_file = pm.get_progress_file(profile_name)

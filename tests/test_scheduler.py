@@ -105,12 +105,19 @@ class FakeStore:
         return 0
 
 
-def _generated(n):
-    return [{
+def _generated(n, approved=True):
+    """``n`` GENERATED drafts, approved by default (E0: only approved post)."""
+    recs = [{
         "key": f"k{i}", "url": f"https://example.com/{i}", "author": f"Author {i}",
-        "text": f"Post body {i}", "category": "AI",
+        "text": f"Post body {i}", "category": "AI", "status": post_store.GENERATED,
         "comment": f"Nice point {i}, thanks.", "comment_meta": {"word_count": 4},
+        "reviewed_at": None, "approved_hash": None,
     } for i in range(n)]
+    if approved:
+        for r in recs:
+            r["reviewed_at"] = "2026-11-22T09:00:00"
+            r["approved_hash"] = post_store.text_hash(r["comment"])
+    return recs
 
 
 def _config(scheduler_section):

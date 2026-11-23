@@ -26,6 +26,7 @@ import logging
 from . import profile_manager as pm
 from . import human_behavior as hb
 from . import post_urn
+from . import post_store
 from . import run_log
 from .failure_capture import (capture_failure, capture_like_state,
                               capture_submit_state)
@@ -1868,7 +1869,7 @@ class LinkedInCommentPoster:
     
 
     def _report_run(self, posted, failed, skipped, attempted, total,
-                    unavailable=0):
+                    unavailable=0, not_approved=0):
         """The run summary. A batch that posted nothing must be unmistakable.
 
         The old line was `Done. Posted N, skipped M` at INFO with a tick, which
@@ -1877,7 +1878,13 @@ class LinkedInCommentPoster:
         """
         result = {"posted": posted, "failed": failed, "skipped": skipped,
                   "attempted": attempted, "total": total,
-                  "unavailable": unavailable}
+                  "unavailable": unavailable, "not_approved": not_approved}
+        if not_approved:
+            # Its own line, at WARNING: the gate refused these, so the human
+            # has something to do (approve them, or not).
+            self.logger.warning("%s (refused by the approval gate).",
+                                post_store.not_approved_message(
+                                    not_approved, posted))
         if unavailable:
             # Its own line, at INFO. Gone posts are not failures and must not
             # inflate the failure count - but they are not invisible either: a
@@ -1995,6 +2002,24 @@ class LinkedInCommentPoster:
         self.last_failure_evidence = None
         return entry
 
+    def approval_refusal(self, comment: Dict) -> Optional[str]:
+        """Re-check the store before posting one comment from the TXT handoff.
+
+        E0 (DEC-060): the TXT file is a handoff, not an authority. The store is
+        re-read for every comment, so an approval withdrawn (or a text edited)
+        after the file was written is honoured. Returns ``None`` only when the
+        record for this URL is ``post_store.is_approved`` and its text is the
+        text in the file; otherwise the refusal reason.
+        """
+        store = post_store.PostStore(profile_name=self.profile_name)
+        rec = store._resolve(comment.get("url", ""))
+        reason = post_store.approval_refusal(rec)
+        if reason:
+            return reason
+        if (rec.get("comment") or "").strip() != (comment.get("comment") or "").strip():
+            return post_store.REFUSE_TEXT_DIFFERS
+        return None
+
     def run(self, comments_file: str, post_count: int = 1, manual_mode: bool = False):
         """Run the comment posting process, with a file log of where time went.
 
@@ -2058,6 +2083,8 @@ class LinkedInCommentPoster:
             # And a GONE post is neither. Nothing failed and nothing
             # was skipped by choice - the post stopped existing.
             unavailable = 0
+            # Refused by the approval gate (E0): never attempted, never posted.
+            not_approved = 0
             attempted = 0
             total = len(comments)
 
@@ -2081,6 +2108,16 @@ class LinkedInCommentPoster:
 
                 if url in self.progress.get('posted_comments', []):
                     self.logger.info(f"Skipping comment {label}: already posted")
+                    continue
+
+                # The last step before posting: the store says approved, for
+                # this exact text, or nothing is posted (E0).
+                refusal = self.approval_refusal(comment)
+                if refusal:
+                    not_approved += 1
+                    self.logger.warning(
+                        "Refused comment %s: not approved (%s) %s", label,
+                        refusal, url)
                     continue
 
                 try:
@@ -2156,7 +2193,7 @@ class LinkedInCommentPoster:
 
             self.last_run_result = self._report_run(
                 posted, failed, skipped, attempted, total,
-                unavailable=unavailable)
+                unavailable=unavailable, not_approved=not_approved)
             return self.last_run_result
 
         finally:
@@ -2181,7 +2218,10 @@ def main():
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
     parser.add_argument('--manual', action='store_true', help='Manual mode - shows instructions instead of automating')
     parser.add_argument('--test-url', help='Test with a specific LinkedIn post URL')
-    parser.add_argument('--test-comment', default='This is a test comment.', help='Comment text for test mode')
+    parser.add_argument('--test-comment', default=None,
+                        help='Comment text for test mode. Default: the approved '
+                             'draft for --test-url. Either way it must be the '
+                             'approved text (E0).')
     parser.add_argument('--profile', type=str, default=None, help='LinkedIn profile name (uses default if omitted)')
     parser.add_argument('--allow-production', action='store_true',
                          help='Allow running against a declared PRODUCTION identity')
@@ -2197,11 +2237,21 @@ def main():
     # Test mode
     if args.test_url:
         print(f"Running in test mode with URL: {args.test_url}")
+        # E0: test mode posts a real comment, so it goes through the same gate.
+        # The URL must be an approved store record, and the text its approved
+        # text. Free text is refused.
+        rec = post_store.PostStore(profile_name=args.profile)._resolve(args.test_url)
         test_comment = {
             'url': args.test_url,
-            'comment': args.test_comment,
+            'comment': (args.test_comment if args.test_comment is not None
+                        else (rec or {}).get('comment') or ''),
             'preview': 'Test mode'
         }
+        refusal = poster.approval_refusal(test_comment)
+        if refusal:
+            print(f"Refused: {post_store.not_approved_message(1)} ({refusal}). "
+                  f"Approve this post's draft in Review Comments first.")
+            sys.exit(pm.EXIT_ERROR)
 
         try:
             poster.setup_driver()

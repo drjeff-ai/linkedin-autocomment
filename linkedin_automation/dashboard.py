@@ -388,8 +388,20 @@ def _auto_cycle_job(job_id, profile_name, job_cfg):
             if expired:
                 log_job(job_id, "Moved %d stale draft(s) to Trash before posting."
                         % expired)
-            generated = store.by_status(post_store.GENERATED)
+            # E0: only approved drafts go to the poster. A fresh unattended
+            # draft is never approved, so this stage posts only what a human
+            # approved earlier.
+            generated, refused = post_store.split_approved(
+                store.by_status(post_store.GENERATED))
+            for rec, reason in refused:
+                logger.info("auto_cycle[%s] post: refused %s (%s)",
+                            profile_name, rec.get("key"), reason)
             if not generated:
+                if refused:
+                    note = post_store.not_approved_message(len(refused))
+                    log_job(job_id, note + "; nothing to post.")
+                    return {"error": None, "posted": 0, "note": note,
+                            "not_approved": len(refused)}
                 log_job(job_id, "No comments queued; nothing to post.")
                 return {"error": None, "posted": 0, "note": "no comments queued"}
             count = min(random.randint(count_min, count_max), len(generated))
@@ -830,6 +842,7 @@ def _record_to_comment(rec):
         "style": meta.get("style", ""),
         "approach": meta.get("approach", ""),
         "reviewed_at": rec.get("reviewed_at"),
+        "approved": post_store.is_approved(rec),
     }
 
 
@@ -1003,12 +1016,13 @@ def generate_comments(profile_name):
 
 @app.route('/api/comments/<profile_name>/save', methods=['POST'])
 def save_comments(profile_name):
-    """Approve reviewed drafts: persist edits to the store, then write poster files.
+    """Save edits to the store, then write the derived files. Approves NOTHING.
 
-    The **store** is what makes a draft leave the review queue now (``reviewed_at``),
-    not the archiving of a file. Critically, the user's edited text is written back
-    onto the record — previously an edit made here only ever reached the TXT file,
-    so the scheduler (which posts from the store) would post the *unedited* draft.
+    E0 (DEC-060): Save used to stamp ``reviewed_at`` on every item in the queue,
+    which made "Save" an approve-all. Now it only writes the user's edited text
+    back onto each record (``save_edit``), and an edit clears any approval so the
+    draft is reviewed again. Approval is per item: ``/approve``, or
+    ``/approve_all`` with the stated count and a confirm.
 
     An empty list is rejected rather than written: saving nothing used to produce
     a ``Total: 0`` TXT that then became the poster's default input.
@@ -1024,12 +1038,12 @@ def save_comments(profile_name):
     #    mark anything reviewed (a bare PostStore would write an empty store file
     #    here and permanently block the legacy migration).
     store = post_store.load_synced_store(profile_name)
-    reviewed = 0
+    edited = 0
     for c in comments:
         norm = normalize_comment_fields(c)
         ident = c.get("key") or norm["url"]
-        if ident and store.mark_reviewed(ident, comment=norm["comment"]):
-            reviewed += 1
+        if ident and store.save_edit(ident, comment=norm["comment"]):
+            edited += 1
     store.save()
 
     comments_dir = pm.get_comments_dir(profile_name)
@@ -1040,7 +1054,7 @@ def save_comments(profile_name):
     json_data = {
         "generated_at": datetime.now().isoformat(),
         "total": len(comments),
-        "curated": True,
+        "curated": False,
         "comments": comments
     }
     with open(json_file, 'w', encoding='utf-8') as f:
@@ -1063,10 +1077,74 @@ def save_comments(profile_name):
         except Exception:
             logger.warning("Could not archive original comments file %s", f_path, exc_info=True)
 
-    logger.info("Saved %d comment(s) for %s; %d marked reviewed in the store.",
-                len(comments), profile_name, reviewed)
+    logger.info("Saved %d comment(s) for %s; %d edited in the store, 0 approved.",
+                len(comments), profile_name, edited)
     return jsonify({"ok": True, "json_file": json_file, "txt_file": txt_file,
-                    "count": len(comments), "reviewed": reviewed,
+                    "count": len(comments), "edited": edited, "approved": 0,
+                    "counts": store.counts()})
+
+
+@app.route('/api/comments/<profile_name>/approve', methods=['POST'])
+def approve_comment(profile_name):
+    """Approve ONE draft (E0). Body: ``{"key": ..., "comment": <text shown>}``.
+
+    The text sent is the text approved: it is stored, and its sha256 becomes
+    ``approved_hash``. Only a GENERATED record can be approved.
+    """
+    body = request.json or {}
+    key = body.get("key")
+    if not isinstance(key, str) or not key:
+        return jsonify({"error": "key is required"}), 400
+    comment = body.get("comment")
+    if comment is not None and not isinstance(comment, str):
+        return jsonify({"error": "comment must be text"}), 400
+    store = post_store.load_synced_store(profile_name)
+    if not store.approve(key, comment=comment):
+        rec = store.get(key)
+        reason = post_store.REFUSE_NO_RECORD if rec is None else (
+            post_store.REFUSE_WRONG_STATUS if rec.get("status") != post_store.GENERATED
+            else "empty_text")
+        return jsonify({"error": "not approved: %s" % reason, "reason": reason}), 409
+    store.save()
+    logger.info("Approved 1 draft for %s: %s", profile_name, key)
+    return jsonify({"ok": True, "approved": 1, "key": key,
+                    "reviewed_count": store.reviewed_count(),
+                    "counts": store.counts()})
+
+
+@app.route('/api/comments/<profile_name>/approve_all', methods=['POST'])
+def approve_all_comments(profile_name):
+    """Approve every draft shown (E0). Body: ``{"items": [{"key", "comment"}...],
+    "count": N, "confirm": true}``.
+
+    Refused unless ``confirm`` is the JSON ``true`` and ``count`` equals the
+    number of items: the UI states the count and asks before sending.
+    """
+    body = request.json or {}
+    items = body.get("items")
+    if not isinstance(items, list) or not items:
+        return jsonify({"error": "items must be a non-empty list"}), 400
+    if body.get("confirm") is not True:
+        return jsonify({"error": "approve all needs confirm=true"}), 400
+    if body.get("count") != len(items):
+        return jsonify({"error": "count %r does not match %d item(s)"
+                                 % (body.get("count"), len(items))}), 400
+    store = post_store.load_synced_store(profile_name)
+    approved, failed = 0, []
+    for it in items:
+        key = (it or {}).get("key") if isinstance(it, dict) else None
+        comment = it.get("comment") if isinstance(it, dict) else None
+        if (isinstance(key, str) and key
+                and (comment is None or isinstance(comment, str))
+                and store.approve(key, comment=comment)):
+            approved += 1
+        else:
+            failed.append(key)
+    store.save()
+    logger.info("Approve all for %s: %d approved, %d refused.",
+                profile_name, approved, len(failed))
+    return jsonify({"ok": not failed, "approved": approved, "refused": failed,
+                    "reviewed_count": store.reviewed_count(),
                     "counts": store.counts()})
 
 
@@ -1090,33 +1168,43 @@ def _write_poster_input(profile_name, records):
 
 @app.route('/api/post/<profile_name>', methods=['POST'])
 def post_comments(profile_name):
-    """Start posting comments, sourced from the store's GENERATED bin.
+    """Start posting comments: the store's APPROVED drafts, and nothing else.
 
-    This used to glob the newest ``daily_comments_*.txt``, which after an empty
-    save resolved to a ``Total: 0`` file and made posting a guaranteed no-op. Now
-    the drafts come from the store (reviewed ones first, since those carry the
-    user's edits), exactly like the scheduler's posting job. An explicit
-    ``comments_file`` still overrides for a hand-built file.
+    Only ``post_store.is_approved`` records reach the poster (E0, DEC-060). The
+    old "reviewed first, then fall back to the rest of the bin" is gone, and so
+    is the hand-built ``comments_file`` override: the poster is given store
+    records, never free text. A GENERATED draft nobody approved is refused with
+    its reason; with none approved the route answers "0 posted: N not approved".
     """
-    refused = _automations_refusal(profile_name)
-    if refused:
-        return refused
+    blocked = _automations_refusal(profile_name)
+    if blocked:
+        return blocked
     body = request.json or {}
-    comments_file = body.get('comments_file', '')
+    if body.get('comments_file'):
+        return jsonify({
+            "error": "comments_file is not accepted: posting takes approved "
+                     "store records only. Approve drafts in Review Comments.",
+        }), 400
     count = body.get('count', 1)
 
-    if not comments_file:
-        store = post_store.load_synced_store(profile_name)
-        generated = store.by_status(post_store.GENERATED)
-        # Reviewed drafts are the ones the user explicitly approved — post those
-        # first, then fall back to the rest of the bin.
-        generated.sort(key=lambda r: (0 if r.get("reviewed_at") else 1))
-        if not generated:
+    store = post_store.load_synced_store(profile_name)
+    drafts = store.by_status(post_store.GENERATED)
+    approved, refused = post_store.split_approved(drafts)
+    for rec, reason in refused:
+        logger.info("Post[%s]: refused %s (%s)", profile_name, rec.get("key"), reason)
+    if not approved:
+        if refused:
             return jsonify({
-                "error": "No drafted comments to post. Generate comments first.",
+                "error": post_store.not_approved_message(len(refused))
+                         + ". Approve drafts in Review Comments first.",
+                "not_approved": len(refused),
                 "counts": store.counts(),
             }), 400
-        comments_file = _write_poster_input(profile_name, generated)
+        return jsonify({
+            "error": "No drafted comments to post. Generate comments first.",
+            "counts": store.counts(),
+        }), 400
+    comments_file = _write_poster_input(profile_name, approved)
 
     job_id = f"post_{profile_name}_{int(time.time())}"
 
@@ -1124,7 +1212,8 @@ def post_comments(profile_name):
         return jsonify({"error": f"A browser task is already running for {profile_name}. Wait for it to finish."}), 409
     run_job(job_id, _post_comments_job, profile_name, comments_file, count,
             profile=profile_name, task_type="browser", category="post_comments")
-    return jsonify({"job_id": job_id})
+    return jsonify({"job_id": job_id, "approved": len(approved),
+                    "not_approved": len(refused)})
 
 
 # ─── API: Selector Health ─────────────────────────────────────────────────────
