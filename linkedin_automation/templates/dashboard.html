@@ -1199,8 +1199,34 @@ header {
         <div class="panel-subtitle" id="reviewSubtitle">Edit or remove comments before posting</div>
       </div>
       <div class="btn-group">
+        <button class="btn btn-sm btn-primary" id="reviewTab-linkedin" onclick="setReviewPlatform('linkedin')">LinkedIn</button>
+        <button class="btn btn-sm" id="reviewTab-youtube" onclick="setReviewPlatform('youtube')">YouTube</button>
+      </div>
+      <div class="btn-group">
         <button class="btn btn-sm" onclick="saveComments()" title="Stores your edits. Approves nothing.">Save edits</button>
         <button class="btn btn-primary btn-sm" id="approveAllBtn" onclick="approveAllShown()">Approve all shown</button>
+      </div>
+    </div>
+    <!-- YouTube commenting (Y1). A person's clicks only: no job, no schedule. -->
+    <div id="youtubeEngage" style="display:none;margin-bottom:1rem">
+      <div class="card">
+        <div id="ytStatus" class="panel-subtitle">YouTube: loading...</div>
+        <div class="btn-group" style="margin-top:0.5rem">
+          <button class="btn btn-primary btn-sm" id="ytPostBtn" onclick="postYoutubeOne()" title="Posts at most one approved comment, if pacing allows">Post one approved comment</button>
+        </div>
+        <pre id="ytPostResult" class="console" style="display:none;white-space:pre-wrap"></pre>
+      </div>
+      <div class="card">
+        <div class="panel-subtitle">Watch list</div>
+        <div id="ytWatchList"></div>
+      </div>
+      <div class="card">
+        <div class="panel-subtitle">Discover channels (100 quota units a search; adds nothing)</div>
+        <div style="display:flex;gap:0.5rem;margin-top:0.5rem">
+          <input type="text" id="ytDiscoverQuery" placeholder="search channels, e.g. llm evals" style="flex:1">
+          <button class="btn btn-sm" id="ytDiscoverBtn" onclick="discoverYoutube()">Search</button>
+        </div>
+        <div id="ytSuggestions"></div>
       </div>
     </div>
     <div id="commentsList"></div>
@@ -2039,6 +2065,13 @@ let currentProfile = null;
 let currentStep = 'scrape';
 let postsData = { posts: [], file: null };
 let commentsData = { comments: [], file: null };
+// Which engagement store the Review panel shows (Y1). LinkedIn is the default
+// and sends no ?platform=, so its requests are exactly what they were.
+const REVIEW_DEFAULT_PLATFORM = 'linkedin';
+let reviewPlatform = REVIEW_DEFAULT_PLATFORM;
+function reviewQS(sep) {
+  return reviewPlatform === REVIEW_DEFAULT_PLATFORM ? '' : `${sep}platform=${reviewPlatform}`;
+}
 // Comments queued for posting after Save & Continue. Kept separate from
 // commentsData (the Review state) so returning to Review shows empty once the
 // originals are archived, while the Post panel still has its preview.
@@ -2095,6 +2128,7 @@ function switchProfile() {
 
   loadExistingPosts();
   loadExistingComments();
+  if (reviewPlatform === 'youtube') loadYoutubeEngage();
   loadLifecycle();
   loadAutomations();
   // Every automation panel re-reads for the new profile, so none keeps
@@ -2178,10 +2212,11 @@ async function loadExistingPosts() {
 async function loadExistingComments() {
   if (!currentProfile) return;
   try {
-    const res = await fetch(`/api/comments/${currentProfile}`);
+    const res = await fetch(`/api/comments/${currentProfile}${reviewQS('?')}`);
     const data = await res.json();
     commentsData = data;
-    if (data.counts) { lifecycleCounts = data.counts; updateLifecycleChips(); }
+    // The lifecycle chips are LinkedIn's bins; a YouTube read must not move them.
+    if (data.counts && reviewPlatform === REVIEW_DEFAULT_PLATFORM) { lifecycleCounts = data.counts; updateLifecycleChips(); }
     updateCounts();
   } catch(e) { /* leave the previous render state alone on a transport error */ }
 }
@@ -2654,6 +2689,7 @@ function renderComments() {
   if (allBtn) allBtn.textContent = `Approve all shown (${comments.length})`;
 
   container.innerHTML = comments.map((c, i) => {
+    if (reviewPlatform === 'youtube') return renderYoutubeCard(c, i);
     const author = c.post_author || c.author || 'Unknown';
     const preview = (c.post_preview || c.post_text || '').substring(0, 120);
     
@@ -2677,6 +2713,149 @@ function renderComments() {
   updateCounts();
 }
 
+// A YouTube draft: what it answers, its length in characters, and what the
+// no-promotion check found (an approve is refused until that is edited out).
+function renderYoutubeCard(c, i) {
+  const key = c.key || '';
+  const isReply = c.kind === 'reply';
+  const head = isReply
+    ? `Reply to <strong>${esc(c.commenter || c.author || 'a viewer')}</strong>: ${esc((c.post_text || '').substring(0, 120))}`
+    : `On <strong>${esc(c.channel_title || c.author || '')}</strong>: ${esc(c.video_title || '')}`;
+  const promo = (c.promotion && c.promotion.length)
+    ? `<div class="comment-style" style="color:var(--danger, #c0392b)">No-promotion check: ${esc([].concat(c.promotion).join(', '))}. Edit before approving.</div>`
+    : '';
+  return `
+      <div class="card comment-card" id="comment-${i}">
+        <div class="for-post">${head}${c.url ? ` <a href="${esc(c.url)}" target="_blank">↗</a>` : ''}</div>
+        <textarea class="comment-edit" id="cedit-${i}" rows="3">${esc(c.comment || '')}</textarea>
+        ${promo}
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:0.5rem">
+          <span class="comment-style">YouTube ${isReply ? 'reply' : 'comment'} · ${c.chars || 0} chars</span>
+          <span class="btn-group">
+            <button class="btn btn-primary btn-sm" onclick='approveComment(${JSON.stringify(key)}, ${i})'>Approve</button>
+            <button class="btn btn-danger btn-sm" onclick='removeComment(${JSON.stringify(key)}, ${i})'>Remove</button>
+          </span>
+        </div>
+      </div>`;
+}
+
+async function setReviewPlatform(platform) {
+  reviewPlatform = platform;
+  for (const p of ['linkedin', 'youtube']) {
+    const b = document.getElementById(`reviewTab-${p}`);
+    if (b) b.classList.toggle('btn-primary', p === platform);
+  }
+  document.getElementById('youtubeEngage').style.display = platform === 'youtube' ? '' : 'none';
+  commentsData = { comments: [], file: null };
+  await loadExistingComments();
+  renderComments();
+  if (platform === 'youtube') loadYoutubeEngage();
+}
+
+function _fmtPT(iso) {
+  if (!iso) return '-';
+  try {
+    return new Date(iso).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) + ' PT';
+  } catch (e) { return iso; }
+}
+
+async function loadYoutubeEngage() {
+  if (!currentProfile) return;
+  const status = document.getElementById('ytStatus');
+  let data = {};
+  try {
+    const res = await fetch(`/api/youtube/${currentProfile}/status`);
+    data = await res.json();
+  } catch (e) { status.textContent = 'YouTube: could not read status.'; return; }
+  if (!data.configured) {
+    status.textContent = `YouTube is not set up for this profile: ${data.error || ''}`;
+    document.getElementById('ytWatchList').innerHTML = '';
+    return;
+  }
+  const outcomes = Object.entries(data.outcomes || {}).map(([k, v]) => `${k} ${v}`).join(', ') || 'none yet';
+  status.textContent = `${data.pacing} (${_fmtPT(data.next_allowed)}). Outcomes: ${outcomes}.` + (data.token ? '' : ' No YouTube token yet: run tools/youtube_auth.py.');
+  renderYoutubeWatch(data.watch_list || []);
+}
+
+function renderYoutubeWatch(list) {
+  const el = document.getElementById('ytWatchList');
+  if (!list.length) { el.innerHTML = '<p class="panel-subtitle">No channels yet. Discover some below and add the ones you pick.</p>'; return; }
+  el.innerHTML = list.map(e => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:0.25rem 0">
+      <span><strong>${esc(e.title || e.channel_id)}</strong> · ${e.subscribers == null ? 'subscribers hidden' : esc(e.subscribers) + ' subscribers'} · <code>${esc(e.channel_id)}</code></span>
+      <button class="btn btn-danger btn-sm" onclick='removeYoutubeChannel(${JSON.stringify(e.channel_id)})'>Remove</button>
+    </div>`).join('');
+}
+
+let ytSuggestions = [];
+
+async function discoverYoutube() {
+  if (!currentProfile) return;
+  const query = document.getElementById('ytDiscoverQuery').value.trim();
+  if (!query) return alert('Type what to search for.');
+  if (!confirm(`Search YouTube channels for "${query}"? This spends 101 of today's quota units. Nothing is added.`)) return;
+  const res = await fetch(`/api/youtube/${currentProfile}/discover`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return alert(data.refused || data.error || (data.lines || []).join('\n') || 'Discover failed.');
+  ytSuggestions = data.suggestions || [];
+  const el = document.getElementById('ytSuggestions');
+  if (!ytSuggestions.length) { el.innerHTML = '<p class="panel-subtitle">No channels found.</p>'; return; }
+  el.innerHTML = ytSuggestions.map((s, i) => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:0.25rem 0">
+      <span><strong>${esc(s.title)}</strong> · ${s.subscribers == null ? 'subscribers hidden' : esc(s.subscribers) + ' subscribers'} · ${esc(s.description || '')}</span>
+      ${s.on_watch_list ? '<span class="panel-subtitle">on the watch list</span>'
+        : `<button class="btn btn-sm" onclick="addYoutubeChannel(${i})">Add</button>`}
+    </div>`).join('');
+}
+
+async function addYoutubeChannel(index) {
+  const s = ytSuggestions[index];
+  if (!s || !currentProfile) return;
+  const res = await fetch(`/api/youtube/${currentProfile}/watch/add`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel_id: s.channel_id, title: s.title, subscribers: s.subscribers })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return alert(data.error || 'Could not add.');
+  s.on_watch_list = true;
+  loadYoutubeEngage();
+}
+
+async function removeYoutubeChannel(channelId) {
+  if (!currentProfile || !confirm('Remove this channel from the watch list?')) return;
+  const res = await fetch(`/api/youtube/${currentProfile}/watch/remove`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel_id: channelId })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return alert(data.error || 'Could not remove.');
+  loadYoutubeEngage();
+}
+
+async function postYoutubeOne() {
+  if (!currentProfile) return;
+  if (!confirm('Post at most one approved YouTube comment now, as our channel, if pacing allows?')) return;
+  const btn = document.getElementById('ytPostBtn');
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/youtube/${currentProfile}/engage`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+    });
+    const data = await res.json().catch(() => ({}));
+    const out = document.getElementById('ytPostResult');
+    out.style.display = '';
+    out.textContent = (data.lines || []).join('\n') || data.refused || data.error || 'No answer.';
+  } finally {
+    btn.disabled = false;
+  }
+  await loadExistingComments();
+  renderComments();
+  loadYoutubeEngage();
+}
+
 // "Remove" is a real store mutation (TRASH(manual) via the same reject
 // endpoint the Posts panel uses), not a local splice. A comment removed here
 // used to just vanish from the client array while staying GENERATED in the
@@ -2685,7 +2864,7 @@ function renderComments() {
 async function removeComment(key, index) {
   if (!currentProfile || !key) return;
   try {
-    await fetch(`/api/posts/${currentProfile}/reject`, {
+    await fetch(`/api/posts/${currentProfile}/reject${reviewQS('?')}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key })
     });
@@ -2710,7 +2889,7 @@ function _editedText(i, c) {
 async function approveComment(key, index) {
   if (!currentProfile || !key) return;
   const c = (commentsData.comments || [])[index] || {};
-  const res = await fetch(`/api/comments/${currentProfile}/approve`, {
+  const res = await fetch(`/api/comments/${currentProfile}/approve${reviewQS('?')}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ key, comment: _editedText(index, c) })
   });
@@ -2730,7 +2909,7 @@ async function approveAllShown() {
   const n = shown.length;
   if (!confirm(`Approve all ${n} comment(s) shown, exactly as written? Each one can then be posted.`)) return;
   const items = shown.map((c, i) => ({ key: c.key || c.url || c.post_url || '', comment: _editedText(i, c) }));
-  const res = await fetch(`/api/comments/${currentProfile}/approve_all`, {
+  const res = await fetch(`/api/comments/${currentProfile}/approve_all${reviewQS('?')}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ items, count: n, confirm: true })
   });
@@ -2762,7 +2941,7 @@ async function saveComments() {
     return;
   }
 
-  const res = await fetch(`/api/comments/${currentProfile}/save`, {
+  const res = await fetch(`/api/comments/${currentProfile}/save${reviewQS('?')}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ comments })

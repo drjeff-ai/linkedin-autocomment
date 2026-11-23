@@ -78,12 +78,13 @@ class AuthenticCommentGenerator:
 
     def __init__(self, input_file: str, model: str = "gpt-4o-mini",
                  max_comments: int = None, profile_name: str = None,
-                 *, platform: str):
+                 *, platform: str, variant: str = None):
         self.input_file = input_file
         self.model = model
         # Raises UnknownPlatform rather than falling back — see policy_for.
+        # ``variant`` picks a second declared voice (YouTube's own-video reply).
         self.platform = platform
-        self.policy = platform_policy.policy_for(platform)
+        self.policy = platform_policy.policy_for(platform, variant)
         self.register = self.policy.register
         self.length = self.policy.length
         # Optional cap on how many comments to generate. None (the default) means
@@ -515,7 +516,7 @@ Example of natural {r.action}: "{r.example_for(style)}"
 
 {r.item.upper()} TO RESPOND TO:
 Author: {post.get('author_name', 'Unknown')}
-{post.get('text', '')[:500]}
+{post.get('text', '')[:self.policy.input_chars]}
 
 {authenticity_rules}{r.extra_rules}
 
@@ -629,7 +630,10 @@ Write ONLY the {r.action} text:"""
         # LinkedIn declares no banned openers, so this is a no-op there.
         opening = comment_lower.lstrip().lstrip(chr(34)).lstrip(chr(39)).lstrip()
         for opener in self.register.banned_openers:
-            if opening.startswith(opener):
+            # Lowered here because a register may write an opener capitalised
+            # ("Great video"). X's are all lower case already, so it is the
+            # same check for X.
+            if opening.startswith(opener.lower()):
                 issues.append(f"self_positioning_opener: {opener!r}")
                 break
 

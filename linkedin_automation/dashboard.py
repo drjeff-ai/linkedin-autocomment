@@ -37,6 +37,7 @@ from . import content_calendar
 from . import books as books_mod
 from . import publisher_lock
 from . import youtube_channel
+from . import youtube_engage
 
 load_dotenv()
 
@@ -796,7 +797,10 @@ def reject_post(profile_name):
     ident = body.get("key") or body.get("url")
     if not ident:
         return jsonify({"error": "key or url is required"}), 400
-    store = post_store.PostStore(profile_name)
+    platform, bad = _comment_platform()
+    if bad:
+        return bad
+    store = post_store.PostStore(profile_name, platform=platform)
     if not store.reject(ident, save=True):
         return jsonify({"error": "Post not found in store"}), 404
     return jsonify({"ok": True, "counts": store.counts()})
@@ -812,13 +816,44 @@ def restore_post(profile_name):
     ident = body.get("key") or body.get("url")
     if not ident:
         return jsonify({"error": "key or url is required"}), 400
-    store = post_store.PostStore(profile_name)
+    platform, bad = _comment_platform()
+    if bad:
+        return bad
+    store = post_store.PostStore(profile_name, platform=platform)
     if not store.restore(ident, save=True):
         return jsonify({"error": "Post not found in trash"}), 404
     return jsonify({"ok": True, "counts": store.counts()})
 
 
 # ─── API: Comments ────────────────────────────────────────────────────────────
+
+#: The engagement stores the Review routes serve. ``?platform=`` picks one; no
+#: parameter is LinkedIn, exactly as before Y1.
+_COMMENT_PLATFORMS = (post_store.LINKEDIN, youtube_engage.PLATFORM)
+
+
+def _comment_platform():
+    """``(platform, None)`` from ``?platform=``, or ``(None, 400 response)``."""
+    platform = (request.args.get("platform") or post_store.LINKEDIN).strip().lower()
+    if platform not in _COMMENT_PLATFORMS:
+        return None, (jsonify({"error": "unknown platform %r for comments - known: %s"
+                                        % (platform, ", ".join(_COMMENT_PLATFORMS))}), 400)
+    return platform, None
+
+
+def _youtube_comment_view(rec):
+    """A YouTube store record in the Review UI's shape, plus its YouTube
+    fields (kind, video title, the no-promotion check's findings)."""
+    view = _record_to_comment(rec)
+    yd = rec.get("youtube") or {}
+    meta = rec.get("comment_meta") or {}
+    view.update(platform=youtube_engage.PLATFORM, kind=yd.get("kind"),
+                video_title=yd.get("title") or "", channel_title=yd.get("channel_title"),
+                commenter=yd.get("commenter"), chars=len(rec.get("comment") or ""),
+                promotion=meta.get("promotion") or [],
+                outcome=yd.get("outcome"))
+    return view
+
 
 def _record_to_comment(rec):
     """Render a GENERATED store record in the shape the Review UI + poster expect.
@@ -865,10 +900,18 @@ def get_comments(profile_name):
     Invariant: ``total + reviewed_count == counts["GENERATED"]``.
     """
     include_reviewed = (request.args.get("include_reviewed") or "").lower() in ("1", "true", "yes")
+    platform, bad = _comment_platform()
+    if bad:
+        return bad
 
-    store = post_store.load_synced_store(profile_name)
+    if platform == youtube_engage.PLATFORM:
+        store = youtube_engage.load_store(profile_name)
+        view = _youtube_comment_view
+    else:
+        store = post_store.load_synced_store(profile_name)
+        view = _record_to_comment
     recs = store.review_queue(include_reviewed=include_reviewed)
-    comments = [_record_to_comment(r) for r in recs]
+    comments = [view(r) for r in recs]
     counts = store.counts()
     reviewed = store.reviewed_count()
 
@@ -885,6 +928,7 @@ def get_comments(profile_name):
         "reviewed_count": reviewed,
         "include_reviewed": include_reviewed,
         "source": "lifecycle_store",
+        "platform": platform,
     })
 
 
@@ -1029,9 +1073,27 @@ def save_comments(profile_name):
     """
     body = request.json or {}
     comments = body.get('comments', [])
+    platform, bad = _comment_platform()
+    if bad:
+        return bad
 
     if not comments:
         return jsonify({"error": "No comments to save. The review queue is empty."}), 400
+
+    if platform == youtube_engage.PLATFORM:
+        # YouTube has no poster file handoff: the store is all there is.
+        store = youtube_engage.load_store(profile_name)
+        edited = 0
+        for c in comments:
+            ident = c.get("key") if isinstance(c, dict) else None
+            text = c.get("comment") if isinstance(c, dict) else None
+            if isinstance(ident, str) and isinstance(text, str) \
+                    and store.save_edit(ident, comment=text):
+                edited += 1
+        store.save()
+        return jsonify({"ok": True, "count": len(comments), "edited": edited,
+                        "approved": 0, "counts": store.counts(),
+                        "platform": platform})
 
     # 1. Store first — it is the source of truth for what gets posted. Loaded via
     #    load_synced_store so a first-run store is seeded/reconciled before we
@@ -1098,7 +1160,19 @@ def approve_comment(profile_name):
     comment = body.get("comment")
     if comment is not None and not isinstance(comment, str):
         return jsonify({"error": "comment must be text"}), 400
-    store = post_store.load_synced_store(profile_name)
+    platform, bad = _comment_platform()
+    if bad:
+        return bad
+    if platform == youtube_engage.PLATFORM:
+        store = youtube_engage.load_store(profile_name)
+        rec = store.get(key)
+        refusal = youtube_engage.approve_refusal(profile_name, rec, comment) if rec else None
+        if refusal:
+            # The no-promotion validator (DEC-061(3)): edit the draft first.
+            return jsonify({"error": "not approved: %s" % refusal,
+                            "reason": refusal}), 409
+    else:
+        store = post_store.load_synced_store(profile_name)
     if not store.approve(key, comment=comment):
         rec = store.get(key)
         reason = post_store.REFUSE_NO_RECORD if rec is None else (
@@ -1129,11 +1203,20 @@ def approve_all_comments(profile_name):
     if body.get("count") != len(items):
         return jsonify({"error": "count %r does not match %d item(s)"
                                  % (body.get("count"), len(items))}), 400
-    store = post_store.load_synced_store(profile_name)
+    platform, bad = _comment_platform()
+    if bad:
+        return bad
+    youtube = platform == youtube_engage.PLATFORM
+    store = (youtube_engage.load_store(profile_name) if youtube
+             else post_store.load_synced_store(profile_name))
     approved, failed = 0, []
     for it in items:
         key = (it or {}).get("key") if isinstance(it, dict) else None
         comment = it.get("comment") if isinstance(it, dict) else None
+        if youtube and isinstance(key, str) and store.get(key) is not None \
+                and youtube_engage.approve_refusal(profile_name, store.get(key), comment):
+            failed.append(key)
+            continue
         if (isinstance(key, str) and key
                 and (comment is None or isinstance(comment, str))
                 and store.approve(key, comment=comment)):
@@ -1214,6 +1297,81 @@ def post_comments(profile_name):
             profile=profile_name, task_type="browser", category="post_comments")
     return jsonify({"job_id": job_id, "approved": len(approved),
                     "not_approved": len(refused)})
+
+
+# ─── API: YouTube commenting (Y1, D-027) ─────────────────────────────────────
+#
+# A person's clicks, not automation: none of these is a job, none is on a
+# schedule, and engage posts at most one approved comment per click, under the
+# same pacing, gate and lock as ``youtube-engage``. Discover suggests and adds
+# nothing; adding is its own route.
+
+def _youtube_result(code, summary):
+    status = 200 if code == youtube_engage.EXIT_OK else (
+        409 if code in (youtube_engage.EXIT_REFUSED,
+                        youtube_engage.EXIT_PRODUCTION_REFUSED) else 502)
+    return jsonify({"ok": code == youtube_engage.EXIT_OK, "exit_code": code,
+                    **{k: v for k, v in summary.items()}}), status
+
+
+@app.route('/api/youtube/<profile_name>/status', methods=['GET'])
+def youtube_engage_status(profile_name):
+    """Watch list, pacing and outcome counts. Local files only."""
+    return jsonify(youtube_engage.status_view(profile_name))
+
+
+@app.route('/api/youtube/<profile_name>/discover', methods=['POST'])
+def youtube_discover(profile_name):
+    """Suggest channels for ``{"query"}``. Spends 101 quota units; adds nothing."""
+    body = request.json if request.is_json else {}
+    query = (body or {}).get("query")
+    if not isinstance(query, str) or not query.strip():
+        return jsonify({"error": "query is required"}), 400
+    code, summary = youtube_engage.discover(profile_name, query.strip(),
+                                            out=lambda line: None)
+    return _youtube_result(code, summary)
+
+
+@app.route('/api/youtube/<profile_name>/watch/add', methods=['POST'])
+def youtube_watch_add(profile_name):
+    """Add ``{"channel_id", "title", "subscribers"}`` to the watch list."""
+    body = request.json if request.is_json else {}
+    body = body or {}
+    subs = body.get("subscribers")
+    try:
+        added = youtube_engage.add_to_watch_list(
+            profile_name, body.get("channel_id"), title=body.get("title") or "",
+            subscribers=subs if isinstance(subs, int) and not isinstance(subs, bool)
+            else None)
+    except youtube_channel.YouTubeRefused as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"ok": True, "added": added,
+                    **youtube_engage.status_view(profile_name)})
+
+
+@app.route('/api/youtube/<profile_name>/watch/remove', methods=['POST'])
+def youtube_watch_remove(profile_name):
+    """Remove ``{"channel_id"}`` from the watch list."""
+    body = request.json if request.is_json else {}
+    try:
+        removed = youtube_engage.remove_from_watch_list(
+            profile_name, (body or {}).get("channel_id"))
+    except youtube_channel.YouTubeRefused as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"ok": True, "removed": removed,
+                    **youtube_engage.status_view(profile_name)})
+
+
+@app.route('/api/youtube/<profile_name>/engage', methods=['POST'])
+def youtube_engage_post(profile_name):
+    """Post at most ONE approved YouTube comment now, if pacing allows; the
+    answer says what happened or when the next is allowed. ``{"dry_run":
+    true}`` only says what it would do."""
+    body = request.json if request.is_json else {}
+    dry_run = (body or {}).get("dry_run") is True
+    code, summary = youtube_engage.engage(profile_name, dry_run=dry_run,
+                                          out=lambda line: None)
+    return _youtube_result(code, summary)
 
 
 # ─── API: Selector Health ─────────────────────────────────────────────────────

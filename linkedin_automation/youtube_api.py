@@ -21,8 +21,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-#: The scopes the token is minted with. ``youtube`` covers comment writes
-#: later (Y1); ``youtube.upload`` is what videos.insert needs.
+#: The scopes the token is minted with. ``youtube`` covers the comment reads
+#: and writes of Y1; ``youtube.upload`` is what videos.insert needs.
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload",
           "https://www.googleapis.com/auth/youtube"]
 TOKEN_URI = "https://oauth2.googleapis.com/token"
@@ -40,11 +40,18 @@ TOKEN_FIELDS = ("client_id", "client_secret", "refresh_token")
 
 class YouTubeApiError(RuntimeError):
     """A Google call failed. ``quota`` is True when Google said "over quota",
-    which means nothing was created."""
+    which means nothing was created.
 
-    def __init__(self, message, quota=False):
+    ``ambiguous`` (Y1) is True when nobody can know whether a write happened:
+    no HTTP answer at all (a timeout, a dropped connection) or a 5xx. A 4xx is
+    Google refusing the request, so it is not ambiguous. ``status`` is the HTTP
+    status when there was one."""
+
+    def __init__(self, message, quota=False, ambiguous=False, status=None):
         super().__init__(message)
         self.quota = quota
+        self.ambiguous = ambiguous
+        self.status = status
 
 
 def credentials_from_token(token):
@@ -89,9 +96,15 @@ def _error(exc, what):
     quota = any(r in QUOTA_REASONS for r in reasons) or any(
         r in text for r in QUOTA_REASONS)
     status = getattr(getattr(exc, "resp", None), "status", None)
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        code = None
     return YouTubeApiError("%s failed (HTTP %s): %s"
                            % (what, status, ", ".join(r for r in reasons if r)
-                              or text[:300]), quota=quota)
+                              or text[:300]), quota=quota,
+                           ambiguous=not quota and (code is None or code >= 500),
+                           status=code)
 
 
 def my_channel_id(service):
@@ -146,3 +159,185 @@ def run_consent(client_secrets_path):
     # offline + consent: Google only issues a refresh token on a fresh consent.
     return flow.run_local_server(port=0, access_type="offline", prompt="consent",
                                  open_browser=True)
+
+
+# ── engagement (Y1, D-027) ──────────────────────────────────────────────────
+#
+# Read calls cost 1 unit a page except ``search.list`` (100); the two inserts
+# cost 50. The caller charges the quota ledger and the paid-call ledger before
+# each call. Nothing here retries.
+
+def _call(request, what):
+    """Execute one request. Every failure is a :class:`YouTubeApiError`; one
+    with no HTTP answer is ambiguous."""
+    from googleapiclient.errors import HttpError
+    try:
+        return request.execute()
+    except HttpError as exc:
+        raise _error(exc, what) from exc
+    except Exception as exc:  # timeouts, resets, TLS: no answer from Google
+        raise YouTubeApiError("%s failed with no answer: %s: %s"
+                              % (what, type(exc).__name__, str(exc)[:200]),
+                              ambiguous=True) from exc
+
+
+def _author_id(snippet):
+    return ((snippet or {}).get("authorChannelId") or {}).get("value")
+
+
+def search_channels(service, query, max_results=10):
+    """``search.list type=channel`` (100 units). ``[{channel_id, title,
+    description}]``."""
+    resp = _call(service.search().list(part="snippet", type="channel", q=query,
+                                       maxResults=max_results), "search.list")
+    out = []
+    for item in resp.get("items") or []:
+        sn = item.get("snippet") or {}
+        cid = (item.get("id") or {}).get("channelId") or sn.get("channelId")
+        if cid:
+            out.append({"channel_id": cid,
+                        "title": sn.get("channelTitle") or sn.get("title") or "",
+                        "description": sn.get("description") or ""})
+    return out
+
+
+def channels_info(service, channel_ids):
+    """``channels.list id=...`` for up to 50 ids (1 unit). ``{channel_id:
+    {title, subscribers, uploads_playlist}}``. ``subscribers`` is None when the
+    channel hides its count."""
+    resp = _call(service.channels().list(part="snippet,statistics,contentDetails",
+                                         id=",".join(channel_ids), maxResults=50),
+                 "channels.list")
+    out = {}
+    for item in resp.get("items") or []:
+        stats = item.get("statistics") or {}
+        subs = None
+        if not stats.get("hiddenSubscriberCount") and stats.get("subscriberCount") is not None:
+            try:
+                subs = int(stats["subscriberCount"])
+            except (TypeError, ValueError):
+                subs = None
+        related = (item.get("contentDetails") or {}).get("relatedPlaylists") or {}
+        out[item.get("id")] = {
+            "title": (item.get("snippet") or {}).get("title") or "",
+            "subscribers": subs,
+            "uploads_playlist": related.get("uploads"),
+        }
+    return out
+
+
+def playlist_page(service, playlist_id, page_token=None):
+    """One page of ``playlistItems.list`` (1 unit). ``([{video_id, title,
+    description, published_at, channel_id, channel_title}], next_page_token)``."""
+    kwargs = {"part": "snippet,contentDetails", "playlistId": playlist_id,
+              "maxResults": 50}
+    if page_token:
+        kwargs["pageToken"] = page_token
+    resp = _call(service.playlistItems().list(**kwargs), "playlistItems.list")
+    items = []
+    for item in resp.get("items") or []:
+        sn = item.get("snippet") or {}
+        cd = item.get("contentDetails") or {}
+        vid = cd.get("videoId") or (sn.get("resourceId") or {}).get("videoId")
+        if vid:
+            items.append({
+                "video_id": vid, "title": sn.get("title") or "",
+                "description": sn.get("description") or "",
+                "published_at": cd.get("videoPublishedAt") or sn.get("publishedAt"),
+                "channel_id": sn.get("videoOwnerChannelId") or sn.get("channelId"),
+                "channel_title": (sn.get("videoOwnerChannelTitle")
+                                  or sn.get("channelTitle") or "")})
+    return items, resp.get("nextPageToken")
+
+
+def _text(snippet):
+    snippet = snippet or {}
+    return snippet.get("textOriginal") or snippet.get("textDisplay") or ""
+
+
+def _thread(item):
+    sn = item.get("snippet") or {}
+    top = sn.get("topLevelComment") or {}
+    tsn = top.get("snippet") or {}
+    replies = [{"id": c.get("id"), "author_channel_id": _author_id(c.get("snippet")),
+                "text": _text(c.get("snippet"))}
+               for c in ((item.get("replies") or {}).get("comments") or [])]
+    return {"thread_id": item.get("id"), "comment_id": top.get("id") or item.get("id"),
+            "video_id": sn.get("videoId") or tsn.get("videoId"),
+            "author_channel_id": _author_id(tsn),
+            "author": tsn.get("authorDisplayName") or "",
+            "text": _text(tsn),
+            "published_at": tsn.get("publishedAt"),
+            "like_count": tsn.get("likeCount") or 0,
+            "total_reply_count": sn.get("totalReplyCount") or 0,
+            "replies": replies}
+
+
+def comment_threads_page(service, video_id=None, related_channel_id=None,
+                         page_token=None, order="time", max_results=100):
+    """One page of ``commentThreads.list`` (1 unit), for one video or for every
+    thread on a channel's videos (``allThreadsRelatedToChannelId``).
+    ``([thread], next_page_token)``."""
+    kwargs = {"part": "snippet,replies", "maxResults": max_results, "order": order,
+              "textFormat": "plainText"}
+    if page_token:
+        kwargs["pageToken"] = page_token
+    if video_id:
+        kwargs["videoId"] = video_id
+    elif related_channel_id:
+        kwargs["allThreadsRelatedToChannelId"] = related_channel_id
+    else:
+        raise ValueError("video_id or related_channel_id is required")
+    resp = _call(service.commentThreads().list(**kwargs), "commentThreads.list")
+    return [_thread(i) for i in resp.get("items") or []], resp.get("nextPageToken")
+
+
+def replies_page(service, parent_id, page_token=None):
+    """One page of ``comments.list parentId=...`` (1 unit). ``([{id,
+    author_channel_id, text}], next_page_token)``."""
+    kwargs = {"part": "snippet", "parentId": parent_id, "maxResults": 100,
+              "textFormat": "plainText"}
+    if page_token:
+        kwargs["pageToken"] = page_token
+    resp = _call(service.comments().list(**kwargs), "comments.list")
+    out = [{"id": c.get("id"), "author_channel_id": _author_id(c.get("snippet")),
+            "text": _text(c.get("snippet"))}
+           for c in resp.get("items") or []]
+    return out, resp.get("nextPageToken")
+
+
+def video_titles(service, video_ids):
+    """``videos.list id=...`` (1 unit). ``{video_id: title}``."""
+    resp = _call(service.videos().list(part="snippet", id=",".join(video_ids),
+                                       maxResults=50), "videos.list")
+    return {i.get("id"): (i.get("snippet") or {}).get("title") or ""
+            for i in resp.get("items") or []}
+
+
+def insert_thread(service, channel_id, video_id, text):
+    """``commentThreads.insert`` (50 units): a top-level comment on someone
+    else's video. Returns the new comment's id, which is the proof it was
+    created. A success answer with no id is ambiguous."""
+    body = {"snippet": {"channelId": channel_id, "videoId": video_id,
+                        "topLevelComment": {"snippet": {"textOriginal": text}}}}
+    resp = _call(service.commentThreads().insert(part="snippet", body=body),
+                 "commentThreads.insert")
+    top = (resp.get("snippet") or {}).get("topLevelComment") or {}
+    cid = top.get("id") or resp.get("id")
+    if not cid:
+        raise YouTubeApiError("commentThreads.insert answered with no comment id",
+                              ambiguous=True)
+    return cid
+
+
+def insert_reply(service, parent_id, text):
+    """``comments.insert`` (50 units): a reply under a viewer's comment.
+    Returns the new comment's id."""
+    body = {"snippet": {"parentId": parent_id, "textOriginal": text}}
+    resp = _call(service.comments().insert(part="snippet", body=body),
+                 "comments.insert")
+    cid = resp.get("id")
+    if not cid:
+        raise YouTubeApiError("comments.insert answered with no comment id",
+                              ambiguous=True)
+    return cid
