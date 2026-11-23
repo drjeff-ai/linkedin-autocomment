@@ -44,6 +44,7 @@ from . import profile_manager as pm
 from .post_finder import LinkedInScraper
 from .auto_connector import LinkedInAutoConnector
 from .comment_poster import LinkedInCommentPoster
+from . import linkedin_adapter
 from .poster import LinkedInPoster
 from .failure_capture import capture_failure
 from . import x_selectors as xs
@@ -413,44 +414,10 @@ SELECTOR_REGISTRY: Dict[str, Dict] = {
                  "fails closed and nothing publishes, which is the safe "
                  "direction but still needs fixing"),
     },
-    "post_detail": {
-        "selectors": list(LinkedInCommentPoster.POST_DETAIL_SELECTORS),
-        "min_expected": 1, "critical": True, "page": "post",
-        "fix_symbol": "LinkedInCommentPoster.POST_DETAIL_SELECTORS",
-        "note": "proves the permalink page rendered; all 4 legacy entries read 0 on 2026-07-30",
-    },
-    "post_like_button": {
-        "selectors": list(LinkedInCommentPoster.LIKE_BUTTON_SELECTORS)
-        + list(LinkedInCommentPoster.LIKED_STATE_SELECTORS),
-        "min_expected": 1, "critical": False, "page": "post",
-        "fix_symbol": "LinkedInCommentPoster.LIKE_BUTTON_SELECTORS",
-        "note": "either an un-liked Like button or the already-liked state counts",
-    },
-    "comment_open_button": {
-        "selectors": list(LinkedInCommentPoster.COMMENT_BUTTON_LABEL_SELECTORS)
-        + [LinkedInCommentPoster.COMMENT_BUTTON_TEXT_SELECTOR],
-        "min_expected": 1, "critical": True, "page": "post",
-        "fix_symbol": "LinkedInCommentPoster.COMMENT_BUTTON_LABEL_SELECTORS",
-        "note": "the action-bar button that opens the comment box",
-    },
-    "comment_input": {
-        "selectors": list(LinkedInCommentPoster.COMMENT_INPUT_SELECTORS),
-        "min_expected": 1, "critical": True, "page": "post",
-        "requires_comment_box": True,
-        "state_witness": COMMENT_BOX_SELECTOR,
-        "fix_symbol": "LinkedInCommentPoster.COMMENT_INPUT_SELECTORS",
-        "note": "the editor; only present after the comment box is opened",
-    },
-    "comment_submit_button": {
-        "selectors": [LinkedInCommentPoster.SUBMIT_BUTTON_XPATH]
-        + list(LinkedInCommentPoster.SUBMIT_BUTTON_FALLBACK_SELECTORS),
-        "min_expected": 1, "critical": True, "page": "post",
-        "requires_comment_box": True,
-        "state_witness": COMMENT_BOX_SELECTOR,
-        "fix_symbol": "LinkedInCommentPoster.SUBMIT_BUTTON_XPATH / SUBMIT_BUTTON_FALLBACK_SELECTORS",
-        "note": ("first entry is an XPath matched on visible text; only present "
-                 "after the comment box is opened, and NEVER clicked by the check"),
-    },
+    # The posting path's entries (page="post") belong to LinkedIn's engagement
+    # adapter and are defined beside it (linkedin_adapter.registry_entries,
+    # D-027 E1). They are registered here, at the same place in the order.
+    **linkedin_adapter.registry_entries(COMMENT_BOX_SELECTOR),
     # ─── X (page="x_timeline" / "x_status" / "x_search") ─────────────────────
     #
     # Registered from linkedin_automation/x_selectors.py, which carries the

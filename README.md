@@ -74,6 +74,8 @@ linkedin-automation/
 │   ├── post_finder.py                  # Scrapes the feed + classifies ads/job cards
 │   ├── comment_generator.py            # GPT comment generation
 │   ├── comment_poster.py               # Posts comments via Selenium
+│   ├── engagement_adapter.py           # Engagement adapter interface + shared approval check
+│   ├── linkedin_adapter.py             # LinkedIn's adapter: poster/finder wrapper, TXT handoff
 │   ├── auto_connector.py               # Sends connection requests
 │   ├── post_generator.py               # Generates LinkedIn posts (thought leadership + articles)
 │   ├── poster.py                       # Publishes posts to the LinkedIn feed
