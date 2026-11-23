@@ -26,6 +26,7 @@ from .comment_fields import normalize_comment_fields, comments_to_txt
 from . import channels
 from . import platforms
 from . import profile_manager as pm
+from . import linkedin_adapter
 from . import post_store
 from . import scheduler as scheduler_mod
 from . import post_drain as post_drain_mod
@@ -223,16 +224,9 @@ def run_subprocess(job_id, cmd, on_start=None):
 def _scrape_job(job_id, profile_name, max_posts, min_quality):
     """Run the post finder subprocess and return the newest output file."""
     log_job(job_id, "Starting post finder...")
-    cmd = [
-        sys.executable, "-m", "linkedin_automation.post_finder",
-        "--max-posts", str(max_posts),
-        "--min-quality", str(min_quality),
-        "--profile", profile_name,
-        # The dashboard IS production doing its job (manual click or
-        # scheduler fire, both routed through this same job body) - unlike an
-        # ad-hoc CLI/module run, it is always authorized. See docs/ARCHITECTURE.md §9.
-        "--allow-production",
-    ]
+    # LinkedIn's find, as its engagement adapter spells it (D-027 E1),
+    # --allow-production included: the dashboard is always an authorized caller.
+    cmd = linkedin_adapter.finder_command(max_posts, min_quality, profile_name)
     returncode, _ = run_subprocess(job_id, cmd)
 
     if returncode == pm.EXIT_LOGIN_REQUIRED:
@@ -303,14 +297,8 @@ def _generate_job(job_id, profile_name, cap):
 def _post_comments_job(job_id, profile_name, comments_file, count):
     """Run the comment poster subprocess for ``count`` comments from a TXT file."""
     log_job(job_id, f"Posting {count} comment(s) from: {comments_file}")
-    cmd = [
-        sys.executable, "-m", "linkedin_automation.comment_poster",
-        comments_file,
-        "--count", str(count),
-        "--profile", profile_name,
-        # See _scrape_job: the dashboard is always an authorized caller.
-        "--allow-production",
-    ]
+    # See _scrape_job: the command is the LinkedIn adapter's (D-027 E1).
+    cmd = linkedin_adapter.poster_command(comments_file, count, profile_name)
     returncode, _ = run_subprocess(job_id, cmd)
 
     if returncode == pm.EXIT_LOGIN_REQUIRED:
@@ -1236,17 +1224,15 @@ def approve_all_comments(profile_name):
 def _write_poster_input(profile_name, records):
     """Serialize GENERATED store records to a poster-readable TXT file.
 
-    Mirrors what the scheduler already does (``scheduler._write_comments_file``),
+    Mirrors what the scheduler already does (``scheduler.write_comments_file``),
     so the manual Post step and the scheduled one post the same drafts from the
-    same source.
+    same source. The file itself is the LinkedIn adapter's handoff (D-027 E1).
     """
     comments = [_record_to_comment(r) for r in records]
-    comments_dir = pm.get_comments_dir(profile_name)
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    path = os.path.join(comments_dir, f'daily_comments_curated_{ts}.txt')
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(comments_to_txt(comments, datetime.now().strftime('%Y-%m-%d %H:%M')))
-    return path
+    return linkedin_adapter.write_handoff(
+        profile_name, comments, f'daily_comments_curated_{ts}.txt',
+        datetime.now().strftime('%Y-%m-%d %H:%M'))
 
 
 @app.route('/api/post/<profile_name>', methods=['POST'])

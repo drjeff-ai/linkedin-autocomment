@@ -26,6 +26,7 @@ import logging
 from . import profile_manager as pm
 from . import human_behavior as hb
 from . import post_urn
+from . import engagement_adapter
 from . import post_store
 from . import run_log
 from .failure_capture import (capture_failure, capture_like_state,
@@ -975,7 +976,12 @@ class LinkedInCommentPoster:
 
         ``outcome`` is one of "placed", "miss", "already_liked". ``decided_by``
         is the selector (or None, for a miss) that matched. Never raises.
+
+        Also records ``outcome`` on ``last_like_outcome``, flag or no flag:
+        every verdict passes through here, which is what lets the engagement
+        adapter name the like state without inferring it (D-027 E1).
         """
+        self.last_like_outcome = outcome
         if not self.LIKE_STATE_CAPTURE:
             return
         try:
@@ -2013,12 +2019,10 @@ class LinkedInCommentPoster:
         """
         store = post_store.PostStore(profile_name=self.profile_name)
         rec = store._resolve(comment.get("url", ""))
-        reason = post_store.approval_refusal(rec)
-        if reason:
-            return reason
-        if (rec.get("comment") or "").strip() != (comment.get("comment") or "").strip():
-            return post_store.REFUSE_TEXT_DIFFERS
-        return None
+        # The shared check (engagement_adapter, D-027 E1); the TXT parser
+        # strips, so the texts are compared stripped.
+        return engagement_adapter.approval_refusal_for(
+            rec, comment.get("comment"), strip=True)
 
     def run(self, comments_file: str, post_count: int = 1, manual_mode: bool = False):
         """Run the comment posting process, with a file log of where time went.

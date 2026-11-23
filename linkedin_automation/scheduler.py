@@ -111,8 +111,8 @@ import threading
 from datetime import datetime, time as dtime, timedelta
 
 from . import profile_manager as pm
+from . import linkedin_adapter
 from . import post_store
-from .comment_fields import comments_to_txt
 from .auto_connector import ConnectionTracker
 
 logger = logging.getLogger(__name__)
@@ -421,32 +421,11 @@ def _default_list_profiles():
         return []
 
 
-def write_comments_file(profile, records, now):
-    """Serialize GENERATED records to a poster-readable TXT file.
-
-    Shared by ``_fire_post_comments`` (the independent post_comments job) and
-    the auto_cycle post stage (dashboard's real ``run_post`` closure) - one
-    serialization, used by both.
-    """
-    comments = []
-    for rec in records:
-        meta = rec.get("comment_meta") or {}
-        comments.append({
-            "url": rec.get("url", ""),
-            "author": rec.get("author", ""),
-            "post_text": rec.get("text", ""),
-            "category": rec.get("category", ""),
-            "comment": rec.get("comment", ""),
-            "word_count": meta.get("word_count"),
-            "style": meta.get("style", ""),
-            "approach": meta.get("approach", ""),
-        })
-    comments_dir = pm.get_comments_dir(profile)
-    ts = now.strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(comments_dir, f"scheduled_comments_{ts}.txt")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(comments_to_txt(comments, now.strftime("%Y-%m-%d %H:%M")))
-    return path
+#: The TXT handoff to LinkedIn's poster is LinkedIn-specific, so it lives with
+#: the LinkedIn engagement adapter (D-027 E1). Re-exported under its old name:
+#: ``_fire_post_comments`` and the dashboard's auto_cycle post stage call it
+#: through this module, and the tests replace it here.
+write_comments_file = linkedin_adapter.write_comments_file
 
 
 def run_auto_cycle(profile, run_scrape, run_generate, run_post):

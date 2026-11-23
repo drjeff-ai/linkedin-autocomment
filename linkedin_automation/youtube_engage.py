@@ -5,7 +5,8 @@ picks, and as replies under viewers' comments on our own Shorts. Every Google
 call is in :mod:`youtube_api`; the quota ledger, token and production gate are
 V1's (:mod:`youtube_channel`).
 
-**The path, in four steps, each a function an E1 adapter can wrap:**
+**The path, in four steps, each a function; :class:`YouTubeAdapter` wraps
+them as the E1 engagement adapter (an API adapter: no selectors, no like):**
 
 * :func:`find` lands candidates as NEW in the shared per-platform store
   (``data/<p>/youtube/posts_db.json``), keyed by videoId, or for a reply by the
@@ -42,6 +43,7 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 
 from . import channels
+from . import engagement_adapter
 from . import platform_policy
 from . import platforms
 from . import post_store
@@ -1033,6 +1035,90 @@ def post_and_verify(g, rec):
     return outcome, cid, note, False, False
 
 
+# ── the E1 adapter ──────────────────────────────────────────────────────────
+
+class YouTubeAdapter(engagement_adapter.EngagementAdapter):
+    """YouTube as an engagement adapter (D-027 E1): an API adapter over the
+    functions above, with no behaviour of its own.
+
+    * ``classify`` and ``already_commented`` are ONE read, the dedupe listing
+      (:func:`already_commented`): its answer is the thread, and a 404 on it
+      is the gone signal. It is made once per record and remembered, so asking
+      both costs what the old path cost.
+    * ``post_and_verify`` is :func:`post_and_verify`. ``posted`` is True only
+      for ``posted_visible``; ``posted_held`` was created (its id is the proof)
+      but is not success, as DEC-063 says.
+    * ``like`` is not applicable and says so. Nothing is attempted.
+    * No selectors: there is no page. ``SELECTORS_EXEMPT_REASON`` says why.
+
+    ``g`` is one run's :class:`_Google` session; it is what spends quota.
+    """
+
+    platform = PLATFORM
+    kind = engagement_adapter.API
+    SELECTORS_EXEMPT_REASON = (
+        "an API adapter: every read and write is a YouTube Data API call "
+        "(youtube_api), so there is no page and nothing for selector_health "
+        "to watch")
+
+    def __init__(self, profile, g=None, api=None, now=None):
+        self.profile = profile
+        self.g = g
+        self.api = api
+        self.now = now
+        self._thread = {}
+
+    def find(self, dry_run=False, out=print):
+        return find(self.profile, dry_run=dry_run, now=self.now, api=self.api, out=out)
+
+    def _ask_thread(self, rec):
+        """``(our comment id or None, the API error or None)``, read once."""
+        key = rec.get("key")
+        if key not in self._thread:
+            try:
+                self._thread[key] = (already_commented(self.g, rec), None)
+            except youtube_api.YouTubeApiError as exc:
+                self._thread[key] = (None, exc)
+        return self._thread[key]
+
+    def classify(self, rec):
+        _found, exc = self._ask_thread(rec)
+        if exc is None:
+            return engagement_adapter.Classification(
+                engagement_adapter.OK, "the thread listing answered")
+        kind = _classify_error(exc)
+        if kind in ("gone", "comments_disabled"):
+            # Both terminal: a 404, or a video that takes no comments.
+            return engagement_adapter.Classification(
+                engagement_adapter.GONE, str(exc), detail=kind, error=exc)
+        return engagement_adapter.Classification(
+            engagement_adapter.UNCLEAR, str(exc), detail=kind, error=exc)
+
+    def already_commented(self, rec):
+        found, exc = self._ask_thread(rec)
+        if exc is not None:
+            raise exc
+        if found:
+            return engagement_adapter.ThreadCheck(
+                True, "our comment %s is on YouTube" % found, evidence=found)
+        return engagement_adapter.ThreadCheck(
+            False, "no comment of ours in the first %d pages" % DEDUPE_MAX_PAGES)
+
+    def post_and_verify(self, rec):
+        outcome, cid, note, ambiguous, quota = post_and_verify(self.g, rec)
+        return engagement_adapter.PostResult(
+            outcome == POSTED_VISIBLE, outcome, proof=cid, reason=note,
+            ambiguous=ambiguous, quota=quota)
+
+    def like(self, rec):
+        return engagement_adapter.LikeResult(
+            engagement_adapter.LIKE_NOT_APPLICABLE, False,
+            "not applicable: Y1 comments only; no like is attempted on YouTube")
+
+    def selectors(self):
+        return None
+
+
 # ── youtube-engage ──────────────────────────────────────────────────────────
 
 def pacing_status(ledger, now):
@@ -1171,20 +1257,23 @@ def _post_one(profile, ctx, store, ledger, key, now, api, rng):
     if g.units_left() < need:
         return ctx.refuse(EXIT_REFUSED, "quota: %d units left today, one comment can "
                           "need %d; nothing was posted" % (g.units_left(), need))
+    adapter = YouTubeAdapter(profile, g=g, api=api, now=now)
     try:
         g.check_identity()
         rec = store.get(key)
-        try:
-            found = already_commented(g, rec)
-        except youtube_api.YouTubeApiError as exc:
-            kind = _classify_error(exc)
-            if kind in ("gone", "comments_disabled"):
-                _close_gone(store, rec, exc)
-                store.save()
-                ctx.emit("%s: 0 posted: %s is %s (%s)" % (ctx.tag, key, kind, exc))
-                ctx.summary.update(outcome=FAILED, error=str(exc))
-                return EXIT_OK, ctx.summary
-            raise
+        # classify and already_commented are one listing (the dedupe read):
+        # a 404 on it is the gone signal, and its items are the thread.
+        cls = adapter.classify(rec)
+        if cls.gone:
+            exc = cls.error
+            _close_gone(store, rec, exc)
+            store.save()
+            ctx.emit("%s: 0 posted: %s is %s (%s)" % (ctx.tag, key, cls.detail, exc))
+            ctx.summary.update(outcome=FAILED, error=str(exc))
+            return EXIT_OK, ctx.summary
+        if not cls.ok:
+            raise cls.error
+        found = adapter.already_commented(rec).evidence
     except youtube_api.YouTubeApiError as exc:
         ctx.emit("%s: STOP before any insert: %s" % (ctx.tag, exc))
         ctx.summary["error"] = str(exc)
@@ -1203,11 +1292,10 @@ def _post_one(profile, ctx, store, ledger, key, now, api, rng):
 
     # The last step before the insert: a fresh read of the store, and the one
     # shared approval check on it. An approval withdrawn or an edit made since
-    # this run started is honoured.
+    # this run started is honoured. Exact text, not stripped.
     fresh = load_store(profile).get(key)
-    reason = post_store.approval_refusal(fresh)
-    if reason is None and (fresh.get("comment") != rec.get("comment")):
-        reason = post_store.REFUSE_TEXT_DIFFERS
+    reason = engagement_adapter.approval_refusal_for(fresh, rec.get("comment"),
+                                                     strip=False)
     if reason is not None:
         ctx.emit("%s: %s; %s refused (%s)" % (
             ctx.tag, post_store.not_approved_message(1), key, reason))
@@ -1220,7 +1308,9 @@ def _post_one(profile, ctx, store, ledger, key, now, api, rng):
     ledger["attempting"] = _entry(rec, now, None, None, live=True)
     save_ledger(profile, ledger)
     try:
-        outcome, cid, note, ambiguous, quota = post_and_verify(g, rec)
+        res = adapter.post_and_verify(rec)
+        outcome, cid, note, ambiguous, quota = (res.outcome, res.proof, res.reason,
+                                                res.ambiguous, res.quota)
     except EngageRefused:
         ledger["attempting"] = None
         save_ledger(profile, ledger)

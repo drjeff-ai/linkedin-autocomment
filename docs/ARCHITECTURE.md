@@ -555,7 +555,7 @@ saying `0 posted: N not approved`:
 | Dashboard Post route | `dashboard.post_comments`: approved only; the old "fall back to the rest of the bin" and the hand-built `comments_file` are gone |
 | Scheduler `post_comments` | `Scheduler._fire_post_comments` |
 | `auto_cycle` post stage | `dashboard._auto_cycle_job.run_post`. A draft the cycle just generated is never approved, so the cycle posts only what a human approved earlier |
-| `comment_poster` subprocess | `LinkedInCommentPoster.approval_refusal`, re-reading the store before each comment of the TXT handoff (§5), and the `--test-url` mode |
+| `comment_poster` subprocess | `LinkedInCommentPoster.approval_refusal`, re-reading the store before each comment of the TXT handoff (§5), and the `--test-url` mode; the check itself is the shared `engagement_adapter.approval_refusal_for` (§12) |
 | YouTube `youtube-engage` and the panel's Post button | `youtube_engage._post_one`: a fresh read of the YouTube store and `approval_refusal` just before the insert (§11) |
 
 *Verification anchor (4.1): 2026-11-22, branch `e0-approval-gate`;
@@ -837,7 +837,10 @@ confident all-clear, which is worse than no monitor.
 
 The posting path is five registry entries (`post_detail`, `post_like_button`,
 `comment_open_button`, `comment_input`, `comment_submit_button`), all
-`page="post"`. The editor and the submit button do not exist until the comment
+`page="post"`. Since E1 (§12) they are defined beside LinkedIn's engagement
+adapter, `linkedin_adapter.registry_entries`, and spliced into the registry at
+the same place in its order; the selectors are still the poster's class
+constants. The editor and the submit button do not exist until the comment
 box is opened, so they carry `requires_comment_box: True` and are checked by
 `_check_comment_box()`, which opens the box and counts. **It never types and
 never clicks submit**, so a health run cannot post a comment.
@@ -1722,7 +1725,8 @@ creator and whether it may be live), `ramp_started_at`, `next_allowed_at`,
 id, outcome, comment id). V1's `youtube_state.json` is only read, for our own
 videos' titles.
 
-**The path** (each step a function an E1 adapter can wrap):
+**The path** (each step a function; `YouTubeAdapter` wraps them as the E1
+engagement adapter, §12):
 
 - `youtube-discover --query Q` (`discover`): `search.list` type=channel (100
   units) and one `channels.list` (1 unit) for titles and subscriber counts. It
@@ -1815,3 +1819,95 @@ CLI), `tests/test_youtube_engage_dashboard.py` (the YouTube tab's routes),
 LinkedIn and X against `tests/goldens/platform_policies_main.json` from main
 913a5ec), and `tests/test_network_guard.py` (the suite-wide socket guard fails
 a raw connect, a lookup, urllib and a real Google client call).*
+
+---
+
+## 12. Engagement adapters (E1, D-027)
+
+PLATFORM_REFACTOR §9's adapter boundary, extracted from the LinkedIn path with
+no LinkedIn behaviour change. `engagement_adapter.py` is the interface and the
+shared side; each platform's engagement is one adapter.
+
+**The interface** (`EngagementAdapter`, an ABC), per platform:
+
+| Method | Answers | Rule |
+|---|---|---|
+| `find(**options)` | candidate posts, landing NEW in the platform's store | |
+| `classify(record)` | `Classification`: `ok`, `gone` or `unclear` | `gone` only on a positive signal; everything else `unclear`, retried (PRINCIPLES §5) |
+| `already_commented(record)` | `ThreadCheck(already, reason, evidence)` | asked of the thread, never of our own records |
+| `post_and_verify(record)` | `PostResult(posted, outcome, proof, ...)` | `posted` only on positive proof |
+| `like(record)` | `LikeResult(state, proven, reason)` | `placed`, `already_liked`, `miss`, or `not_applicable`; never inferred by negation |
+| `selectors()` | a **browser** adapter's selector_health entries; `None` for an **API** adapter | see below |
+
+**Selectors (amends §9's wording).** §9 says an adapter registers its
+selectors as class constants in `selector_health`. That holds for **browser**
+adapters (`kind = BROWSER`): `selectors()` returns its registry entries and
+`selector_contract_problems` requires each to be in `SELECTOR_REGISTRY`
+exactly as declared. An **API** adapter (`kind = API`) has no page and so no
+selectors: `selectors()` returns `None` and `SELECTORS_EXEMPT_REASON` must say
+why. YouTube is an API adapter and is exempt.
+
+**The shared side** keeps the E0 gate: `approval_refusal_for(record, text,
+strip=)` is `post_store.approval_refusal` plus "the text to post is the
+approved text". LinkedIn's poster compares stripped (its TXT parser strips),
+YouTube exactly; both call it on a fresh store read, last. `engage_one(adapter,
+record, reload=)` is the shared one-item order: approval, classify, thread,
+like, approval again on `reload(key)`, post and verify. LinkedIn's batch run
+does not use it (below); it is what a new adapter is driven by, and the tests
+drive the LinkedIn adapter through it against the poster's fake page.
+
+**LinkedIn** (`linkedin_adapter.LinkedInAdapter`, browser) is a wrapper over
+`LinkedInCommentPoster` and `LinkedInAIPostFinder` with no behaviour of its
+own: `classify` is `navigate_to_post` plus `last_navigation` (`UNAVAILABLE` is
+`gone`; `timeout`, `unclear` and a navigation error are `unclear`, named in
+`detail`); `already_commented` is `already_commented_here`; `like` is
+`like_post`, its state read from `last_like_outcome`, which `note_like_state`
+now records on every verdict (`already_liked` is proven by a known liked-state
+selector; `placed` is reported unproven, because the liked state is not re-read
+after the click); `post_and_verify` is `post_comment`, which verifies in the
+thread. The batch path is unchanged: the dashboard and the scheduler still hand
+a TXT file to `comment_poster` in a subprocess and its loop (§5) decides.
+What moved into `linkedin_adapter`, from where E0-A found it:
+
+| LinkedIn-specific | Now | Was |
+|---|---|---|
+| TXT handoff | `write_comments_file` (re-exported as `scheduler.write_comments_file`), `write_handoff` (the dashboard's `_write_poster_input` writes through it) | `scheduler.py`, `dashboard.py` |
+| Subprocess commands with `--allow-production` | `poster_command`, `finder_command` | `dashboard._post_comments_job`, `_scrape_job` |
+| Posting-path selector_health entries | `registry_entries` (§8.2) | `selector_health.SELECTOR_REGISTRY` literal |
+| Post identity (`activity`/`ugcPost`/`share`/`groupPost`) | `LinkedInAdapter.native_id`, over the poster's `post_identity` | unchanged |
+| Ledger keys the store reconciles from; `ad`/`job_card` trash reasons | `LEDGER_KEYS`, `TRASH_REASONS` (named; the reconcile is still `post_store`'s) | `post_store.py` |
+
+Not moved, on purpose: routes defaulting to `post_store.LINKEDIN` (a missing
+`?platform=` is LinkedIn, DEC-063), the store's UNAVAILABLE meaning, and the UI
+step labels. First comments on our own posts (`first_comment.py`,
+`csv_pipeline.py`) keep calling the poster's primitives directly: they are
+publishing, not engagement, and their "already there" check deliberately
+differs (`first_comment_already_present`, MAINTENANCE §6.6).
+
+**YouTube** (`youtube_engage.YouTubeAdapter`, API) wraps the Y1 functions, and
+`_post_one` now goes through it. `classify` and `already_commented` are one
+read, the dedupe listing, made once per record: its items are the thread, a
+404 on it is `gone`, `commentsDisabled` is `gone` with that `detail`, anything
+else `unclear` (which stops the run, as before). `post_and_verify` is the one
+insert plus verify; `posted` is True only for `posted_visible`, and
+`posted_held` carries its comment id as proof but is not success (DEC-063).
+`like` is `not_applicable` and says so; nothing is attempted.
+
+**The no-change proof.** `tests/test_e1_golden.py` re-runs
+`tests/e1_golden_harness.py` and compares, line for line, with
+`tests/fixtures/e1_golden/expected.json`, which the same harness wrote from the
+pre-E1 code (`main` @ `e8d58b7`): the poster's decisions over a TXT handoff
+against a fake page (posted, like missing, gone, timeout, unclear, our comment
+already there by marker and by text, a submit that never lands, not approved,
+edited after approval, already in the ledger, past the count: what was
+published and liked, the run result, the ledger, the reconciled store, the
+poster's log lines, the failure captures, the RUN counts), the scheduler's and
+the dashboard's selections, notes, TXT handoffs and poster argv, the composed
+LinkedIn and X prompts with OpenAI faked, the selector registry, and
+`post_identity`. Regenerating the golden defeats it.
+
+*Verification anchor (12): 2026-11-22, branch `e1-adapter-boundary`;
+`tests/test_e1_golden.py`, `tests/test_engagement_adapter.py` (each adapter
+verdict both ways on LinkedIn's fake page and on stubbed YouTube reads, the
+selector contract held and broken, the registry's selectors against the
+golden's, the shared approval check, `engage_one`).*
