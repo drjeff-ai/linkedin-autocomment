@@ -130,3 +130,12 @@ Expected: three posts parsed (A, B, D). C is skipped, E collapses into A.
 
 Counts are written in X's real phrasing, singular forms included (`1 Reply.
 Reply`, `1 repost. Repost`), because that is what the captures held.
+
+## `instagram/` (D-027 E3)
+
+Synthetic Instagram pages (feed, post, liked post, post with our comment,
+removed post, a broken post, profiles), written by hand from the
+nine-month-stale instagram_bot reference and **unverified**: no live
+Instagram capture exists yet. `tests/fake_ig_driver.py` serves them to the
+adapter; `tests/test_instagram_adapter.py` runs the `ig_*` registry entries
+against them. Every handle and caption is invented.

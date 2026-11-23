@@ -546,7 +546,10 @@ def capture_prompts(monkeypatch, tmp):
 
 def capture_selectors():
     from linkedin_automation import selector_health as sh
-    return json.loads(json.dumps(sh.SELECTOR_REGISTRY, default=str))
+    # Instagram's entries (ig_*, D-027 E3) are new, not LinkedIn's or X's:
+    # the golden is the pre-E1 registry, so they are left out of it.
+    registry = {k: v for k, v in sh.SELECTOR_REGISTRY.items() if not k.startswith("ig_")}
+    return json.loads(json.dumps(registry, default=str))
 
 
 IDENTITY_URLS = [

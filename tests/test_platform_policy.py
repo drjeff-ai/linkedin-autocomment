@@ -171,7 +171,10 @@ def test_platform_identifiers_match_the_store():
     assert pp.X == post_store.X
     # YouTube joined in D-027 Y1; its id is platforms.YOUTUBE, as V1's store uses.
     assert pp.YOUTUBE == platforms.YOUTUBE
-    assert set(pp.PLATFORMS) == {post_store.LINKEDIN, post_store.X, platforms.YOUTUBE}
+    # Instagram joined in D-027 E2, as platforms.INSTAGRAM.
+    assert pp.INSTAGRAM == platforms.INSTAGRAM
+    assert set(pp.PLATFORMS) == {post_store.LINKEDIN, post_store.X, platforms.YOUTUBE,
+                                 platforms.INSTAGRAM}
 
 
 # ─── Job two: X is a different platform, not a shorter LinkedIn ───────────────

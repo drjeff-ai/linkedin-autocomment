@@ -302,10 +302,13 @@ def test_the_registry_covers_the_same_selectors_as_before_e1():
     """Every key, and every selector under it, as the pre-E1 registry had."""
     with open(GOLDEN, encoding="utf-8") as f:
         before = json.load(f)["selectors"]
-    assert _selector_sets(sh.SELECTOR_REGISTRY) == _selector_sets(before)
+    # Instagram's ig_* entries (D-027 E3) are additions; everything else is
+    # exactly the pre-E1 registry.
+    now = {k: v for k, v in sh.SELECTOR_REGISTRY.items() if not k.startswith("ig_")}
+    assert _selector_sets(now) == _selector_sets(before)
     linkedin_before = {s for k, v in before.items() if not k.startswith("x_")
                        for s in v["selectors"]}
-    linkedin_now = {s for k, v in sh.SELECTOR_REGISTRY.items() if not k.startswith("x_")
+    linkedin_now = {s for k, v in now.items() if not k.startswith("x_")
                     for s in v["selectors"]}
     assert linkedin_now == linkedin_before and linkedin_now
 
