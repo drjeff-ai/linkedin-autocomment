@@ -318,6 +318,15 @@ for the counts.** Files on disk are derived output, never state.
   dates them one a day at `publish_time` and uploads each as private with
   `publishAt`, within the daily quota. `youtube-status` shows state and quota.
   `youtube-import [--dry-run]` re-reads video-publisher's history.
+- Thumbnails. After each upload, the item folder's
+  `<folder name>-poster-vertical.png` is set as the custom thumbnail (50 quota
+  units). A poster over 2 MB is sent as a JPEG copy in
+  `data/<p>/youtube/thumbnails/`. A thumbnail failure never fails the upload;
+  `youtube-status` shows each item's outcome (`set`, `none`, `failed: ...`,
+  `deferred_quota: ...`). For videos already uploaded:
+  `youtube-thumbnails --profile <p> [--max N] [--dry-run]`, which refuses until
+  the brand is cut over. The channel must be phone-verified in YouTube to take
+  custom thumbnails. Needs Pillow (in `requirements.txt`).
 - No task or drain runs these; you run them.
 
 ### YouTube commenting (`youtube-*`, Y1)

@@ -1608,14 +1608,14 @@ the three Buffer channels to their values before V1.
 
 **Code.** `youtube_api.py` is the only module that imports Google: credentials
 from the stored token, the refresh, `channels.list mine`, one resumable
-`videos.insert`, and the installed-app consent. It never retries: an upload
+`videos.insert`, one `thumbnails.set`, and the installed-app consent. It never retries: an upload
 error stops the run. `youtube_channel.py` holds the rest, ported from
 video-publisher (reference only, not imported).
 
 **Config.** `scheduled_posting.platforms.youtube` of a profile:
 `vp_brand`, `vp_root`, `channel_id`, `content_root`, `publish_time`, `tz`,
-`per_day`, optional `quota {daily_limit, upload_units, comment_units}` (10,000
-/ 1,600 / 50 by default) and `category_id` (27). Unknown keys are refused. The
+`per_day`, optional `quota {daily_limit, upload_units, comment_units,
+thumbnail_units}` (10,000 / 1,600 / 50 / 50 by default) and `category_id` (27). Unknown keys are refused. The
 profile must be registered. `topfive` is publishing-only, automations off.
 
 **Files**, under `data/<profile>/youtube/`, all written temp-then-rename:
@@ -1650,6 +1650,13 @@ state file:
   refused if under 15 minutes ahead, and refused if the quota day would go over
   the limit. It stops at the first error.
 - `youtube-status`: read-only, from the state, the ledger and the marker.
+  Each line ends with the item's thumbnail outcome.
+- `youtube-thumbnails [--max N] [--dry-run]` (V2): the backfill. It refuses
+  unless `vp_brand` is in the marker. It covers items with a `video_id` and a
+  poster whose outcome is not `set`, in C-number order. It checks the token's
+  channel (1 unit), then sets each one, and stops at the first item that does
+  not come back `set`. `--dry-run` lists each item and its units and writes
+  nothing except the lock file.
 - `youtube-import` (V1-M): reads video-publisher's `content/<brand>/{queue,
   published}` manifests and the latest `publish_log` row per item, opened
   `mode=ro` and closed at once, never through its `get_connection`. It
@@ -1661,12 +1668,40 @@ state file:
   prints the state before and after. `--dry-run` writes nothing except the
   lock file.
 
+**Thumbnails (V2, DEC-068).** The poster is exactly
+`<source_folder>/<folder name>-poster-vertical.png`. There is no other name
+and no fallback. The folder must sit under `content_root`, so imported `aif-c01`
+items, whose folders are in video-publisher, have none. A JPEG or PNG at or
+under 2 MB is sent as it is. Anything else becomes a JPEG copy under 2 MB at
+`data/<p>/youtube/thumbnails/<item>.jpg` (Pillow), and the content folder is
+only read. After an upload is saved as `uploaded`, `youtube-schedule` runs one
+thumbnail step and records `thumbnail` on the item:
+- `set`;
+- `none` (no poster, and no call);
+- `failed`, with `thumbnail_reason`;
+- `deferred_quota` (the ledger would go over the limit, and no call is made).
+
+The ledger and `api_usage.jsonl` are charged before the call. No outcome
+fails or stops the upload run, and nothing retries. A 403 whose message names
+thumbnail permissions is stored as `channel not verified for custom thumbnails
+(phone verification in YouTube settings)`. That message match is inferred from
+Google's documented error, not from a capture.
+
 **One publisher (DEC-058(2)).** The marker is
 `<vp_root>/config/moved_to_platform.yaml`, `{brands: [names]}`. The platform
 uploads only for a listed brand. video-publisher's `src/moved.py` refuses a
 listed brand in `publish`, `scheduled_publish.py`, `schedule_youtube.py`,
 `retry-failed` and `_publish_youtube_item`, before any `publish_log` row. An
 unreadable marker refuses on both sides. No task or drain runs any of this.
+
+*Verification anchor (10.13, V2): 2026-11-24, branch `v2-youtube-thumbnails`;
+`tests/test_youtube_thumbnails.py` covers the exact file name rule and the
+content-root check, conversion over 2 MB and of a non-PNG with the original
+untouched, each of the four outcomes, the 403 message both ways, ledger and
+usage charged before the call, a failed thumbnail leaving the upload and the
+run intact, and the backfill: no marker, dry run writing nothing, skips,
+stop on error, wrong channel, quota, production gate and lock. Nine mutations
+each turn it red.*
 
 *Verification anchor (10.13): 2026-11-22, branch `v1-youtube`;
 `tests/test_youtube_channel.py` covers config refusals, the eight topfive

@@ -150,6 +150,46 @@ def upload(service, media_path, body):
     return video_id
 
 
+#: Stored for a 403 from thumbnails.set that says the channel may not set
+#: custom thumbnails (V2, D-028). The fix is on YouTube's side, not ours.
+THUMBNAIL_NOT_ALLOWED = ("channel not verified for custom thumbnails "
+                         "(phone verification in YouTube settings)")
+
+#: Words in that 403's message. Inferred from Google's documented error for
+#: thumbnails.set ("The authenticated user doesn't have permissions to upload
+#: and set custom video thumbnails"), not from a captured response.
+_THUMBNAIL_403_WORDS = ("thumbnail", "permission")
+
+
+def set_thumbnail(service, video_id, image_path, mimetype):
+    """One ``thumbnails.set`` (50 units) for ``video_id``. Returns None.
+
+    Raises :class:`YouTubeApiError` on any failure, with no retry. A 403 whose
+    message says the channel cannot set custom thumbnails carries
+    :data:`THUMBNAIL_NOT_ALLOWED` as its message."""
+    from googleapiclient.errors import HttpError
+    from googleapiclient.http import MediaFileUpload
+    media = MediaFileUpload(str(image_path), mimetype=mimetype, resumable=False)
+    try:
+        service.thumbnails().set(videoId=video_id, media_body=media).execute()
+    except HttpError as exc:
+        err = _error(exc, "thumbnails.set")
+        # Google's message only: str(exc) carries the request URI, which
+        # always names thumbnails.
+        message = str(getattr(exc, "reason", "") or "").lower()
+        if err.status == 403 and not err.quota \
+                and all(w in message for w in _THUMBNAIL_403_WORDS):
+            raise YouTubeApiError(THUMBNAIL_NOT_ALLOWED, status=403) from exc
+        raise err from exc
+    except (OSError, ValueError) as exc:
+        raise YouTubeApiError("thumbnails.set failed: %s: %s"
+                              % (type(exc).__name__, exc)) from exc
+    except Exception as exc:  # timeouts, resets, TLS: no answer from Google
+        raise YouTubeApiError("thumbnails.set failed with no answer: %s: %s"
+                              % (type(exc).__name__, str(exc)[:200]),
+                              ambiguous=True) from exc
+
+
 def run_consent(client_secrets_path):
     """The installed-app consent in the operator's browser. Returns the new
     credentials (with a refresh token)."""

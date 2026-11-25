@@ -40,3 +40,6 @@ google-auth-oauthlib==1.5.0
 # the same parser video-publisher writes them with (YAML), during the V1-M
 # import and the cutover. Was already in the dev venv through pre-commit.
 PyYAML==6.0.3
+# YouTube thumbnails (V2, D-028): reads the poster's real format and writes a
+# JPEG copy under 2 MB when the PNG is too large for thumbnails.set.
+pillow==12.3.0

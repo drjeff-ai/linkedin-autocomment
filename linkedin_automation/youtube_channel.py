@@ -69,6 +69,7 @@ PUBLISH_AT_MIN_LEAD = timedelta(minutes=15)
 DEFAULT_DAILY_LIMIT = 10000
 DEFAULT_UPLOAD_UNITS = 1600
 DEFAULT_COMMENT_UNITS = 50
+DEFAULT_THUMBNAIL_UNITS = 50     # thumbnails.set (V2, D-028)
 #: ``channels.list mine`` (the identity check before uploads).
 CHANNEL_CHECK_UNITS = 1
 DEFAULT_CATEGORY_ID = "27"  # what every aws item used (video-publisher intake)
@@ -101,7 +102,7 @@ CONFIG_KEYS = {"vp_brand", "vp_root", "channel_id", "content_root",
                "engagement"}
 REQUIRED_KEYS = ("vp_brand", "vp_root", "channel_id", "content_root",
                  "publish_time", "tz")
-QUOTA_KEYS = {"daily_limit", "upload_units", "comment_units"}
+QUOTA_KEYS = {"daily_limit", "upload_units", "comment_units", "thumbnail_units"}
 
 
 class YouTubeRefused(RuntimeError):
@@ -125,6 +126,7 @@ class YouTubeConfig:
     upload_units: int
     comment_units: int
     category_id: str
+    thumbnail_units: int = DEFAULT_THUMBNAIL_UNITS
 
 
 def _positive_int(value, where):
@@ -184,6 +186,9 @@ def youtube_config(profile, profile_cfg=None) -> YouTubeConfig:
         comment_units=_positive_int(quota.get("comment_units", DEFAULT_COMMENT_UNITS),
                                     where + ".quota.comment_units"),
         category_id=str(raw.get("category_id") or DEFAULT_CATEGORY_ID),
+        thumbnail_units=_positive_int(
+            quota.get("thumbnail_units", DEFAULT_THUMBNAIL_UNITS),
+            where + ".quota.thumbnail_units"),
     )
 
 
@@ -1090,13 +1095,7 @@ def _upload_dated(profile, cfg, state, ledger, dated, max_uploads, now, api, out
         summary["remaining"] = todo + summary["remaining"]
         return refuse(EXIT_REFUSED, reason + "; nothing was uploaded")
     try:
-        creds = api.credentials_from_token(read_json(token_path(profile), {}))
-        log_paid_call("oauth2 token refresh (%s)" % profile, now=now)
-        api.refresh(creds)
-        service = api.build_service(creds)
-        charge(profile, ledger, now, CHANNEL_CHECK_UNITS, "channels.list")
-        log_paid_call("channels.list mine (identity check, 1 unit)", now=now)
-        found = api.my_channel_id(service)
+        service, found = _connect(profile, cfg, ledger, now, api)
     except youtube_api.YouTubeApiError as exc:
         summary["remaining"] = todo + summary["remaining"]
         summary["stopped"] = {"item": None, "error": str(exc)}
@@ -1151,10 +1150,228 @@ def _upload_dated(profile, cfg, state, ledger, dated, max_uploads, now, api, out
         summary["uploaded"].append((item_id, video_id, rec["publish_at"]))
         out("  UPLOADED: %s  video_id=%s  publishAt=%s (%s)"
             % (item_id, video_id, rec["publish_at"], _local_label(rec["publish_at"], cfg.tz)))
+        # V2: the upload is already recorded; whatever happens here, it stands.
+        outcome = set_item_thumbnail(profile, cfg, ledger, rec, service, api, now)
+        save_state(profile, state)
+        summary.setdefault("thumbnails", []).append((item_id, outcome))
+        out("  THUMBNAIL: %s  %s" % (item_id, thumbnail_label(rec)))
     out("%s: uploaded %d, skipped %d, left queued %d%s" % (
         tag, len(summary["uploaded"]), len(summary["skipped"]), len(summary["remaining"]),
         ", stopped" if summary["stopped"] else ""))
     return (EXIT_ERROR if summary["stopped"] else EXIT_OK), summary
+
+
+# ── thumbnails (V2, D-028, DEC-068) ─────────────────────────────────────────
+
+POSTER_SUFFIX = "-poster-vertical.png"
+THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024       # YouTube's limit for thumbnails.set
+THUMBNAIL_FORMATS = {"JPEG": "image/jpeg", "PNG": "image/png"}
+THUMBNAIL_DIR = "thumbnails"
+#: Outcomes stored on an item as ``thumbnail``; a failure's or deferral's
+#: reason is in ``thumbnail_reason``.
+THUMB_SET = "set"
+THUMB_NONE = "none"
+THUMB_FAILED = "failed"
+THUMB_DEFERRED = "deferred_quota"
+THUMB_OUTCOMES = (THUMB_SET, THUMB_NONE, THUMB_FAILED, THUMB_DEFERRED)
+
+
+def poster_path(rec, cfg):
+    """The item's poster, or None. Exactly ``<item folder>/<folder name>``
+    plus :data:`POSTER_SUFFIX`, with no other name and no fallback. The item
+    folder must sit under the configured content root."""
+    folder = rec.get("source_folder")
+    if not folder:
+        return None
+    folder = os.path.normpath(folder)
+    root = os.path.normpath(cfg.content_root)
+    try:
+        inside = os.path.commonpath([os.path.normcase(folder),
+                                     os.path.normcase(root)]) == os.path.normcase(root)
+    except ValueError:      # different drives
+        inside = False
+    if not inside:
+        return None
+    path = os.path.join(folder, os.path.basename(folder) + POSTER_SUFFIX)
+    return path if os.path.isfile(path) else None
+
+
+def thumbnail_dir(profile):
+    return os.path.join(channel_dir(profile), THUMBNAIL_DIR)
+
+
+def _image_format(path):
+    from PIL import Image
+    with Image.open(path) as im:
+        return im.format
+
+
+def thumbnail_upload_file(profile, item_id, poster):
+    """``(path, mimetype)`` to send for ``poster``.
+
+    A JPEG or PNG at or under 2 MB is sent as it is. Anything else becomes a
+    JPEG copy under 2 MB in ``data/<profile>/youtube/thumbnails/``; the content
+    folder is only ever read. Raises ``OSError`` or ``ValueError`` when the file
+    is not an image or cannot be brought under the limit."""
+    fmt = _image_format(poster)
+    if fmt in THUMBNAIL_FORMATS and os.path.getsize(poster) <= THUMBNAIL_MAX_BYTES:
+        return poster, THUMBNAIL_FORMATS[fmt]
+    from PIL import Image
+    out_dir = thumbnail_dir(profile)
+    os.makedirs(out_dir, exist_ok=True)
+    target = os.path.join(out_dir, item_id + ".jpg")
+    tmp = target + ".tmp"
+    with Image.open(poster) as im:
+        rgb = im.convert("RGB")
+    for quality in (90, 80, 70, 60, 50):
+        rgb.save(tmp, format="JPEG", quality=quality, optimize=True)
+        if os.path.getsize(tmp) <= THUMBNAIL_MAX_BYTES:
+            os.replace(tmp, target)
+            return target, "image/jpeg"
+    os.remove(tmp)
+    raise ValueError("%s stays over %d bytes as a JPEG at quality 50"
+                     % (poster, THUMBNAIL_MAX_BYTES))
+
+
+def _record_thumbnail(rec, outcome, reason, now):
+    rec.update(thumbnail=outcome, thumbnail_reason=reason,
+               thumbnail_at=utc_z(now), updated_at=utc_z(now))
+
+
+def thumbnail_label(rec):
+    """``set``, ``none``, ``failed: <reason>``, ``deferred_quota: <reason>``,
+    or ``-`` when no outcome is recorded."""
+    outcome = rec.get("thumbnail")
+    if not outcome:
+        return "-"
+    reason = rec.get("thumbnail_reason")
+    return "%s: %s" % (outcome, reason) if reason else outcome
+
+
+def set_item_thumbnail(profile, cfg, ledger, rec, service, api, now):
+    """Set one uploaded item's thumbnail and record the outcome on ``rec``
+    (the caller saves the state). Returns the outcome. Never raises for a
+    poster, quota or Google problem: a thumbnail never fails an upload, and
+    there is no retry."""
+    poster = poster_path(rec, cfg)
+    if poster is None:
+        _record_thumbnail(rec, THUMB_NONE, None, now)
+        return THUMB_NONE
+    try:
+        path, mimetype = thumbnail_upload_file(profile, rec["id"], poster)
+    except (OSError, ValueError) as exc:
+        _record_thumbnail(rec, THUMB_FAILED, "poster unusable: %s: %s"
+                          % (type(exc).__name__, exc), now)
+        return THUMB_FAILED
+    reason = quota_refusal(ledger, quota_day(now), cfg.thumbnail_units, cfg.daily_limit)
+    if reason:
+        _record_thumbnail(rec, THUMB_DEFERRED, reason, now)
+        return THUMB_DEFERRED
+    charge(profile, ledger, now, cfg.thumbnail_units, "thumbnails.set", rec["id"])
+    log_paid_call("thumbnails.set %s, %d quota units" % (rec["id"], cfg.thumbnail_units),
+                  now=now)
+    try:
+        api.set_thumbnail(service, rec["video_id"], path, mimetype)
+    except youtube_api.YouTubeApiError as exc:
+        _record_thumbnail(rec, THUMB_FAILED, str(exc), now)
+        return THUMB_FAILED
+    _record_thumbnail(rec, THUMB_SET, None, now)
+    return THUMB_SET
+
+
+def _connect(profile, cfg, ledger, now, api):
+    """Token refresh, service, and the identity check (1 unit). Returns
+    ``(service, found_channel_id)``; raises ``YouTubeApiError``."""
+    creds = api.credentials_from_token(read_json(token_path(profile), {}))
+    log_paid_call("oauth2 token refresh (%s)" % profile, now=now)
+    api.refresh(creds)
+    service = api.build_service(creds)
+    charge(profile, ledger, now, CHANNEL_CHECK_UNITS, "channels.list")
+    log_paid_call("channels.list mine (identity check, 1 unit)", now=now)
+    return service, api.my_channel_id(service)
+
+
+def thumbnail_candidates(state, cfg):
+    """Items with a video id and a poster whose thumbnail is not ``set``, in
+    C-number order: ``[(item_id, poster)]``."""
+    out = []
+    for item_id in sorted(state["items"], key=_order_key):
+        rec = state["items"][item_id]
+        if not rec.get("video_id") or rec.get("thumbnail") == THUMB_SET:
+            continue
+        poster = poster_path(rec, cfg)
+        if poster:
+            out.append((item_id, poster))
+    return out
+
+
+def thumbnails(profile, dry_run=False, max_items=None, now=None, api=None, out=print):
+    """``youtube-thumbnails``: set the poster thumbnail on videos already
+    uploaded. Refuses unless the brand is in the cutover marker (one publisher,
+    DEC-058). Stops at the first item that does not come back ``set``."""
+    now = now or datetime.now(timezone.utc)
+    api = api or youtube_api
+    if max_items is not None and (isinstance(max_items, bool)
+                                  or not isinstance(max_items, int) or max_items < 0):
+        raise ValueError("max_items must be >= 0")
+
+    def body(cfg, summary, tag, refuse):
+        brands = read_marker(marker_path(cfg))
+        if cfg.vp_brand not in brands:
+            return refuse(EXIT_REFUSED, "video-publisher still publishes brand %r "
+                          "(not in %s). Thumbnails wait for youtube-cutover."
+                          % (cfg.vp_brand, marker_path(cfg)))
+        state = load_state(profile)
+        todo = thumbnail_candidates(state, cfg)
+        if max_items is not None:
+            todo = todo[:max_items]
+        ledger = load_quota(profile)
+        day = quota_day(now)
+        units = CHANNEL_CHECK_UNITS + cfg.thumbnail_units * len(todo) if todo else 0
+        summary.update(candidates=[i for i, _p in todo], units=units, results=[],
+                       stopped=None)
+        if dry_run:
+            for item_id, poster in todo:
+                out("  WOULD SET: %s  %s (%d bytes)  %d units"
+                    % (item_id, os.path.basename(poster), os.path.getsize(poster),
+                       cfg.thumbnail_units))
+            out("%s: would set %d thumbnail(s), %d units; quota %d of %d on %s"
+                % (tag, len(todo), units, quota_used(ledger, day), cfg.daily_limit, day))
+            return EXIT_OK, summary
+        if not todo:
+            out("%s: nothing to set" % tag)
+            return EXIT_OK, summary
+        problem = token_problem(profile)
+        if problem:
+            return refuse(EXIT_REFUSED, problem)
+        reason = quota_refusal(ledger, day, CHANNEL_CHECK_UNITS + cfg.thumbnail_units,
+                               cfg.daily_limit)
+        if reason:
+            return refuse(EXIT_REFUSED, reason + "; nothing was sent")
+        try:
+            service, found = _connect(profile, cfg, ledger, now, api)
+        except youtube_api.YouTubeApiError as exc:
+            summary["stopped"] = {"item": None, "error": str(exc)}
+            out("%s: STOP before any thumbnail: %s" % (tag, exc))
+            return EXIT_ERROR, summary
+        if found != cfg.channel_id:
+            return refuse(EXIT_REFUSED, "the token answers for channel %s, not the "
+                          "configured %s; nothing was sent" % (found, cfg.channel_id))
+        for item_id, _poster in todo:
+            rec = state["items"][item_id]
+            outcome = set_item_thumbnail(profile, cfg, ledger, rec, service, api, now)
+            save_state(profile, state)
+            summary["results"].append((item_id, outcome))
+            out("  THUMBNAIL: %s  %s" % (item_id, thumbnail_label(rec)))
+            if outcome != THUMB_SET:
+                summary["stopped"] = {"item": item_id, "error": thumbnail_label(rec)}
+                break
+        done = sum(1 for _i, o in summary["results"] if o == THUMB_SET)
+        out("%s: set %d of %d%s" % (tag, done, len(todo),
+                                    ", stopped" if summary["stopped"] else ""))
+        return (EXIT_ERROR if summary["stopped"] else EXIT_OK), summary
+
+    return _run(profile, "thumbnails", dry_run, out, body)
 
 
 # ── youtube-status ──────────────────────────────────────────────────────────
@@ -1171,11 +1388,12 @@ def status(profile, now=None, out=print):
                        key=lambda r: (r.get("publish_at") or r.get("uploaded_at") or "~",
                                       _order_key(r["id"])))
         for r in items:
-            out("  %-11s %-48s %-12s %s%s" % (
+            out("  %-11s %-48s %-12s %s  thumbnail %s%s" % (
                 display_state(r, now), r["id"], r.get("video_id") or "-",
                 _local_label(r.get("publish_at"), cfg.tz) if r.get("publish_at")
                 else "uploaded " + _local_label(r.get("uploaded_at"), cfg.tz)
                 if r.get("uploaded_at") else "no date",
+                thumbnail_label(r),
                 "  (%s)" % r["error"] if r.get("error") else ""))
         brands = read_marker(marker_path(cfg))
         out("%s: %s; quota %d of %d on %s (Pacific); token %s; video-publisher "

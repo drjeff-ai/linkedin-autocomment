@@ -40,6 +40,8 @@ and the channel's publisher lock; none is run by any task or drain:
     youtube-status    --profile P               local state and today's quota
     youtube-import    --profile P [--dry-run]   video-publisher's history (V1-M)
     youtube-cutover   --profile P [--dry-run]   move the brand here (Jeff runs it)
+    youtube-thumbnails --profile P [--max N] [--dry-run]
+                      poster thumbnails on uploaded videos (after cutover)
 
 YouTube commenting (Y1, linkedin_automation/youtube_engage.py, DEC-061). Same
 gate and lock. Nothing here is on a schedule, and engage posts at most one
@@ -186,7 +188,7 @@ def main():
         "schedule", "comment", "status", "topup",
         "books", "add-book", "recheck-holds", "release-hold", "hold", "holds",
         "youtube-intake", "youtube-schedule", "youtube-status", "youtube-import",
-        "youtube-cutover", "youtube-discover", "youtube-watch", "youtube-find",
+        "youtube-cutover", "youtube-thumbnails", "youtube-discover", "youtube-watch", "youtube-find",
         "youtube-draft", "youtube-engage"])
     ap.add_argument("--csv", help="the content calendar (schedule pass)")
     ap.add_argument("--channel-id",
@@ -225,6 +227,8 @@ def main():
     ap.add_argument("--reason", default=None, help="hold: why")
     ap.add_argument("--max-uploads", type=int, default=None, metavar="N",
                     help="youtube-schedule: upload at most N this run")
+    ap.add_argument("--max", type=int, default=None, metavar="N",
+                    help="youtube-thumbnails: set at most N this run")
     ap.add_argument("--query", default=None,
                     help="youtube-discover: what to search channels for")
     ap.add_argument("--add", default=None, metavar="CHANNEL_ID",
@@ -268,6 +272,11 @@ def main():
                                    dry_run=args.dry_run)
         elif name == "status":
             code, _s = yt.status(args.profile)
+        elif name == "thumbnails":
+            if args.max is not None and args.max < 0:
+                ap.error("--max must be >= 0")
+            code, _s = yt.thumbnails(args.profile, dry_run=args.dry_run,
+                                     max_items=args.max)
         else:
             code, _s = {"intake": yt.intake, "import": yt.import_history,
                         "cutover": yt.cutover}[name](args.profile,
