@@ -1595,7 +1595,7 @@ keys and order, dedupe across states and holds, dry runs against a snapshot,
 the lock both ways, the routes' confirm and lock, and the calendar's held
 list.*
 
-### 10.13 YouTube Shorts (V1, DEC-058, DEC-059)
+### 10.13 YouTube Shorts (V1, DEC-058, DEC-059; layouts V3, DEC-069)
 
 YouTube is a channel of the platform, published through the YouTube Data API
 rather than Buffer. `channels.YOUTUBE` carries `publisher=youtube_api`; every
@@ -1617,6 +1617,19 @@ video-publisher (reference only, not imported).
 `per_day`, optional `quota {daily_limit, upload_units, comment_units,
 thumbnail_units}` (10,000 / 1,600 / 50 / 50 by default) and `category_id` (27). Unknown keys are refused. The
 profile must be registered. `topfive` is publishing-only, automations off.
+Three optional layout keys (V3) say how the profile's content folder is laid
+out; each default is the topfive layout:
+
+| key | default | teratomahouse |
+|---|---|---|
+| `item_prefix` (letters only) | `C` | `TH` |
+| `video_suffix` (ends in `.mp4`) | `-vertical.mp4` | `-vertical-post.mp4` |
+| `metadata_format` | `shorts_section` | `title_sections` |
+
+A bad value refuses at config load. The metadata format is only ever what the
+config says; nothing detects it from a file, and each parser skips a file in
+the other layout (`no YouTube Shorts section in youtube.md`, `youtube.md has
+no ## Title section`).
 
 **Files**, under `data/<profile>/youtube/`, all written temp-then-rename:
 `youtube_state.json` (one record per video, keyed by its source folder name
@@ -1637,10 +1650,25 @@ created, so the item returns to `queued`.
 production gate on `channel_id` and the channel's `publisher_lock` on the
 state file:
 
-- `youtube-intake`: queues every new `C-NNN-<slug>/` under `content_root` in
-  C-number order, with the `### YouTube Shorts` section of `youtube.md`
-  verbatim and the one `-vertical.mp4`. `_posted/` and `ready-to-publish/` are
-  skipped. Over a YouTube limit is a skip, never a cut.
+- `youtube-intake`: queues every new `<item_prefix>-NNN-<slug>/` under
+  `content_root` in number order (by the number, not the name, so `C-50`
+  comes before `C-100`), with its `youtube.md` text verbatim and the one mp4
+  ending in `video_suffix`. `ready-to-publish/` and every folder whose name
+  starts with `_` (`_posted/`, `_superseded/`) are skipped as not video
+  folders. Over a YouTube limit is a skip, never a cut.
+  - `shorts_section`: the `- **Title:**`, `- **Description:**` and
+    `- **Tags:**` bullets of the `### YouTube Shorts` section.
+  - `title_sections`: the bodies of the `## Title`, `## Description` and
+    `## Tags` headings, each running to the next heading of any level; the
+    rest of the file (the H1, the `Post: ... Thumbnail: ...` note) is
+    ignored. A section given twice is a skip.
+  - Both: the title joined to one line, description paragraphs with their
+    indentation removed and joined by one blank line, tags comma separated,
+    then the same limits (title 100, description 4,900, tags 500 as YouTube
+    counts them).
+  The number is what `c_number` returns and what the record's `c_number`
+  field holds for any prefix; dates, the upload order, the thumbnail backfill,
+  status and the import all order by it.
 - `youtube-schedule`: refuses unless `vp_brand` is in video-publisher's
   marker, the token exists and nothing is `attempting`. It dates undated queued
   items: the next day with a free slot at `publish_time` that is at least 15
@@ -1693,6 +1721,19 @@ uploads only for a listed brand. video-publisher's `src/moved.py` refuses a
 listed brand in `publish`, `scheduled_publish.py`, `schedule_youtube.py`,
 `retry-failed` and `_publish_youtube_item`, before any `publish_log` row. An
 unreadable marker refuses on both sides. No task or drain runs any of this.
+
+*Verification anchor (10.13, V3): 2026-11-25, branch `v3-intake-layouts`;
+`tests/test_youtube_layouts.py` holds a golden of the topfive import, intake
+(dry run and real), schedule dry run and status on fixtures, taken from main
+732223c before V3 and compared line for line and field for field. It also
+covers the layout keys and their refusals, the `title_sections` parser on six
+synthetic copies of the real files' structure, CRLF and a BOM, the heading
+boundary, every skip reason and the limits uncut, each parser refusing the
+other layout, the video suffix rule, `_` folders, and the Teratoma House
+layout end to end (number order with unpadded names, dates, posters, schedule
+dry run). Nine mutations each turn it red. The real `topfive` dry run was
+byte-identical before and after, and the nine real topfive files parse
+identically under both versions.*
 
 *Verification anchor (10.13, V2): 2026-11-24, branch `v2-youtube-thumbnails`;
 `tests/test_youtube_thumbnails.py` covers the exact file name rule and the
