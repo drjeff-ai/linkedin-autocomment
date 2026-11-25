@@ -302,7 +302,8 @@ for the counts.** Files on disk are derived output, never state.
 ### YouTube Shorts (`youtube-*`)
 - For a profile with a `scheduled_posting.platforms.youtube` overlay (`vp_brand`,
   `vp_root`, `channel_id`, `content_root`, `publish_time`, `tz`, `per_day`,
-  `quota`). It goes through the YouTube Data API, not Buffer
+  `quota`, and optionally `item_prefix`, `video_suffix`, `metadata_format`
+  for a content folder not laid out like Top Five's). It goes through the YouTube Data API, not Buffer
   (`linkedin_automation/youtube_channel.py`, docs/ARCHITECTURE.md §10.13).
 - Auth, once per channel. It opens Google's consent page in your browser and
   stores the token in `data/<p>/youtube/oauth_token.json` (gitignored):
@@ -314,7 +315,10 @@ for the counts.** Files on disk are derived output, never state.
   video-publisher refuses that brand. Until then the commands below refuse to
   upload.
 - `youtube-intake [--dry-run]` queues new `C-NNN-<slug>/` folders (Shorts text
-  from `youtube.md`, verbatim). `youtube-schedule [--max-uploads N] [--dry-run]`
+  from `youtube.md`, verbatim). Teratoma House sets `item_prefix: "TH"`,
+  `video_suffix: "-vertical-post.mp4"` and `metadata_format: "title_sections"`
+  (`## Title`, `## Description`, `## Tags`). Folders starting with `_` are
+  skipped. `youtube-schedule [--max-uploads N] [--dry-run]`
   dates them one a day at `publish_time` and uploads each as private with
   `publishAt`, within the daily quota. `youtube-status` shows state and quota.
   `youtube-import [--dry-run]` re-reads video-publisher's history.

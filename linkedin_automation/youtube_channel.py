@@ -30,6 +30,7 @@ at that time. An item with no date is dated first; an existing date never
 changes.
 """
 
+import functools
 import json
 import logging
 import os
@@ -78,11 +79,23 @@ TITLE_MAX = 100             # YouTube's limit; over it the item is skipped, neve
 DESCRIPTION_MAX = 4900      # video-publisher's margin under YouTube's 5000
 TAGS_MAX_TOTAL = 500        # YouTube's limit on the combined tag string
 
+#: The three per-profile layout keys (V3, D-029, DEC-069). Each default is
+#: the topfive layout, so a profile that sets none of them reads as before.
+DEFAULT_ITEM_PREFIX = "C"
+DEFAULT_VIDEO_SUFFIX = "-vertical.mp4"
+METADATA_SHORTS_SECTION = "shorts_section"   # ``### YouTube Shorts`` bullets
+METADATA_TITLE_SECTIONS = "title_sections"   # ``## Title``, ``## Description``, ``## Tags``
+METADATA_FORMATS = (METADATA_SHORTS_SECTION, METADATA_TITLE_SECTIONS)
+ITEM_PREFIX_RE = re.compile(r"[A-Za-z]+")
+
 ITEM_DIR_RE = re.compile(r"^C-(\d+)-.+$")
+#: Named skips. Every other folder whose name starts with ``_`` (``_posted``,
+#: ``_superseded``) is skipped the same way.
 SKIP_DIRS = {"_posted", "ready-to-publish"}
 SHORTS_HEADING_RE = re.compile(r"^#{1,6}\s+YouTube Shorts\b", re.IGNORECASE)
 HEADING_RE = re.compile(r"^#{1,6}\s")
 FIELD_RE = re.compile(r"^-\s+\*\*([^*]+?):\*\*\s*(.*)$")
+TITLE_SECTION_RE = re.compile(r"^##\s+(Title|Description|Tags)\s*$", re.IGNORECASE)
 
 #: video-publisher's item folders carry this suffix; ids here do not.
 VP_SUFFIX = "-yt"
@@ -99,7 +112,9 @@ CONFIG_KEYS = {"vp_brand", "vp_root", "channel_id", "content_root",
                "publish_time", "tz", "per_day", "quota", "category_id",
                # Y1's commenting settings (youtube_engage.parse_engagement
                # validates them). Publishing never reads this key.
-               "engagement"}
+               "engagement",
+               # V3 layout keys (DEC-069), all optional.
+               "item_prefix", "video_suffix", "metadata_format"}
 REQUIRED_KEYS = ("vp_brand", "vp_root", "channel_id", "content_root",
                  "publish_time", "tz")
 QUOTA_KEYS = {"daily_limit", "upload_units", "comment_units", "thumbnail_units"}
@@ -127,6 +142,9 @@ class YouTubeConfig:
     comment_units: int
     category_id: str
     thumbnail_units: int = DEFAULT_THUMBNAIL_UNITS
+    item_prefix: str = DEFAULT_ITEM_PREFIX
+    video_suffix: str = DEFAULT_VIDEO_SUFFIX
+    metadata_format: str = METADATA_SHORTS_SECTION
 
 
 def _positive_int(value, where):
@@ -171,6 +189,7 @@ def youtube_config(profile, profile_cfg=None) -> YouTubeConfig:
     if not isinstance(quota, dict) or set(quota) - QUOTA_KEYS:
         raise YouTubeRefused("%s.quota takes only %s"
                              % (where, ", ".join(sorted(QUOTA_KEYS))))
+    item_prefix, video_suffix, metadata_format = _layout(raw, where)
     return YouTubeConfig(
         profile=profile,
         vp_brand=raw["vp_brand"].strip(),
@@ -189,7 +208,29 @@ def youtube_config(profile, profile_cfg=None) -> YouTubeConfig:
         thumbnail_units=_positive_int(
             quota.get("thumbnail_units", DEFAULT_THUMBNAIL_UNITS),
             where + ".quota.thumbnail_units"),
+        item_prefix=item_prefix, video_suffix=video_suffix,
+        metadata_format=metadata_format,
     )
+
+
+def _layout(raw, where):
+    """``(item_prefix, video_suffix, metadata_format)`` from the overlay, each
+    defaulted to the topfive layout. A bad value refuses. The metadata format
+    is only ever what the config says, never detected from a file."""
+    prefix = raw.get("item_prefix", DEFAULT_ITEM_PREFIX)
+    if not isinstance(prefix, str) or not ITEM_PREFIX_RE.fullmatch(prefix):
+        raise YouTubeRefused("%s.item_prefix must be letters only, like \"C\" or "
+                             "\"TH\", got %r" % (where, prefix))
+    suffix = raw.get("video_suffix", DEFAULT_VIDEO_SUFFIX)
+    if (not isinstance(suffix, str) or suffix != suffix.strip()
+            or not suffix.lower().endswith(".mp4") or len(suffix) <= len(".mp4")):
+        raise YouTubeRefused("%s.video_suffix must end in .mp4, like \"-vertical.mp4\", "
+                             "got %r" % (where, suffix))
+    fmt = raw.get("metadata_format", METADATA_SHORTS_SECTION)
+    if fmt not in METADATA_FORMATS:
+        raise YouTubeRefused("%s.metadata_format must be one of %s, got %r"
+                             % (where, ", ".join(METADATA_FORMATS), fmt))
+    return prefix, suffix, fmt
 
 
 # ── files ───────────────────────────────────────────────────────────────────
@@ -322,27 +363,74 @@ def parse_youtube_shorts(text):
         elif current is not None:
             fields[current].append(line)
 
-    def paragraphs(raw):
-        paras, cur = [], []
-        for line in raw:
-            if line.strip():
-                cur.append(line.strip())
-            elif cur:
-                paras.append("\n".join(cur))
-                cur = []
-        if cur:
-            paras.append("\n".join(cur))
-        return paras
+    return _shorts_text(fields)
 
+
+def _paragraphs(raw):
+    """Lines with their indentation removed, grouped at blank lines."""
+    paras, cur = [], []
+    for line in raw:
+        if line.strip():
+            cur.append(line.strip())
+        elif cur:
+            paras.append("\n".join(cur))
+            cur = []
+    if cur:
+        paras.append("\n".join(cur))
+    return paras
+
+
+def _shorts_text(fields):
+    """``{"title", "description", "tags"}`` from each field's raw lines. Title:
+    one line. Description: paragraphs joined by one blank line. Tags: comma
+    separated. A field not in ``fields`` is None."""
     title = description = tags = None
     if "title" in fields:
         title = " ".join(" ".join(x.strip() for x in fields["title"]).split()) or None
     if "description" in fields:
-        description = "\n\n".join(paragraphs(fields["description"])) or None
+        description = "\n\n".join(_paragraphs(fields["description"])) or None
     if "tags" in fields:
         joined = " ".join(x.strip() for x in fields["tags"])
         tags = [t.strip() for t in joined.split(",") if t.strip()] or None
     return {"title": title, "description": description, "tags": tags}
+
+
+def parse_title_sections(text):
+    """``{"title", "description", "tags"}`` from the ``## Title``,
+    ``## Description`` and ``## Tags`` sections of ``youtube.md`` (V3, the
+    Teratoma House layout). Each body runs to the next heading of any level.
+    Everything else in the file is ignored. The text rules are
+    :func:`parse_youtube_shorts`'s. A section the file lacks is None. A section
+    given twice raises ``ValueError``, because which one is meant is a guess."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    fields = {}
+    current = None
+    for line in lines:
+        m = TITLE_SECTION_RE.match(line)
+        if m:
+            current = m.group(1).lower()
+            if current in fields:
+                raise ValueError("youtube.md has ## %s twice" % m.group(1))
+            fields[current] = []
+        elif HEADING_RE.match(line):
+            current = None
+        elif current is not None:
+            fields[current].append(line)
+    return _shorts_text(fields)
+
+
+def metadata_fields(text, metadata_format=METADATA_SHORTS_SECTION):
+    """``(fields, None)`` or ``(None, reason)`` for a ``youtube.md``, read in
+    the configured format and held to :func:`shorts_fields`' limits."""
+    if metadata_format == METADATA_SHORTS_SECTION:
+        return shorts_fields(parse_youtube_shorts(text))
+    if metadata_format == METADATA_TITLE_SECTIONS:
+        try:
+            parsed = parse_title_sections(text)
+        except ValueError as exc:
+            return None, str(exc)
+        return shorts_fields(parsed, missing="youtube.md has no ## %s section")
+    raise YouTubeRefused("unknown metadata_format %r" % (metadata_format,))
 
 
 def youtube_tags_length(tags):
@@ -351,13 +439,14 @@ def youtube_tags_length(tags):
     return sum(len(t) + (2 if " " in t else 0) for t in tags) + max(len(tags) - 1, 0)
 
 
-def shorts_fields(shorts):
-    """``(fields, None)`` or ``(None, reason)``. Never cuts: over a limit skips."""
+def shorts_fields(shorts, missing="YouTube Shorts section has no %s"):
+    """``(fields, None)`` or ``(None, reason)``. Never cuts: over a limit skips.
+    ``missing`` words the reason for an absent field (``%s`` is its name)."""
     if shorts is None:
         return None, "no YouTube Shorts section in youtube.md"
     for key in ("title", "description", "tags"):
         if not shorts.get(key):
-            return None, "YouTube Shorts section has no %s" % key.capitalize()
+            return None, missing % key.capitalize()
     title = strip_angle_brackets(shorts["title"]).strip()
     description = strip_angle_brackets(shorts["description"]).strip()
     tags = [t for t in (strip_angle_brackets(t).strip() for t in shorts["tags"]) if t]
@@ -371,68 +460,85 @@ def shorts_fields(shorts):
     return {"title": title, "description": description, "tags": tags}, None
 
 
-def find_vertical_mp4(folder):
-    """``(path, None)`` for the folder's one vertical mp4, else ``(None, reason)``.
-    A horizontal mp4 is never used."""
-    exact = os.path.join(folder, os.path.basename(folder) + "-vertical.mp4")
+def find_vertical_mp4(folder, suffix=DEFAULT_VIDEO_SUFFIX):
+    """``(path, None)`` for the folder's one mp4 ending in ``suffix``, else
+    ``(None, reason)``. A horizontal mp4 is never used."""
+    exact = os.path.join(folder, os.path.basename(folder) + suffix)
     if os.path.isfile(exact):
         return exact, None
     found = sorted(n for n in os.listdir(folder)
-                   if n.lower().endswith("-vertical.mp4")
+                   if n.lower().endswith(suffix.lower())
                    and os.path.isfile(os.path.join(folder, n)))
     if len(found) == 1:
         return os.path.join(folder, found[0]), None
     if not found:
-        return None, "no -vertical.mp4"
-    return None, "%d -vertical.mp4 files, expected one" % len(found)
+        return None, "no %s" % suffix
+    return None, "%d %s files, expected one" % (len(found), suffix)
 
 
-def c_number(name):
-    m = ITEM_DIR_RE.match(name or "")
+@functools.lru_cache(maxsize=None)
+def item_dir_re(prefix=DEFAULT_ITEM_PREFIX):
+    """``^<prefix>-(digits)-.+$``: an item folder name in a profile's layout."""
+    if prefix == DEFAULT_ITEM_PREFIX:
+        return ITEM_DIR_RE
+    return re.compile(r"^%s-(\d+)-.+$" % re.escape(prefix))
+
+
+def c_number(name, prefix=DEFAULT_ITEM_PREFIX):
+    """The number of a ``<prefix>-NNN-<slug>`` name, or None. Called the
+    C-number after the topfive prefix; the record field keeps that name."""
+    m = item_dir_re(prefix).match(name or "")
     return int(m.group(1)) if m else None
 
 
-def _order_key(item_id, rec=None):
-    n = c_number(item_id)
+def _order_key(item_id, rec=None, prefix=DEFAULT_ITEM_PREFIX):
+    n = c_number(item_id, prefix)
     return (n if n is not None else float("inf"), item_id)
 
 
-def find_item_folders(root):
-    """``(C-NNN folder names in C-number order, skip messages)``.
-    ``_posted/`` and ``ready-to-publish/`` are skipped, as is any other name."""
+def _prefix_key(prefix):
+    return lambda item_id: _order_key(item_id, prefix=prefix)
+
+
+def find_item_folders(root, prefix=DEFAULT_ITEM_PREFIX):
+    """``(<prefix>-NNN folder names in number order, skip messages)``.
+    ``ready-to-publish/`` and every folder starting with ``_`` (``_posted/``,
+    ``_superseded/``) are skipped as not video folders. Any other name that is
+    not ``<prefix>-NNN-<slug>`` is skipped with its own message."""
     if not os.path.isdir(root):
         raise YouTubeRefused("content_root %s is not a folder" % root)
     names, messages = [], []
     for name in sorted(os.listdir(root)):
         if not os.path.isdir(os.path.join(root, name)):
             continue
-        if name in SKIP_DIRS:
+        if name in SKIP_DIRS or name.startswith("_"):
             messages.append("SKIP (not a video folder): %s/" % name)
-        elif c_number(name) is None:
-            messages.append("SKIP (not a C-NNN-<slug> folder): %s/" % name)
+        elif c_number(name, prefix) is None:
+            messages.append("SKIP (not a %s-NNN-<slug> folder): %s/" % (prefix, name))
         else:
             names.append(name)
-    return sorted(names, key=_order_key), messages
+    return sorted(names, key=_prefix_key(prefix)), messages
 
 
-def read_item_folder(folder):
+def read_item_folder(folder, video_suffix=DEFAULT_VIDEO_SUFFIX,
+                     metadata_format=METADATA_SHORTS_SECTION):
     """``(fields with media_path, None)`` or ``(None, reason)`` for one folder."""
     md = os.path.join(folder, "youtube.md")
     if not os.path.isfile(md):
         return None, "no youtube.md"
     with open(md, encoding="utf-8-sig", errors="replace") as f:
-        fields, reason = shorts_fields(parse_youtube_shorts(f.read()))
+        fields, reason = metadata_fields(f.read(), metadata_format)
     if reason:
         return None, reason
-    mp4, reason = find_vertical_mp4(folder)
+    mp4, reason = find_vertical_mp4(folder, video_suffix)
     if reason:
         return None, reason
     fields["media_path"] = mp4
     return fields, None
 
 
-def new_record(item_id, now, **fields):
-    rec = {"id": item_id, "c_number": c_number(item_id), "status": QUEUED,
+def new_record(item_id, now, prefix=DEFAULT_ITEM_PREFIX, **fields):
+    rec = {"id": item_id, "c_number": c_number(item_id, prefix), "status": QUEUED,
            "publish_at": None, "video_id": None, "title": None,
            "description": None, "tags": [], "media_path": None,
            "source_folder": None, "origin": "intake", "vp_folder": None,
@@ -473,7 +579,7 @@ def assign_dates(state, cfg, now):
              if r.get("publish_at")}
     todo = sorted((i for i, r in state["items"].items()
                    if r.get("status") == QUEUED and not r.get("publish_at")),
-                  key=_order_key)
+                  key=_prefix_key(cfg.item_prefix))
     assigned = []
     day = now.astimezone(cfg.tz).date()
 
@@ -692,7 +798,8 @@ def imported_record(cfg, name, entry, now):
               "vp_folder": "%s/%s/%s" % (cfg.vp_brand, (entry.get("subs") or ["?"])[-1], name),
               "publish_at": utc_z(publish_at) if publish_at else None}
     source = None
-    if c_number(item_id) is not None:
+    numbered = c_number(item_id, cfg.item_prefix) is not None
+    if numbered:
         for cand in (os.path.join(cfg.content_root, item_id),
                      os.path.join(cfg.content_root, "_posted", item_id)):
             if os.path.isdir(cand):
@@ -702,8 +809,8 @@ def imported_record(cfg, name, entry, now):
         source = os.path.join(cfg.vp_root, "content", cfg.vp_brand,
                               (entry.get("subs") or ["queue"])[-1], name)
     fields["source_folder"] = source
-    if source and os.path.isdir(source) and c_number(item_id) is not None:
-        mp4, _reason = find_vertical_mp4(source)
+    if source and os.path.isdir(source) and numbered:
+        mp4, _reason = find_vertical_mp4(source, cfg.video_suffix)
         fields["media_path"] = mp4
     status = row.get("status") if row else None
     if status == "published":
@@ -722,7 +829,7 @@ def imported_record(cfg, name, entry, now):
         fields.update(status=FAILED, error="video-publisher recorded it failed")
     else:
         return None, "no publish_log row and not in queue/"
-    return new_record(item_id, now, **fields), None
+    return new_record(item_id, now, prefix=cfg.item_prefix, **fields), None
 
 
 _COMPARED = ("status", "publish_at", "video_id", "uploaded_at", "vp_folder",
@@ -781,7 +888,7 @@ def plan_import(cfg, state, now):
     with ``plan`` = ``[(action, item_id, record, note)]`` and ``unmatched``."""
     vp = read_vp(cfg)
     plan, unmatched = [], []
-    for name in sorted(vp, key=lambda n: _order_key(n)):
+    for name in sorted(vp, key=_prefix_key(cfg.item_prefix)):
         new, reason = imported_record(cfg, name, vp[name], now)
         if new is None:
             unmatched.append((name, reason))
@@ -792,12 +899,12 @@ def plan_import(cfg, state, now):
     return {"plan": plan, "unmatched": unmatched, "counts": dict(counts)}
 
 
-def vp_blockers(vp):
+def vp_blockers(vp, prefix=DEFAULT_ITEM_PREFIX):
     """What in video-publisher must settle before cutover: an item whose latest
     publish_log row is ``attempting``, or a queued item with no ``publish_at``
     that it has not already published (so it still means to upload it)."""
     out = []
-    for name in sorted(vp, key=_order_key):
+    for name in sorted(vp, key=_prefix_key(prefix)):
         entry = vp[name]
         row = entry.get("row") or {}
         if row.get("status") == "attempting":
@@ -873,14 +980,15 @@ def _run(profile, name, dry_run, out, body):
 # ── youtube-intake ──────────────────────────────────────────────────────────
 
 def intake(profile, dry_run=False, now=None, out=print):
-    """Add every new ``C-NNN-<slug>/`` folder under ``content_root`` to the
-    state as queued, with its ``youtube.md`` Shorts text verbatim. A folder
+    """Add every new ``<item_prefix>-NNN-<slug>/`` folder under ``content_root``
+    to the state as queued, with its ``youtube.md`` text verbatim, read in the
+    profile's ``metadata_format``. A folder
     already known (by name) is left alone. Content folders are only read."""
     now = now or datetime.now(timezone.utc)
 
     def body(cfg, summary, tag, refuse):
         state = load_state(profile)
-        names, messages = find_item_folders(cfg.content_root)
+        names, messages = find_item_folders(cfg.content_root, cfg.item_prefix)
         for m in messages:
             out("  " + m)
         new, known, skipped = [], [], []
@@ -890,12 +998,13 @@ def intake(profile, dry_run=False, now=None, out=print):
                 out("  KNOWN (%s): %s" % (display_state(state["items"][item_id], now), item_id))
                 continue
             folder = os.path.join(cfg.content_root, item_id)
-            fields, reason = read_item_folder(folder)
+            fields, reason = read_item_folder(folder, cfg.video_suffix, cfg.metadata_format)
             if reason:
                 skipped.append((item_id, reason))
                 out("  SKIP (%s): %s" % (reason, item_id))
                 continue
-            state["items"][item_id] = new_record(item_id, now, source_folder=folder, **fields)
+            state["items"][item_id] = new_record(item_id, now, prefix=cfg.item_prefix,
+                                                 source_folder=folder, **fields)
             new.append(item_id)
             out("  %s: %s  %r" % ("WOULD ADD" if dry_run else "ADDED", item_id, fields["title"]))
         if new and not dry_run:
@@ -962,7 +1071,7 @@ def cutover(profile, dry_run=False, now=None, out=print):
         problem = token_problem(profile)
         if problem:
             blockers.append(problem)
-        blockers.extend(vp_blockers(read_vp(cfg)))
+        blockers.extend(vp_blockers(read_vp(cfg), cfg.item_prefix))
         for b in blockers:
             out("  BLOCKER: %s" % b)
         summary["blockers"] = blockers
@@ -1041,7 +1150,8 @@ def schedule(profile, max_uploads=None, dry_run=False, now=None, api=None, out=p
             save_state(profile, state)
         dated = sorted((i for i, r in state["items"].items()
                         if r.get("status") == QUEUED and r.get("publish_at")),
-                       key=lambda i: (state["items"][i]["publish_at"], _order_key(i)))
+                       key=lambda i: (state["items"][i]["publish_at"],
+                                      _order_key(i, prefix=cfg.item_prefix)))
         summary.update(dated=assigned, uploaded=[], skipped=[], stopped=None, remaining=[])
         ledger = load_quota(profile)
         day = quota_day(now)
@@ -1295,7 +1405,7 @@ def thumbnail_candidates(state, cfg):
     """Items with a video id and a poster whose thumbnail is not ``set``, in
     C-number order: ``[(item_id, poster)]``."""
     out = []
-    for item_id in sorted(state["items"], key=_order_key):
+    for item_id in sorted(state["items"], key=_prefix_key(cfg.item_prefix)):
         rec = state["items"][item_id]
         if not rec.get("video_id") or rec.get("thumbnail") == THUMB_SET:
             continue
@@ -1386,7 +1496,7 @@ def status(profile, now=None, out=print):
         day = quota_day(now)
         items = sorted(state["items"].values(),
                        key=lambda r: (r.get("publish_at") or r.get("uploaded_at") or "~",
-                                      _order_key(r["id"])))
+                                      _order_key(r["id"], prefix=cfg.item_prefix)))
         for r in items:
             out("  %-11s %-48s %-12s %s  thumbnail %s%s" % (
                 display_state(r, now), r["id"], r.get("video_id") or "-",
