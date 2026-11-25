@@ -724,3 +724,21 @@ def test_a_schedule_button_job_that_read_rows_before_a_topup_sends_none_twice(
     assert set(st.rows) == set(keys)
     assert [st.rows[k]["status"] for k in keys] == [cp.SCHEDULED] * 2 + [
         cp.PENDING] * 4
+
+
+def test_an_overdue_redate_uses_the_overlays_per_day(world):
+    # D-028 T1: the automatic re-date reads the overlay's per_day (2), so an
+    # overdue queue lands at 2 a day in morning and evening.
+    world.overlay["cadence"] = dict(CADENCE, per_day=2)
+    keys = world.queue(five_a_day(6))
+    now = datetime(2036, 11, 3, 21, 30, tzinfo=timezone.utc)   # 13:30 local
+    world.free = 4
+    code, s = world.run(now=now)
+    assert code == 0 and s["redated"] == 6
+    st = world.state()
+    assert set(st.rows) == set(keys)
+    slots = [(st.rows[k]["row"]["date"], st.rows[k]["row"]["time_window"])
+             for k in keys]
+    assert slots == [("2036-11-03", "evening"), ("2036-11-04", "morning"),
+                     ("2036-11-04", "evening"), ("2036-11-05", "morning"),
+                     ("2036-11-05", "evening"), ("2036-11-06", "morning")]
