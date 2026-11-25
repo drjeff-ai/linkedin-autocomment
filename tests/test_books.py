@@ -769,3 +769,33 @@ def test_cli_dispatches_books_commands(env, monkeypatch, capsys):
                                       "--platform", PLATFORM, "--book", "nope",
                                       "--dry-run"])
     assert rsp.main() == books.EXIT_REFUSED
+
+
+def test_add_book_redates_at_the_overlays_per_day_not_a_constant(env):
+    # D-028 T1: Tinderbox drops to 2 a day. add-book must take the count and
+    # its windows from the overlay at run time: the existing rows and the new
+    # book both land at 2 a day, in morning and evening only.
+    env.overlay["cadence"] = {"per_day": 2, "quiet_days": [],
+                              "windows": {"2": ["morning", "evening"]}}
+    code, _s1 = env.add(UN)
+    assert code == 0
+    before = _pending_keys(env.state())
+    code, s2 = env.add(LU)
+    assert code == 0 and len(s2["queued"]) == 11
+    state = env.state()
+    after = _pending_keys(state)
+    assert [k for k in after if k in before] == before
+    series = "".join("U" if k in before else "L" for k in after)
+    assert series == "ULULUL" + "L" * 8
+    slots = [(state.rows[k]["row"]["date"], state.rows[k]["row"]["time_window"])
+             for k in after]
+    # 14:00 PT on 11-22: morning has begun, so the first slot is that evening.
+    assert slots[:5] == [("2026-11-22", "evening"), ("2026-11-23", "morning"),
+                         ("2026-11-23", "evening"), ("2026-11-24", "morning"),
+                         ("2026-11-24", "evening")]
+    per_day = {}
+    for d, w in slots:
+        per_day.setdefault(d, []).append(w)
+    assert all(len(ws) <= 2 and set(ws) <= {"morning", "evening"}
+               for ws in per_day.values())
+    assert len(set(slots)) == len(slots)
