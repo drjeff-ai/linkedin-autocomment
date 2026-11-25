@@ -34,6 +34,7 @@ IMPORT_TO_DISTRIBUTION = {
     "googleapiclient": "google-api-python-client",
     "google_auth_oauthlib": "google-auth-oauthlib",
     "yaml": "pyyaml",
+    "PIL": "pillow",
 }
 
 # Shipped with Python, so never declared.
