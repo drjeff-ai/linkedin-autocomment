@@ -43,6 +43,14 @@ and the channel's publisher lock; none is run by any task or drain:
     youtube-thumbnails --profile P [--max N] [--dry-run]
                       poster thumbnails on uploaded videos (after cutover)
 
+Instagram through Buffer (I1, linkedin_automation/instagram_channel.py):
+
+    instagram-from-youtube --profile P [--dry-run]
+                      propose one Reel row per YouTube item with a vertical mp4
+                      and no Instagram row, into data/P/instagram/proposed_reels.csv.
+                      Never queues; fill date and time_window, then queue it
+                      with --platform instagram.
+
 YouTube commenting (Y1, linkedin_automation/youtube_engage.py, DEC-061). Same
 gate and lock. Nothing here is on a schedule, and engage posts at most one
 approved comment per run:
@@ -81,6 +89,7 @@ from linkedin_automation import topup  # noqa: E402
 from linkedin_automation import books  # noqa: E402
 from linkedin_automation import youtube_channel as yt  # noqa: E402
 from linkedin_automation import youtube_engage as ye  # noqa: E402
+from linkedin_automation import instagram_channel as ig  # noqa: E402
 
 load_dotenv()
 
@@ -189,7 +198,7 @@ def main():
         "books", "add-book", "recheck-holds", "release-hold", "hold", "holds",
         "youtube-intake", "youtube-schedule", "youtube-status", "youtube-import",
         "youtube-cutover", "youtube-thumbnails", "youtube-discover", "youtube-watch", "youtube-find",
-        "youtube-draft", "youtube-engage"])
+        "youtube-draft", "youtube-engage", "instagram-from-youtube"])
     ap.add_argument("--csv", help="the content calendar (schedule pass)")
     ap.add_argument("--channel-id",
                     help="Buffer channel id. Defaults to the resolved "
@@ -258,6 +267,12 @@ def main():
     if args.pass_name in ("books", "add-book", "recheck-holds", "release-hold",
                           "hold", "holds"):
         return _books_command(ap, args)
+
+    if args.pass_name == "instagram-from-youtube":
+        if not args.profile:
+            ap.error("instagram-from-youtube needs --profile")
+        code, _s = ig.from_youtube(args.profile, dry_run=args.dry_run)
+        return code
 
     if args.pass_name.startswith("youtube-"):
         if not args.profile:

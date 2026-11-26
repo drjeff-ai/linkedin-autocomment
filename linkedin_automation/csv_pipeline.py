@@ -240,6 +240,13 @@ class IdentityRefused(RuntimeError):
     """
 
 
+class PreflightRefused(IdentityRefused):
+    """The channel's own ``preflight`` refused the pass (Instagram: another app
+    still means to publish there, or the overlay has no cadence). A subclass
+    of :class:`IdentityRefused`, so every caller that stops on a wrong account
+    stops on this too, with nothing created."""
+
+
 class BoardLookupUnavailable(IdentityRefused):
     """A board_lookup channel's boards could not be read or were not given.
 
@@ -359,6 +366,23 @@ def validate_row(row, now=None, tz=None, platform=None):
     if not image and channel.image_required:
         problems.append("%s needs an image: every pin is an image."
                         % channel.label)
+    video = (str(row.get(channel.video_column) or "").strip()
+             if channel.video_column else "")
+    if channel.media_required and not image and not video:
+        problems.append("%s needs an image or a video (%s)."
+                        % (channel.label, channel.video_column))
+    if image and video:
+        problems.append("%s posts one image or one video; this row has both."
+                        % channel.label)
+    if video:
+        try:
+            image_host.read_video(video, channel.video_max_bytes)
+        except image_host.ImageHostError as exc:
+            problems.append(str(exc))
+    if channel.link_placement == channels.REFUSED and row_link(row):
+        problems.append("%s cannot carry a link: a caption link is not "
+                        "clickable. Remove first_comment_link/link."
+                        % channel.label)
     if image:
         if not os.path.isfile(image):
             problems.append("image_path does not exist: %s" % image)
@@ -411,6 +435,10 @@ def validate_row(row, now=None, tz=None, platform=None):
     return problems
 
 
+#: One hashtag: ``#`` not preceded by a word character, then word characters.
+HASHTAG_RE = re.compile(r"(?<!\w)#\w+")
+
+
 def text_limit_problem(body, platform=None):
     """Why a composed body is over its channel's text limit, or None.
 
@@ -420,6 +448,12 @@ def text_limit_problem(body, platform=None):
     """
     channel = channels.resolve((platform or "").lower())
     limit = channel.text_limit
+    if channel.max_hashtags is not None:
+        tags = len(HASHTAG_RE.findall(body))
+        if tags > channel.max_hashtags:
+            return ("too many hashtags for %s: %d against a %d limit. This is "
+                    "never trimmed automatically."
+                    % (channel.label, tags, channel.max_hashtags))
     if limit is None:
         return None
     used = counted_length(body, limit.url_cost)
@@ -1363,7 +1397,7 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
                   upload=None, generate=None, profile_name=None, now=None,
                   max_new=None, slot_limit=None, platform=None,
                   identity_slug=None, fetch_channel=None,
-                  allow_production=False, fetch_boards=None):
+                  allow_production=False, fetch_boards=None, upload_video=None):
     """Validate and create every post that does not already have one.
 
     On a ``board_lookup`` channel the boards are read once per pass, after the
@@ -1399,6 +1433,14 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
     # LinkedIn is deliberately not gated here - see .dev/BACKLOG.md. Its
     # declaration's identity_check is UNGATED, so this branch simply does not
     # run and its schedule path is byte-identical.
+    # A channel's own preflight runs first, once per pass: it reads only local
+    # files, so a refusal costs no Buffer call and sends nothing.
+    if channel.preflight is not None:
+        refusal = channel.preflight(profile_name)
+        if refusal:
+            raise PreflightRefused("refusing to schedule on %s: %s. Nothing was "
+                                   "created." % (platform, refusal))
+
     if channel.identity_check == channels.BUFFER_HANDLE:
         # PRODUCTION GATE, before verify_identity - which itself is a live
         # Buffer call. verify_identity answers "is this the right channel";
@@ -1526,6 +1568,11 @@ def schedule_pass(rows, channel_id, state, rng=None, key=None, session=None,
             image = row_image_path(row)
             if image:
                 image_url = (upload or image_host.upload_image)(image)
+            video = (str(row.get(channel.video_column) or "").strip()
+                     if channel.video_column else "")
+            if video:
+                extras["video_url"] = (upload_video or image_host.upload_video)(
+                    video, channel.video_max_bytes)
 
             when = bc.due_at(row.get("date"), row.get("time_window"),
                              rng=rng, tz=tz, now=now)

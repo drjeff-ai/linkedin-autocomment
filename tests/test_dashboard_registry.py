@@ -68,14 +68,16 @@ def _page_channel_json(page):
 
 # --- the pills ---------------------------------------------------------------
 
-def test_the_real_registry_renders_exactly_linkedin_x_and_pinterest(client):
+def test_the_real_registry_renders_linkedin_x_pinterest_and_instagram(client):
     assert _pills(_page(client)) == [("linkedin", "LinkedIn"), ("x", "X"),
-                                     ("pinterest", "Pinterest")]
+                                     ("pinterest", "Pinterest"),
+                                     ("instagram", "Instagram")]
 
 
 def test_a_third_channel_appears_as_a_pill_in_registry_order(client, zz):
     assert _pills(_page(client)) == [("linkedin", "LinkedIn"), ("x", "X"),
                                      ("pinterest", "Pinterest"),
+                                     ("instagram", "Instagram"),
                                      ("zz", "Test Channel")]
 
 
@@ -87,6 +89,8 @@ def test_the_page_channel_list_comes_from_the_registry(client, zz):
         {"id": "x", "label": "X", "config_layout": "overlay", "extra_columns": []},
         {"id": "pinterest", "label": "Pinterest", "config_layout": "overlay",
          "extra_columns": ["title", "alt_text", "board"]},
+        {"id": "instagram", "label": "Instagram", "config_layout": "overlay",
+         "extra_columns": ["video_path"]},
         {"id": "zz", "label": "Test Channel", "config_layout": "overlay",
          "extra_columns": ["title"]},
     ]

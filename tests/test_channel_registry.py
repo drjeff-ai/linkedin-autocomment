@@ -245,8 +245,12 @@ def test_no_module_but_platforms_defines_a_platform_string():
 
 # ─── The registry ───────────────────────────────────────────────────────────
 
-def test_the_registry_declares_exactly_linkedin_x_and_pinterest():
-    assert set(channels.REGISTRY) == set(platforms.ALL) == {"linkedin", "x", "pinterest"}
+def test_the_registry_declares_exactly_linkedin_x_pinterest_and_instagram():
+    # Instagram (I1) is a Buffer channel but not in platforms.ALL, which is the
+    # Buffer channels plus engagement stores that predate it; nothing reads ALL
+    # to find the channels.
+    assert set(platforms.ALL) == {"linkedin", "x", "pinterest"}
+    assert set(channels.REGISTRY) == set(platforms.ALL) | {"instagram"}
     for cid, channel in channels.REGISTRY.items():
         assert channel.id == cid
 
@@ -394,4 +398,4 @@ def test_req_platform_refuses_a_voice_that_is_not_a_channel(client, monkeypatch)
                         platform_policy.PLATFORMS["x"])
     res = client.get("/api/scheduled/p/settings?platform=voiceonly")
     assert res.status_code == 400
-    assert "unknown platform 'voiceonly' - known: linkedin, pinterest, x" in res.get_json()["error"]
+    assert "unknown platform 'voiceonly' - known: instagram, linkedin, pinterest, x" in res.get_json()["error"]
