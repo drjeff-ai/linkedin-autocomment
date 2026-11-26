@@ -35,10 +35,10 @@ Source of the YouTube `PlatformPolicy` (D-027 Y1). The coder copies each field b
   - A fragment is fine when it lands
 - tone_balance: "TONE BALANCE:\n- 50% specific reaction to one moment or claim\n- 30% a real question the creator could answer in a reply\n- 20% a respectful different take or a first-hand detail"
 - opening_styles:
-  - Name the moment: "the part where the eval scores flipped"
+  - Name the moment: "eval scores flipping halfway through"
   - A real question: "did this hold up on longer contexts"
   - One detail they got right: "the latency comparison is the useful bit here"
-  - A first-hand number: "we saw the same drop past 32k tokens"
+  - A first-hand number: "i saw the same drop past 32k tokens"
   - Gentle pushback: "fair, though this depends a lot on the dataset"
 - overuse_guidance: "Avoid overusing:\n- Opening with praise\n- Ending every comment with a question\n- Restating the video's title"
 - craft_rules:
@@ -51,7 +51,7 @@ Source of the YouTube `PlatformPolicy` (D-027 Y1). The coder copies each field b
   7. No links, no hashtags, no @-mentions, no calls to subscribe or watch anything
   8. No summarising the video back to the creator
 - good_question_endings: "\"did this hold on bigger models\"\n\"what did the eval set look like\"\n\"how long did the fine-tune take\"\n\"would this work without the GPU\""
-- short_examples: "\"the part about eval drift is the bit nobody covers\"\n\"did this hold on longer contexts? we saw it fall off past 32k\"\n\"fair, though the benchmark choice is doing a lot of work here\"\n\"the side by side at 4:10 made it click\"\n\"how long did the fine-tune take on that setup\""
+- short_examples: "\"eval drift is the bit nobody covers\"\n\"did this hold on longer contexts? i saw it fall off past 32k\"\n\"fair, though the benchmark choice is doing a lot of work here\"\n\"the side by side at 4:10 made it click\"\n\"how long did the fine-tune take on that setup\""
 - extra_rules: "\n\nTHIS IS A YOUTUBE COMMENT UNDER SOMEONE ELSE'S VIDEO:\n- You are a viewer, not a creator. Nothing in the comment may promote anything.\n- No greeting, no sign-off, no 'great video' opener.\n- Never claim you watched a part the input does not describe. If only the title and description are known, react to those.\n- One thought. Stop when it lands.\n- Emoji only if the video itself is playful, and never more than one."
 
 ## own-video replies (replies to comments on our own Shorts)
