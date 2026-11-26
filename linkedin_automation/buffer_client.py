@@ -192,18 +192,26 @@ def _image_asset(image_url, alt_text=None):
 
 
 def build_post_input(channel_id, text, image_url, due_at_iso, metadata=None,
-                     alt_text=None):
+                     alt_text=None, video_url=None):
     """The createPost input, in the shape the live schema actually accepts.
 
     ``metadata`` is the channel's Buffer metadata (Pinterest's board, title and
     link), added only when given, so a channel that declares none sends exactly
     the keys it always has.
+
+    ``video_url`` (I1, Instagram Reels) is one ``{"video": {"url"}}`` asset,
+    Buffer's ``VideoAssetInput``. It is never combined with an image, and no
+    ``thumbnailUrl`` is sent ("the API rejects video assets that set this
+    field"). Without it the assets are exactly what they were.
     """
+    if video_url and image_url:
+        raise BufferError("a post carries an image or a video, not both")
     payload = {
         "channelId": channel_id,
         "text": text,
         # Required and non-null even when there is no image.
-        "assets": [_image_asset(image_url, alt_text)] if image_url else [],
+        "assets": ([{"video": {"url": video_url}}] if video_url
+                   else [_image_asset(image_url, alt_text)] if image_url else []),
         "mode": "customScheduled",
         "schedulingType": "automatic",
         "needsApproval": False,
@@ -553,12 +561,15 @@ def scheduled_slots(channel_id, key=None, session=None, max_age=None):
 
 
 def create_post(channel_id, text, image_url, due_at_iso, key=None, session=None,
-                metadata=None, alt_text=None):
+                metadata=None, alt_text=None, video_url=None):
     """Schedule one post. Returns the created post dict, or raises."""
     payload = build_post_input(channel_id, text, image_url, due_at_iso,
-                               metadata=metadata, alt_text=alt_text)
+                               metadata=metadata, alt_text=alt_text,
+                               video_url=video_url)
     logger.info("Buffer createPost: dueAt=%s image=%s chars=%d",
                 due_at_iso, bool(image_url), len(text))
+    if video_url:
+        logger.info("  with one video asset")
     body = gql(M_CREATE_POST, {"input": payload}, key=key,
                label="createPost", session=session)
 

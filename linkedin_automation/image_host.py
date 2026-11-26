@@ -238,3 +238,175 @@ def upload_image(path: str, env=None, verify: bool = True) -> str:
         size = verify_public(url, expect_type=ctype)
         logger.info("Verified public: %s (%d bytes)", url, size)
     return url
+
+
+# ── video (I1, D-030) ───────────────────────────────────────────────────────
+#
+# Instagram Reels go through Buffer the same way images do: a public URL Buffer
+# reads at createPost time. The checks mirror the image ones. The container is
+# read from its own boxes, not the extension, and the upload is not done until
+# the public URL has been fetched back anonymously and found to be the same mp4.
+
+VIDEO_CONTENT_TYPE = "video/mp4"
+#: The box path to a track's header and its handler.
+_CONTAINER_BOXES = (b"moov", b"trak", b"mdia")
+
+
+class NotAVideo(ImageHostError):
+    """Not an mp4 this code can read the picture size of."""
+
+
+class VideoTooLarge(ImageHostError):
+    pass
+
+
+class NotVertical(ImageHostError):
+    pass
+
+
+def _boxes(f, start, end):
+    """``(type, payload_start, box_end)`` for each ISO-BMFF box in ``[start, end)``."""
+    pos = start
+    while pos + 8 <= end:
+        f.seek(pos)
+        head = f.read(8)
+        if len(head) < 8:
+            return
+        size = int.from_bytes(head[:4], "big")
+        kind = head[4:8]
+        payload = pos + 8
+        if size == 1:
+            big = f.read(8)
+            if len(big) < 8:
+                return
+            size = int.from_bytes(big, "big")
+            payload = pos + 16
+        elif size == 0:
+            size = end - pos
+        if size < payload - pos or pos + size > end:
+            raise NotAVideo("malformed mp4 box %r at byte %d" % (kind, pos))
+        yield kind, payload, pos + size
+        pos += size
+
+
+def _video_track_size(f, trak_start, trak_end):
+    """``(width, height)`` from a ``trak`` whose handler is ``vide``, else None."""
+    size = None
+    handler = None
+    for kind, start, end in _boxes(f, trak_start, trak_end):
+        if kind == b"tkhd":
+            f.seek(start)
+            body = f.read(end - start)
+            # width and height are the last 8 bytes, 16.16 fixed point.
+            if len(body) < 84:
+                raise NotAVideo("mp4 track header is %d bytes" % len(body))
+            size = (int.from_bytes(body[-8:-4], "big") >> 16,
+                    int.from_bytes(body[-4:], "big") >> 16)
+        elif kind == b"mdia":
+            for sub, s2, e2 in _boxes(f, start, end):
+                if sub == b"hdlr":
+                    f.seek(s2 + 8)       # version/flags, pre_defined
+                    handler = f.read(4)
+    return size if handler == b"vide" else None
+
+
+def mp4_dimensions(path):
+    """``(width, height)`` of the first video track, from the file's own
+    ``ftyp``/``moov``/``trak``/``tkhd`` boxes. Raises :class:`NotAVideo`.
+
+    The track header's size is the picture before any rotation matrix, which
+    is what a vertical render writes."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        total = f.tell()
+        first = next(_boxes(f, 0, total), None)
+        if first is None or first[0] != b"ftyp":
+            raise NotAVideo("%s is not an mp4: it does not start with an ftyp box"
+                            % path)
+        for kind, start, end in _boxes(f, 0, total):
+            if kind != b"moov":
+                continue
+            for sub, s2, e2 in _boxes(f, start, end):
+                if sub == b"trak":
+                    found = _video_track_size(f, s2, e2)
+                    if found:
+                        return found
+        raise NotAVideo("%s has no video track this code can read" % path)
+
+
+def read_video(path: str, max_bytes: int = None):
+    """``(size_bytes, width, height)`` for a vertical mp4, or raise.
+
+    Refused: a missing or empty file, one over ``max_bytes``, one that is not
+    an mp4 with a readable video track, and one that is not taller than wide."""
+    if not os.path.isfile(path):
+        raise ImageNotFound("video file does not exist: %s" % path)
+    if not path.lower().endswith(".mp4"):
+        raise NotAVideo("%s is not an .mp4" % path)
+    size = os.path.getsize(path)
+    if size == 0:
+        raise NotAVideo("video file is empty: %s" % path)
+    if max_bytes is not None and size > max_bytes:
+        raise VideoTooLarge("%s is %d bytes, over the %d-byte limit. It is never "
+                            "re-encoded automatically." % (path, size, max_bytes))
+    try:
+        width, height = mp4_dimensions(path)
+    except OSError as exc:
+        raise ImageHostError("could not read %s: %s" % (path, exc)) from exc
+    if height <= width:
+        raise NotVertical("%s is %dx%d; a Reel needs a vertical video"
+                          % (path, width, height))
+    return size, width, height
+
+
+def verify_public_video(url: str, expect_bytes: int, timeout: int = 30) -> int:
+    """Fetch ``url`` with NO credentials and confirm the same mp4 comes back:
+    HTTP 200, an ``ftyp`` box first, and ``Content-Length`` equal to the file's
+    size. Streams, so a large video is not downloaded. Returns the size."""
+    try:
+        resp = requests.get(url, timeout=timeout, stream=True,
+                            headers={"User-Agent": "linkedin-automation/1.0"})
+    except requests.RequestException as exc:
+        raise NotPublic("could not fetch %s anonymously: %s" % (url, exc)) from exc
+    try:
+        if resp.status_code != 200:
+            raise NotPublic(
+                "uploaded, but %s returns HTTP %s to an anonymous request. The "
+                "BUCKET is not public." % (url, resp.status_code))
+        head = next(resp.iter_content(chunk_size=16), b"")
+        if head[4:8] != b"ftyp":
+            raise NotPublic("uploaded, but %s does not serve an mp4 (starts %r)"
+                            % (url, head[:8]))
+        length = resp.headers.get("Content-Length")
+        if length is None or not str(length).isdigit() or int(length) != expect_bytes:
+            raise NotPublic("uploaded %d bytes but %s reports Content-Length %r"
+                            % (expect_bytes, url, length))
+    finally:
+        resp.close()
+    return expect_bytes
+
+
+def upload_video(path: str, max_bytes: int = None, env=None, verify: bool = True) -> str:
+    """Upload a vertical mp4 to R2 and return its public URL, after
+    :func:`read_video`'s checks. Content-addressed like :func:`upload_image`."""
+    cfg = load_config(env)
+    size, width, height = read_video(path, max_bytes)
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as exc:
+        raise ImageHostError("could not read %s: %s" % (path, exc)) from exc
+    key = content_key(data, "mp4")
+    url = public_url(key, cfg["R2_PUBLIC_BASE_URL"])
+    logger.info("Uploading %s (%d bytes, %dx%d) -> %s", path, size, width, height, key)
+    try:
+        _client(cfg).put_object(
+            Bucket=cfg["R2_BUCKET"], Key=key, Body=data,
+            ContentType=VIDEO_CONTENT_TYPE,
+            CacheControl="public, max-age=31536000, immutable")
+    except Exception as exc:
+        raise UploadFailed("upload to R2 failed for %s: %s" % (path, exc)) from exc
+    if verify:
+        verify_public_video(url, expect_bytes=len(data))
+        logger.info("Verified public: %s (%d bytes)", url, len(data))
+    return url

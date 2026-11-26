@@ -40,6 +40,10 @@ NO_LINK = "none"
 #: destination link is ``metadata.pinterest.url``). The channel's
 #: ``metadata_builder`` places it.
 METADATA = "metadata"
+#: Nowhere, and a row that carries one is refused at queue time (Instagram: a
+#: caption link is not clickable, and dropping it silently would lose the
+#: thing the row exists to share).
+REFUSED = "refused"
 
 # ── identity_check: what is verified before a Buffer post is created ────────
 #: Nothing at schedule time. The account is confirmed by the browser, against
@@ -152,6 +156,22 @@ class Channel:
     #: (queue, drain, Schedule, the panel's pills) iterates. Last, with a
     #: default, so every declaration before it is unchanged (DEC-059).
     publisher: str = BUFFER
+    #: The CSV column holding a local video path. A row with one is a video
+    #: post, hosted with ``image_host.upload_video``. None: no video posts.
+    #: The fields from here on are I1's (D-030), last with defaults, so every
+    #: declaration before them is unchanged.
+    video_column: Optional[str] = None
+    #: The largest video file accepted, in bytes. Over it is refused at queue
+    #: time, never re-encoded.
+    video_max_bytes: Optional[int] = None
+    #: A row with neither an image nor a video is refused.
+    media_required: bool = False
+    #: The most hashtags the composed body may carry. Over it is refused at
+    #: queue time, never trimmed. None: not counted.
+    max_hashtags: Optional[int] = None
+    #: ``(profile_name) -> refusal or None``, run once per schedule pass
+    #: before the identity gate. A refusal stops the pass with nothing sent.
+    preflight: Optional[Callable[[Optional[str]], Optional[str]]] = None
 
     def __post_init__(self):
         names = [column.name for column in self.extra_columns]
@@ -281,8 +301,62 @@ YOUTUBE = Channel(
     publisher=YOUTUBE_API,
 )
 
+#: Instagram's caption limit and hashtag cap (DEC-071(2)). Refused, never trimmed.
+INSTAGRAM_CAPTION_MAX = 2200
+INSTAGRAM_MAX_HASHTAGS = 30
+#: Buffer's help centre, "Sharing videos through Buffer", Instagram Reels:
+#: "File size: Below 300MB". Decimal megabytes, the smaller reading.
+INSTAGRAM_VIDEO_MAX_BYTES = 300 * 1000 * 1000
+INSTAGRAM_VIDEO_COLUMN = "video_path"
+
+
+def _instagram_metadata(row, board_service_id):
+    """``{"instagram": {type, shouldShareToFeed}}`` for one row.
+
+    From Buffer's ``InstagramPostMetadataInput``: ``type: PostType!`` ("eg,
+    post, story, reel for Instagram") and ``shouldShareToFeed: Boolean!``
+    ("Indicates whether post should be shared to feed"); both are required.
+    A row with a video is a ``reel``, any other row a ``post`` (an image).
+    Every Reel and image is shared to the feed. ``firstComment``, ``link``,
+    ``collaborators``, ``geolocation``, ``isAiGenerated``, ``stickerFields`` and
+    ``trialReelGraduationStrategy`` are left out: nothing here needs them.
+    ``board_service_id`` is unused (no boards on Instagram).
+    """
+    video = str(row.get(INSTAGRAM_VIDEO_COLUMN) or "").strip()
+    return {"instagram": {"type": "reel" if video else "post",
+                          "shouldShareToFeed": True}}
+
+
+def _instagram_preflight(profile_name):
+    # Imported here: instagram_channel reads youtube_channel, which imports
+    # this module.
+    from . import instagram_channel
+    return instagram_channel.preflight_refusal(profile_name)
+
+
+INSTAGRAM = Channel(
+    id=platforms.INSTAGRAM,
+    label="Instagram",
+    link_placement=REFUSED,
+    # Links in the caption count as plain text.
+    text_limit=TextLimit(unit=platform_policy.CHARS,
+                         maximum=INSTAGRAM_CAPTION_MAX, url_cost=None),
+    identity_check=BUFFER_HANDLE,
+    config_layout=OVERLAY,
+    key_env=None,
+    state_path=PLATFORM_DIR,
+    reconcile_statuses=("sent", "error"),
+    extra_columns=(ExtraColumn(INSTAGRAM_VIDEO_COLUMN),),
+    metadata_builder=_instagram_metadata,
+    video_column=INSTAGRAM_VIDEO_COLUMN,
+    video_max_bytes=INSTAGRAM_VIDEO_MAX_BYTES,
+    media_required=True,
+    max_hashtags=INSTAGRAM_MAX_HASHTAGS,
+    preflight=_instagram_preflight,
+)
+
 #: Every declared channel, by id, in declaration order.
-CHANNELS = {c.id: c for c in (LINKEDIN, X, PINTEREST, YOUTUBE)}
+CHANNELS = {c.id: c for c in (LINKEDIN, X, PINTEREST, YOUTUBE, INSTAGRAM)}
 
 #: The channels Buffer publishes, by id. Every Buffer path iterates this, so
 #: a channel with another publisher never reaches a Buffer call.

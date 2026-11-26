@@ -1403,7 +1403,9 @@ the captured createPost input; `tests/test_dashboard_registry.py` renders the
 three shipped pills and a test channel's, and drives its settings, CSV and
 banner. Refreshed 2026-11-22, branch `v1-youtube`: the `publisher` field;
 `tests/test_channel_registry_golden.py` pins every Buffer channel's fields
-to their values before it.*
+to their values before it. Refreshed 2026-11-26, branch `i1-instagram-buffer`:
+I1's five fields (§10.14) are popped at their defaults and Instagram is
+pinned in full.*
 
 ### 10.10 Pinterest (P5)
 
@@ -1754,6 +1756,81 @@ lock both ways, atomic writes, the import's mapping and idempotence and
 conflicts, cutover's refusals and dry run, auth, the calendar route, and a
 socket guard shown to fail on a real connect. video-publisher's
 `tests/test_moved_brands.py` covers each refusing path both ways.*
+
+### 10.14 Instagram through Buffer (I1, D-030, DEC-071, DEC-072)
+
+Instagram posts (images and Reels) are a Buffer channel, `channels.INSTAGRAM`,
+declared after Pinterest. Queue, schedule, lock, reconcile and the U1 calendar
+are the shared Buffer paths; the calendar reads `channels.REGISTRY`, so
+Instagram rows appear with no calendar change. Five fields were added to
+`Channel`, last and with defaults, so every earlier declaration is unchanged
+(`tests/test_channel_registry_golden.py` pops them at their defaults and
+compares the rest with the 230f1fc capture):
+
+- `video_column` (`video_path`): a row with a local mp4 there is a Reel.
+  `schedule_pass` hosts it with `image_host.upload_video` and createPost
+  carries one `{"video": {"url"}}` asset (`build_post_input(video_url=)`).
+  A row never carries an image and a video.
+- `video_max_bytes`: 300,000,000, from Buffer's help centre ("File size:
+  Below 300MB" for Reels).
+- `media_required`: a row with neither image nor video is refused.
+- `max_hashtags`: 30, counted by `csv_pipeline.HASHTAG_RE` on the composed
+  body inside `text_limit_problem`, so queue time and send time agree. The
+  caption limit is the `text_limit`, 2,200 characters. Over either is refused,
+  never trimmed.
+- `preflight`: `(profile) -> refusal`, run once per schedule pass before the
+  production and identity gates, raising `PreflightRefused` (a subclass of
+  `IdentityRefused`, so every caller that stops on a wrong account stops on it).
+
+`link_placement` is the new `REFUSED`: a row with a link is refused at queue
+time, because a caption link is not clickable and dropping it would be silent.
+
+**Metadata.** `_instagram_metadata` sends `{"instagram": {"type": "reel" |
+"post", "shouldShareToFeed": true}}`, the two required fields of Buffer's
+`InstagramPostMetadataInput`. The other seven optional fields are not sent.
+
+**Video hosting.** `image_host.read_video` refuses a file that is missing,
+empty, not `.mp4`, over the cap, has no `ftyp` box first, has no video track
+(`hdlr` `vide`), or is not taller than wide (the `tkhd` size, before any
+rotation matrix). `upload_video` stores it content-addressed as `video/mp4`, then
+`verify_public_video` fetches the public URL anonymously (streamed) and
+requires HTTP 200, an `ftyp` box and a `Content-Length` equal to the file size.
+
+**Preflight** (`instagram_channel.preflight_refusal`). It refuses when the
+overlay `scheduled_posting.platforms.instagram` is missing, has no `cadence`
+in topup's format (`topup.parse_cadence`), or has `drain` other than exactly
+`false`. It also refuses while video-publisher has items with
+`platform: instagram` in `content/<vp_brand>/queue/`, where `vp_brand` and
+`vp_root` come from the profile's YouTube overlay. An unreachable `vp_root` or an
+unreadable manifest also refuses. video-publisher has a Graph API Instagram path
+but nothing uses it: `publish_log` has no Instagram row and nothing is in
+`published/`. So the YouTube marker (`brands: [...]`) is unchanged and there is
+no Instagram moved marker. The overlay also carries `buffer_channel_id`,
+`identity_slug` and `buffer_api_key_env`, resolved by
+`profile_manager.resolve_scheduled` like X and Pinterest. The E2/E3 engagement
+keys (`engagement`) share the same section.
+
+**Reels from YouTube items** (`instagram-from-youtube --profile P
+[--dry-run]`, `instagram_channel.from_youtube`). It proposes one row per item
+folder with a vertical mp4 (`find_vertical_mp4` plus `read_video`) whose
+video path is in no Instagram state row. The caption is copied verbatim:
+- `shorts_section`: the item section's `Caption (draft)` and `Tags` (the
+  first `## ` heading's bullets). An item without `Caption (draft)` is skipped.
+- `title_sections`: `## Description`.
+
+Either way every `#shorts` token is dropped, and the title is never used. A
+caption over the limits is skipped with the reason. A dry run writes nothing.
+Otherwise it writes `data/<p>/instagram/proposed_reels.csv` atomically, with
+`date` and `time_window` blank and a `source_item` column, and queues nothing.
+
+*Verification anchor (10.14): 2026-11-26, branch `i1-instagram-buffer`;
+`tests/test_instagram_buffer.py` covers each refusal both ways (caption
+2200/2201, hashtags 30/31, media, both media, link, missing, horizontal and
+oversize video, cadence, drain, the video-publisher queue, unreachable root,
+unreadable manifest), the createPost input at the transport for a Reel and an
+image, video hosting and its verify step, both caption layouts, the dry run
+writing nothing, and the calendar. Reverting `csv_pipeline.py` alone turns
+17 of them red.*
 
 ---
 

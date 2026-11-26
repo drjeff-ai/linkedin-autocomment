@@ -290,7 +290,8 @@ def ready(env, n_dated=None):
 def test_youtube_is_declared_with_its_own_publisher():
     c = channels.get("youtube")
     assert c is yt.CHANNEL and c.publisher == channels.YOUTUBE_API
-    assert list(channels.CHANNELS) == ["linkedin", "x", "pinterest", "youtube"]
+    assert list(channels.CHANNELS) == ["linkedin", "x", "pinterest", "youtube",
+                                       "instagram"]
     # No Buffer path iterates it.
     assert "youtube" not in channels.REGISTRY
 

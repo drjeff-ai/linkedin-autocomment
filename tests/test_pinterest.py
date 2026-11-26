@@ -170,7 +170,7 @@ def _schedule(rows, state, buffer, uploads=None, fetch_channel=None, **kw):
 # ─── the declaration ─────────────────────────────────────────────────────────
 
 def test_pinterest_is_declared_after_x_with_the_dispatch_fields():
-    assert list(channels.REGISTRY) == ["linkedin", "x", "pinterest"]
+    assert list(channels.REGISTRY)[:3] == ["linkedin", "x", "pinterest"]
     pin = channels.get("pinterest")
     assert pin.label == "Pinterest"
     assert pin.link_placement == channels.METADATA

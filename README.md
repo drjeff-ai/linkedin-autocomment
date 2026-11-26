@@ -350,6 +350,24 @@ for the counts.** Files on disk are derived output, never state.
   20 replies a day, 08:00-21:00 Pacific, a 25-90 minute gap, one per creator per
   3 days), or says when the next one is allowed. No task runs it.
 
+### Instagram posts through Buffer (I1)
+- Images and Reels go through Buffer like Pinterest, on the `instagram`
+  platform. No profile is wired yet. To wire one, connect an Instagram
+  professional account in Buffer, then add a
+  `scheduled_posting.platforms.instagram` overlay with `buffer_channel_id`,
+  `identity_slug`, `buffer_api_key_env` (a `BUFFER_API_KEY_*` variable in
+  `.env`), `"drain": false` and a `cadence` in topup's format.
+- A row needs an image (`image_path`) or a vertical mp4 (`video_path`, up to
+  300 MB). Captions over 2,200 characters, more than 30 hashtags, or any link
+  are refused at queue time.
+- The platform refuses to post while video-publisher still has Instagram items
+  queued for the profile's YouTube `vp_brand`.
+- `.venv\Scripts\python.exe tools\run_scheduled_posts.py instagram-from-youtube --profile <p> --dry-run`
+  proposes one Reel row per YouTube item with a caption copied from
+  `youtube.md`. Without `--dry-run` it writes
+  `data\<p>\instagram\proposed_reels.csv` for review and queues nothing.
+  Fill in `date` and `time_window`, then queue it with `--platform instagram`.
+
 ### Instagram engagement (E2/E3, not live yet)
 - An Instagram adapter exists but has never run live: every selector is
   unverified (docs/ARCHITECTURE.md §12.1). It refuses a live browser until a
