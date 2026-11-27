@@ -78,13 +78,14 @@ class AuthenticCommentGenerator:
 
     def __init__(self, input_file: str, model: str = "gpt-4o-mini",
                  max_comments: int = None, profile_name: str = None,
-                 *, platform: str, variant: str = None):
+                 *, platform: str, variant: str = None, register_name: str = None):
         self.input_file = input_file
         self.model = model
         # Raises UnknownPlatform rather than falling back — see policy_for.
-        # ``variant`` picks a second declared voice (YouTube's own-video reply).
+        # ``variant`` picks a second declared voice (YouTube's own-video reply);
+        # ``register_name`` a profile's named register (DEC-077).
         self.platform = platform
-        self.policy = platform_policy.policy_for(platform, variant)
+        self.policy = platform_policy.policy_for(platform, variant, register_name)
         self.register = self.policy.register
         self.length = self.policy.length
         # Optional cap on how many comments to generate. None (the default) means

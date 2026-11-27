@@ -89,3 +89,27 @@ def test_channels_info_still_parses_after_the_refactor():
     assert got[CID]["subscribers"] == 12345
     assert got["UC" + "b" * 22] == {"title": "B", "subscribers": 7,
                                     "uploads_playlist": "UU" + "b" * 22}
+
+
+# ── my_channel_snippet (D-033 Y2-T) ─────────────────────────────────────────
+
+def test_my_channel_snippet_sends_mine_and_snippet_and_returns_the_handle():
+    item = {"id": CID, "snippet": {"title": "Some Channel", "customUrl": "@somechannel"}}
+    service, http = _service((200, {"items": [item]}))
+    assert youtube_api.my_channel_snippet(service) == {
+        "channel_id": CID, "title": "Some Channel", "handle": "@somechannel"}
+    (uri, method, _b, _h), = http.request_sequence
+    assert method == "GET" and "/youtube/v3/channels?" in uri
+    assert "mine=true" in uri and "part=snippet" in uri and "forHandle" not in uri
+
+
+def test_my_channel_snippet_without_a_custom_url_has_an_empty_handle():
+    service, _ = _service((200, {"items": [{"id": CID, "snippet": {"title": "T"}}]}))
+    assert youtube_api.my_channel_snippet(service)["handle"] == ""
+
+
+@pytest.mark.parametrize("items", [[], [{"id": CID}, {"id": "UC" + "b" * 22}]])
+def test_my_channel_snippet_needs_exactly_one_channel(items):
+    service, _ = _service((200, {"items": items}))
+    with pytest.raises(youtube_api.YouTubeApiError, match="expected one"):
+        youtube_api.my_channel_snippet(service)
