@@ -308,7 +308,12 @@ for the counts.** Files on disk are derived output, never state.
 - Auth, once per channel. It opens Google's consent page in your browser and
   stores the token in `data/<p>/youtube/oauth_token.json` (gitignored):
   `.venv\Scripts\python.exe tools\youtube_auth.py --profile <p> --client-secrets <file.json>`.
-  It refuses a Google account whose channel is not `channel_id`.
+  It refuses a Google account whose channel is not `channel_id`. It asks for
+  `youtube.upload`, `youtube` and `youtube.force-ssl`; the consent screen lists
+  the last as managing your YouTube comments. The `youtube-find`, `-draft` and
+  `-engage` comment paths refuse until the token holds force-ssl, so a token
+  minted before 2026-11-26 must re-run this to comment. Uploads keep working on
+  an old token, which is always refreshed with the scopes stored in it.
 - `run_scheduled_posts.py youtube-cutover --profile <p> [--dry-run]` takes the
   channel over from video-publisher. It imports its history and lists the brand
   in video-publisher's `config/moved_to_platform.yaml`, after which

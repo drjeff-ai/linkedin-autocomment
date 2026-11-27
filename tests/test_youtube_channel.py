@@ -919,9 +919,181 @@ def test_auth_refuses_when_google_gives_no_refresh_token(env):
     assert code == yt.EXIT_REFUSED and not os.path.exists(yt.token_path(PROFILE))
 
 
-def test_the_scopes_are_upload_and_youtube():
+def test_the_minted_scopes_are_upload_youtube_and_force_ssl():
     assert youtube_api.SCOPES == ["https://www.googleapis.com/auth/youtube.upload",
-                                  "https://www.googleapis.com/auth/youtube"]
+                                  "https://www.googleapis.com/auth/youtube",
+                                  "https://www.googleapis.com/auth/youtube.force-ssl"]
+    assert youtube_api.LEGACY_SCOPES == youtube_api.SCOPES[:2]
+
+
+def test_consent_asks_for_the_minted_scopes(monkeypatch):
+    import google_auth_oauthlib.flow as gflow
+    seen = {}
+
+    class Flow:
+        @classmethod
+        def from_client_secrets_file(cls, path, scopes):
+            seen["scopes"] = scopes
+            return cls()
+
+        def run_local_server(self, **kw):
+            seen.update(kw)
+            return "creds"
+    monkeypatch.setattr(gflow, "InstalledAppFlow", Flow)
+    assert youtube_api.run_consent("secrets.json") == "creds"
+    assert seen["scopes"] == youtube_api.SCOPES
+    assert seen["access_type"] == "offline" and seen["prompt"] == "consent"
+
+
+@pytest.mark.parametrize("granted,expect_note", [
+    ("https://www.googleapis.com/auth/youtube.upload "
+     "https://www.googleapis.com/auth/youtube "
+     "https://www.googleapis.com/auth/youtube.force-ssl", False),
+    (["https://www.googleapis.com/auth/youtube.upload",
+      "https://www.googleapis.com/auth/youtube"], True)],
+    ids=["all-three", "force-ssl-unticked"])
+def test_auth_stores_the_scopes_google_granted(env, granted, expect_note):
+    class Granted(_Creds):
+        granted_scopes = granted
+    code, lines = _auth(env, creds=Granted())
+    assert code == 0
+    with open(yt.token_path(PROFILE), encoding="utf-8") as f:
+        token = json.load(f)
+    want = granted.split() if isinstance(granted, str) else granted
+    assert token["scopes"] == want
+    assert youtube_api.has_comment_scope(token) is (not expect_note)
+    assert any(line.startswith("NOTE: Google did not grant youtube.force-ssl")
+               for line in lines) is expect_note
+
+
+class FakeTokenEndpoint:
+    """Google's token endpoint, offline. It holds the scopes the refresh
+    token was granted at consent and answers a refresh the way Google does:
+    a request naming a scope never granted gets 400 invalid_scope."""
+
+    def __init__(self, granted):
+        self.granted = list(granted)
+        self.requests = []
+
+    def install(self, monkeypatch):
+        import google.auth.transport.requests as gtr
+        endpoint = self
+
+        class Request:
+            def __call__(self, url, method="GET", body=None, headers=None,
+                         timeout=None, **kw):
+                return endpoint.answer(url, body)
+        monkeypatch.setattr(gtr, "Request", Request)
+
+    def answer(self, url, body):
+        from urllib.parse import parse_qs
+
+        class Resp:
+            headers = {}
+
+            def __init__(self, status, payload):
+                self.status = status
+                self.data = json.dumps(payload).encode("utf-8")
+        if isinstance(body, bytes):
+            body = body.decode("utf-8")
+        form = {k: v[0] for k, v in parse_qs(body or "").items()}
+        self.requests.append((url, form))
+        asked = form.get("scope", "").split()
+        if form.get("grant_type") != "refresh_token":
+            return Resp(400, {"error": "unsupported_grant_type"})
+        if set(asked) - set(self.granted):
+            return Resp(400, {"error": "invalid_scope",
+                              "error_description": "Some requested scopes were invalid."})
+        return Resp(200, {"access_token": "ACCESS-1", "expires_in": 3599,
+                          "token_type": "Bearer",
+                          "scope": " ".join(asked or self.granted)})
+
+
+class RealAuthApi(FakeApi):
+    """FakeApi with the REAL credential building and refresh from
+    youtube_api; only the token endpoint and the YouTube client are fake."""
+
+    def credentials_from_token(self, token):
+        self.calls.append("creds")
+        return youtube_api.credentials_from_token(token)
+
+    def refresh(self, creds):
+        self.calls.append("refresh")
+        youtube_api.refresh(creds)
+
+    def build_service(self, creds):
+        self.calls.append("build")
+        assert creds.token == "ACCESS-1", "the refresh did not produce a token"
+        return "service"
+
+
+def test_an_old_token_refreshes_and_uploads_while_the_constant_lists_force_ssl(
+        env, monkeypatch):
+    """D-032 step 2: a token stored with only the two pre-D-032 scopes keeps
+    refreshing and uploading. The refresh asks for exactly the stored scopes,
+    and the fake endpoint, like Google, would refuse one naming force-ssl."""
+    assert youtube_api.SCOPE_COMMENTS in youtube_api.SCOPES
+    old = ["https://www.googleapis.com/auth/youtube.upload",
+           "https://www.googleapis.com/auth/youtube"]
+    endpoint = FakeTokenEndpoint(granted=old)
+    endpoint.install(monkeypatch)
+    give_token(env)
+    tok = yt.read_json(yt.token_path(PROFILE), {})
+    tok["scopes"] = list(old)
+    yt.save_token(PROFILE, tok)
+    ready(env)
+    api = RealAuthApi()
+    code, _s = yt.schedule(PROFILE, max_uploads=1, now=NOW, api=api, out=env["out"])
+    assert code == 0
+    assert api.calls[:4] == ["creds", "refresh", "build", "channels.list"]
+    assert len(api.uploads) == 1
+    assert state(env)["items"]["C-001-where-did-my-rule-go"]["video_id"] == "VID1"
+    assert len(endpoint.requests) == 1
+    assert endpoint.requests[0][1]["scope"].split() == old
+
+
+def test_the_fake_endpoint_refuses_a_refresh_with_the_minted_constant(monkeypatch):
+    """The other direction: credentials built with SCOPES (what the old code
+    would now send) fail on the same old token. Proves the test above can
+    fail."""
+    from google.oauth2.credentials import Credentials
+    endpoint = FakeTokenEndpoint(granted=youtube_api.LEGACY_SCOPES)
+    endpoint.install(monkeypatch)
+    creds = Credentials(token=None, refresh_token="REFRESH-abc",
+                        token_uri=youtube_api.TOKEN_URI, client_id="cid",
+                        client_secret="SECRET-xyz", scopes=youtube_api.SCOPES)
+    with pytest.raises(youtube_api.YouTubeApiError, match="token refresh failed"):
+        youtube_api.refresh(creds)
+    assert "youtube.force-ssl" in endpoint.requests[0][1]["scope"]
+
+
+def test_a_token_with_no_stored_scopes_refreshes_with_the_legacy_two(monkeypatch):
+    endpoint = FakeTokenEndpoint(granted=youtube_api.LEGACY_SCOPES)
+    endpoint.install(monkeypatch)
+    creds = youtube_api.credentials_from_token(
+        {"client_id": "cid", "client_secret": "SECRET-xyz", "refresh_token": "R"})
+    youtube_api.refresh(creds)
+    assert creds.token == "ACCESS-1"
+    assert endpoint.requests[0][1]["scope"].split() == youtube_api.LEGACY_SCOPES
+
+
+def test_a_new_token_refreshes_with_its_three_stored_scopes(monkeypatch):
+    endpoint = FakeTokenEndpoint(granted=youtube_api.SCOPES)
+    endpoint.install(monkeypatch)
+    creds = youtube_api.credentials_from_token(
+        {"client_id": "cid", "client_secret": "SECRET-xyz", "refresh_token": "R",
+         "scopes": list(youtube_api.SCOPES)})
+    youtube_api.refresh(creds)
+    assert creds.token == "ACCESS-1"
+    assert endpoint.requests[0][1]["scope"].split() == youtube_api.SCOPES
+
+
+@pytest.mark.parametrize("value,expect", [
+    (["a", "b"], ["a", "b"]), ("a b", ["a", "b"]), (None, None), ([], None),
+    ("", None), (["a", 3], None), ({"a": 1}, None), (5, None)])
+def test_stored_scopes_reads_lists_and_strings_and_rejects_the_rest(value, expect):
+    assert youtube_api.stored_scopes({"scopes": value}) == expect
+    assert youtube_api.has_comment_scope({"scopes": value}) is False
 
 
 # ── the Google boundary ─────────────────────────────────────────────────────

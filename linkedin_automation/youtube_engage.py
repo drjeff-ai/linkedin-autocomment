@@ -539,6 +539,10 @@ class _Ctx:
     summary: dict
 
 
+#: The operations that hit a comment endpoint, which needs youtube.force-ssl.
+COMMENT_OPS = ("commentThreads.", "comments.")
+
+
 class _Google:
     """One run's Google session: the service, built once, and every call
     charged to the quota ledger and the paid-call ledger BEFORE it is made."""
@@ -585,6 +589,12 @@ class _Google:
                                 % (found, self.ctx.cfg.channel_id))
 
     def call(self, units, op, item, fn, *args, **kwargs):
+        if op.startswith(COMMENT_OPS):
+            # Backstop: each comment path checks first; nothing reaches a
+            # comment endpoint, or spends a unit on one, without force-ssl.
+            problem = yt.comment_scope_problem(self.ctx.profile)
+            if problem:
+                raise EngageRefused(problem)
         service = self.service()
         self.spend(units, op, item)
         return fn(service, *args, **kwargs)
@@ -726,9 +736,14 @@ def find(profile, dry_run=False, now=None, api=None, out=print):
                      "store has %d record(s)"
                      % (ctx.tag, len(watch), "1" if uncached else "no",
                         PLAYLIST_MAX_PAGES, cfg.channel_id, len(store.posts)))
+            problem = yt.comment_scope_problem(profile)
+            if problem:
+                ctx.emit("%s: a real run would REFUSE the reply scan: %s"
+                         % (ctx.tag, problem))
             return EXIT_OK, ctx.summary
         g = _Google(ctx, api, now)
         added_videos, added_replies, skipped = [], [], {}
+        no_comments = yt.comment_scope_problem(profile)
 
         def skip(why):
             skipped[why] = skipped.get(why, 0) + 1
@@ -767,10 +782,13 @@ def find(profile, dry_run=False, now=None, api=None, out=print):
                         added_videos.append(rec["key"])
                     if old or not token:
                         break
-            threads, _next = g.call(LIST_UNITS, "commentThreads.list "
-                                    "allThreadsRelatedToChannelId", cfg.channel_id,
-                                    api.comment_threads_page,
-                                    related_channel_id=cfg.channel_id)
+            if no_comments:
+                threads = []
+            else:
+                threads, _next = g.call(LIST_UNITS, "commentThreads.list "
+                                        "allThreadsRelatedToChannelId", cfg.channel_id,
+                                        api.comment_threads_page,
+                                        related_channel_id=cfg.channel_id)
             for t in threads:
                 if t.get("author_channel_id") == cfg.channel_id:
                     skip("our own comment")
@@ -802,6 +820,11 @@ def find(profile, dry_run=False, now=None, api=None, out=print):
                  % (ctx.tag, len(added_videos), len(added_replies),
                     ", ".join("%d %s" % (n, w) for w, n in sorted(skipped.items()))
                     or "none"))
+        if no_comments:
+            # The watch-list videos landed; only the reply scan was refused.
+            ctx.summary["refused"] = no_comments
+            ctx.emit("%s: REFUSED the reply scan: %s" % (ctx.tag, no_comments))
+            return EXIT_REFUSED, ctx.summary
         return EXIT_OK, ctx.summary
 
     return _run(profile, "find", dry_run, out, body)
@@ -875,7 +898,16 @@ def draft(profile, limit=5, dry_run=False, now=None, api=None, make_generator=No
                 ctx.emit("  WOULD DRAFT: %s  %s" % (r["key"], (r.get("youtube") or {}).get("kind")))
             ctx.emit("%s: would draft %d of %d NEW" % (
                 ctx.tag, len(todo), len(store.by_status(post_store.NEW))))
+            problem = yt.comment_scope_problem(profile) if todo else None
+            if problem:
+                ctx.emit("%s: a real run would be REFUSED: %s" % (ctx.tag, problem))
             return EXIT_OK, ctx.summary
+        if todo:
+            problem = yt.comment_scope_problem(profile)
+            if problem:
+                # Before any Google or OpenAI call: a draft cannot be posted
+                # without the scope, and a video draft reads comments first.
+                return ctx.refuse(EXIT_REFUSED, problem)
         g = _Google(ctx, api, now)
         titles = _local_titles(profile)
         gens = {}
@@ -1243,6 +1275,9 @@ def engage(profile, dry_run=False, now=None, api=None, rng=None, out=print):
             ctx.emit("%s: would post 1 (dedupe up to %d pages, insert %d units, verify "
                      "1); %s" % (ctx.tag, DEDUPE_MAX_PAGES, cfg.comment_units,
                                  pacing_status(ledger, now)))
+            problem = yt.comment_scope_problem(profile)
+            if problem:
+                ctx.emit("%s: a real run would be REFUSED: %s" % (ctx.tag, problem))
             ctx.summary["would_post"] = key
             return EXIT_OK, ctx.summary
         return _post_one(profile, ctx, store, ledger, key, now, api, rng)
@@ -1252,6 +1287,10 @@ def engage(profile, dry_run=False, now=None, api=None, rng=None, out=print):
 
 def _post_one(profile, ctx, store, ledger, key, now, api, rng):
     cfg = ctx.cfg
+    problem = yt.comment_scope_problem(profile)
+    if problem:
+        # Before the identity check: the dedupe and the insert both need it.
+        return ctx.refuse(EXIT_REFUSED, problem + "; nothing was posted")
     g = _Google(ctx, api, now)
     need = yt.CHANNEL_CHECK_UNITS + DEDUPE_MAX_PAGES * LIST_UNITS + cfg.comment_units + LIST_UNITS
     if g.units_left() < need:
@@ -1395,7 +1434,9 @@ def status_view(profile, now=None):
     view.update(configured=True, channel_id=cfg.channel_id,
                 channel_name=cfg.channel_name, channel_handle=cfg.channel_handle,
                 watch_list=list(cfg.watch_list),
-                token=yt.token_problem(profile) is None)
+                token=yt.token_problem(profile) is None,
+                comment_scope=yt.comment_scope_problem(profile) is None
+                and yt.token_problem(profile) is None)
     try:
         ledger = load_ledger(profile)
     except yt.YouTubeRefused as exc:
