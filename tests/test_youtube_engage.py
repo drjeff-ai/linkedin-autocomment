@@ -960,10 +960,12 @@ def test_the_cli_routes_each_engagement_command(env, monkeypatch, capsys):
         monkeypatch.setattr(sys, "argv", ["run_scheduled_posts.py"] + argv
                             + ["--profile", PROFILE])
         assert cli.main() == 0
+    for entry in seen:
+        assert entry[-1].pop("out") is print   # no --log-file: plain print
     assert seen == [("discover", PROFILE, "llm evals", {"dry_run": True}),
                     ("find", PROFILE, {"dry_run": False}),
                     ("draft", PROFILE, {"limit": 2, "dry_run": False}),
-                    ("engage", PROFILE, {"dry_run": True})]
+                    ("engage", PROFILE, {"dry_run": True, "scheduled": False})]
     assert [e["channel_id"] for e in ye.engage_config(PROFILE).watch_list] == [CREATOR_B]
     assert "1 channel(s) on the watch list" in capsys.readouterr().out
 

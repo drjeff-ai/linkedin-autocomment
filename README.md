@@ -353,7 +353,15 @@ for the counts.** Files on disk are derived output, never state.
 - `youtube-engage --profile <p> [--dry-run]`, or the tab's Post button, posts at
   most one approved comment, within the pacing rules (a 3-5-10-20 a day ramp,
   20 replies a day, 08:00-21:00 Pacific, a 25-90 minute gap, one per creator per
-  3 days), or says when the next one is allowed. No task runs it.
+  3 days), or says when the next one is allowed.
+- On a schedule (Y2-S): `youtube-morning --profile <p> [--dry-run]` runs find,
+  then drafts up to today's cap minus the drafts already waiting (and up to 5
+  replies). `--scheduled` on `youtube-morning` or `youtube-engage` refuses
+  unless `engagement.auto_run` is `true` for that profile.
+  `tools/setup_youtube_engage_tasks.ps1 -Profile <p> [-Remove]` registers two
+  Windows tasks: morning at 07:30 and engage every 15 minutes from 08:00 to
+  21:00, logging to `data/logs/youtube-engage.log`. Run it yourself; nothing
+  registers it for you. Approval stays yours, per draft, in Review.
 
 ### Instagram posts through Buffer (I1)
 - Images and Reels go through Buffer like Pinterest, on the `instagram`
