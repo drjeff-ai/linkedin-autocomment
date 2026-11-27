@@ -65,7 +65,8 @@ def env(tmp_path, monkeypatch):
     e["cfg"] = {"scheduled_posting": {"platforms": {"youtube": overlay(tmp_path)}}}
     write_config(e["cfg"])
     yt.save_token(PROFILE, {"client_id": "cid", "client_secret": "SECRET-xyz",
-                            "refresh_token": "REFRESH-abc", "channel_id": OURS})
+                            "refresh_token": "REFRESH-abc", "channel_id": OURS,
+                            "scopes": list(youtube_api.SCOPES)})
     e["out"] = e["lines"].append
     return e
 
@@ -979,3 +980,172 @@ def test_the_default_generator_is_the_shared_one_with_the_youtube_policy(env):
     assert g.policy is pp.policy_for("youtube")
     r = ye.default_generator(PROFILE, pp.REPLY)
     assert r.policy is pp.policy_for("youtube", pp.REPLY)
+
+
+# ── the comment scope (Y1-S, D-032) ─────────────────────────────────────────
+
+#: The scopes every token minted before D-032 stored: no force-ssl.
+OLD_SCOPES = ["https://www.googleapis.com/auth/youtube.upload",
+              "https://www.googleapis.com/auth/youtube"]
+
+
+def store_token_scopes(scopes):
+    """Rewrite the fixture token with these scopes; ``None`` drops the key."""
+    tok = yt.read_json(yt.token_path(PROFILE), {})
+    if scopes is None:
+        tok.pop("scopes", None)
+    else:
+        tok["scopes"] = scopes
+    yt.save_token(PROFILE, tok)
+
+
+def comment_refusal():
+    return ("the topfive YouTube token cannot use comments (missing youtube.force-ssl). "
+            "Re-run: .venv\\Scripts\\python.exe tools\\youtube_auth.py --profile topfive "
+            "--client-secrets <path>")
+
+
+@pytest.mark.parametrize("scopes", [OLD_SCOPES, None, "not a list", []],
+                         ids=["old-two", "no-scopes-key", "malformed", "empty"])
+def test_the_comment_scope_problem_names_the_rerun(env, scopes):
+    store_token_scopes(scopes)
+    assert yt.comment_scope_problem(PROFILE) == comment_refusal()
+
+
+def test_the_comment_scope_problem_is_none_with_force_ssl(env):
+    assert yt.comment_scope_problem(PROFILE) is None
+    store_token_scopes(" ".join(youtube_api.SCOPES))  # space-separated is read too
+    assert yt.comment_scope_problem(PROFILE) is None
+
+
+def test_the_comment_scope_problem_leaves_a_missing_token_to_token_problem(env):
+    os.remove(yt.token_path(PROFILE))
+    assert yt.comment_scope_problem(PROFILE) is None
+    assert "youtube_auth.py" in yt.token_problem(PROFILE)
+
+
+def test_find_without_force_ssl_lands_videos_and_skips_only_the_reply_scan(env):
+    store_token_scopes(OLD_SCOPES)
+    api = FakeApi(env)
+    code, summary = ye.find(PROFILE, now=NOW, api=api, out=env["out"])
+    assert code == ye.EXIT_REFUSED
+    assert summary["videos"] == ["vidNEW1", "vidNEW2"] and summary["replies"] == []
+    assert summary["refused"] == comment_refusal()
+    assert env["lines"][-1] == "youtube-find topfive: REFUSED the reply scan: " + comment_refusal()
+    assert not any(c.startswith("commentThreads") for c in api.calls)
+    # No unit spent on the comment read: only the two watch-list reads.
+    assert [q["op"] for q in quota_entries()] == ["channels.list contentDetails",
+                                                  "playlistItems.list"]
+    assert not any(u["endpoint"].startswith("commentThreads") for u in usage_lines(env))
+    assert {k: r["status"] for k, r in store().posts.items()} == {
+        "vidNEW1": "NEW", "vidNEW2": "NEW"}
+
+
+def test_find_with_force_ssl_runs_the_reply_scan(env):
+    api = FakeApi(env)
+    code, summary = ye.find(PROFILE, now=NOW, api=api, out=env["out"])
+    assert code == 0 and summary["replies"] == ["cmtVIEWER"]
+    assert "commentThreads.list related" in api.calls and "refused" not in summary
+
+
+def test_draft_without_force_ssl_refuses_before_any_call(env):
+    ye.find(PROFILE, now=NOW, api=FakeApi(env), out=env["out"])
+    store_token_scopes(OLD_SCOPES)
+    before_q, before_u = quota_entries(), usage_lines(env)
+    api = FakeApi(env)
+    made = []
+    code, summary = ye.draft(PROFILE, limit=1, now=NOW, api=api, out=env["out"],
+                             make_generator=lambda p, v: made.append(v) or FakeGenerator(p, v))
+    assert code == ye.EXIT_REFUSED and summary["refused"] == comment_refusal()
+    assert env["lines"][-1] == "youtube-draft topfive: REFUSED: " + comment_refusal()
+    assert api.calls == [] and made == []
+    assert quota_entries() == before_q and usage_lines(env) == before_u
+    assert store().get("vidNEW1")["status"] == post_store.NEW
+
+
+def test_draft_with_force_ssl_reads_top_comments(env):
+    ye.find(PROFILE, now=NOW, api=FakeApi(env), out=env["out"])
+    api = FakeApi(env)
+    code, summary = ye.draft(PROFILE, limit=1, now=NOW, api=api, out=env["out"],
+                             make_generator=FakeGenerator)
+    assert code == 0 and summary["drafted"] == ["vidNEW1"]
+    assert "commentThreads.list relevance" in api.calls
+
+
+@pytest.mark.parametrize("kind,key", [(ye.KIND_VIDEO, "vidNEW1"), (ye.KIND_REPLY, "cmtX")])
+def test_engage_without_force_ssl_refuses_before_identity_dedupe_and_insert(env, kind, key):
+    seed(key=key, kind=kind)
+    store_token_scopes(OLD_SCOPES)
+    code, summary, api = engage(env)
+    assert code == ye.EXIT_REFUSED
+    assert summary["refused"] == comment_refusal() + "; nothing was posted"
+    assert api.calls == [] and quota_entries() == [] and usage_lines(env) == []
+    rec = store().get(key)
+    assert rec["status"] == post_store.GENERATED and post_store.is_approved(rec)
+
+
+@pytest.mark.parametrize("kind,key,dedupe", [
+    (ye.KIND_VIDEO, "vidNEW1", "commentThreads.list vidNEW1"),
+    (ye.KIND_REPLY, "cmtX", "comments.list cmtX")])
+def test_engage_with_force_ssl_dedupes_and_inserts(env, kind, key, dedupe):
+    seed(key=key, kind=kind)
+    code, summary, api = engage(env)
+    assert code == 0 and summary["outcome"] == ye.POSTED_VISIBLE
+    assert dedupe in api.calls and len(inserted(api)) == 1
+
+
+def test_the_google_session_refuses_any_comment_op_without_force_ssl(env):
+    """The backstop under the per-path checks: a comment op cannot reach the
+    endpoint or spend a unit, while a non-comment read still goes through."""
+    store_token_scopes(OLD_SCOPES)
+    api = FakeApi(env)
+    ctx = ye._Ctx(profile=PROFILE, cfg=ye.engage_config(PROFILE), dry_run=False,
+                  tag="t", emit=env["out"], refuse=None, summary={})
+    g = ye._Google(ctx, api, NOW)
+    for op, fn in [("commentThreads.list relevance", api.comment_threads_page),
+                   ("comments.list", api.replies_page),
+                   ("commentThreads.insert", api.insert_thread),
+                   ("comments.insert", api.insert_reply)]:
+        with pytest.raises(ye.EngageRefused, match="missing youtube.force-ssl"):
+            g.call(50, op, "k", fn)
+    assert api.calls == [] and quota_entries() == []
+    assert g.call(1, "videos.list", "v", api.video_titles, ["v"]) == {"v": ""}
+
+
+def test_status_view_reports_the_comment_scope(env):
+    assert ye.status_view(PROFILE, now=NOW)["comment_scope"] is True
+    store_token_scopes(OLD_SCOPES)
+    view = ye.status_view(PROFILE, now=NOW)
+    assert view["token"] is True and view["comment_scope"] is False
+
+
+@pytest.mark.parametrize("command", ["find", "draft", "engage"])
+def test_each_dry_run_names_the_refusal_and_calls_nothing(env, command):
+    seed()
+    s = store()
+    rec = ye._video_record(video("vidNEW9", 1), NOW)
+    s.posts["vidNEW9"] = rec
+    s.save()
+    store_token_scopes(OLD_SCOPES)
+    api = FakeApi(env)
+    if command == "engage":
+        code, _s, api = engage(env, dry_run=True)
+    else:
+        code, _s = getattr(ye, command)(PROFILE, dry_run=True, now=NOW, api=api,
+                                        out=env["out"])
+    assert code == 0 and api.calls == [] and quota_entries() == []
+    assert env["lines"][-1].endswith(comment_refusal())
+
+
+@pytest.mark.parametrize("command", ["find", "draft", "engage"])
+def test_a_dry_run_with_force_ssl_names_no_refusal(env, command):
+    seed()
+    s = store()
+    s.posts["vidNEW9"] = ye._video_record(video("vidNEW9", 1), NOW)
+    s.save()
+    if command == "engage":
+        engage(env, dry_run=True)
+    else:
+        getattr(ye, command)(PROFILE, dry_run=True, now=NOW, api=FakeApi(env),
+                             out=env["out"])
+    assert not any("force-ssl" in line for line in env["lines"])

@@ -1614,6 +1614,18 @@ from the stored token, the refresh, `channels.list mine`, one resumable
 error stops the run. `youtube_channel.py` holds the rest, ported from
 video-publisher (reference only, not imported).
 
+**Scopes (Y1-S, D-032).** `tools/youtube_auth.py` mints a new token with
+`youtube_api.SCOPES`: `youtube.upload`, `youtube` and `youtube.force-ssl` (the
+only scope Google's comment endpoints accept). It stores the scopes Google
+says it granted (`granted_scopes`, else what the flow asked for) and prints a
+NOTE if force-ssl was not granted; its channel check and its refusal of a
+wrong channel are unchanged. A stored token is always built and refreshed
+with **its own stored scopes**, never the constant, because a refresh naming
+a scope the token was never granted fails `invalid_scope` and would stop every
+upload. A token that records no scopes (teratomahouse's) is built with
+`LEGACY_SCOPES` (`youtube.upload`, `youtube`), the request it sent before.
+`yt.comment_scope_problem(profile)` is the comment gate (§11).
+
 **Config.** `scheduled_posting.platforms.youtube` of a profile:
 `vp_brand`, `vp_root`, `channel_id`, `content_root`, `publish_time`, `tz`,
 `per_day`, optional `quota {daily_limit, upload_units, comment_units,
@@ -1723,6 +1735,17 @@ uploads only for a listed brand. video-publisher's `src/moved.py` refuses a
 listed brand in `publish`, `scheduled_publish.py`, `schedule_youtube.py`,
 `retry-failed` and `_publish_youtube_item`, before any `publish_log` row. An
 unreadable marker refuses on both sides. No task or drain runs any of this.
+
+*Verification anchor (10.13, Y1-S): 2026-11-26, branch `y1s-comment-scope`;
+`tests/test_youtube_channel.py` pins `SCOPES` and `LEGACY_SCOPES`, checks
+consent asks for `SCOPES`, auth storing the granted scopes (all three, and
+force-ssl unticked with its NOTE), and runs the real `credentials_from_token`
+and `refresh` against an offline token endpoint that refuses an ungranted
+scope as Google does: a token stored with the old two scopes refreshes and
+uploads through `schedule`, a token with no scopes refreshes with the legacy
+two, a new token with its three; credentials built with `SCOPES` fail on the
+same endpoint. Building with `SCOPES` again turns two of them red. Live: the
+real topfive token stores the old two scopes, teratomahouse's none.*
 
 *Verification anchor (10.13, V3): 2026-11-25, branch `v3-intake-layouts`;
 `tests/test_youtube_layouts.py` holds a golden of the topfive import, intake
@@ -1844,6 +1867,20 @@ reads and the two inserts were added there). V1's config, token, quota ledger,
 production gate and publisher lock are reused (§10.13). Nothing here is on a
 schedule, no scheduler job knows about it, and no automation is enabled.
 
+**Comment scope (Y1-S, D-032).** Every comment endpoint needs
+`youtube.force-ssl` in the stored token (§10.13). Before any network call,
+each comment path checks `yt.comment_scope_problem(profile)`, which reads the
+token file only, and refuses with `the <profile> YouTube token cannot use
+comments (missing youtube.force-ssl). Re-run: .venv\Scripts\python.exe
+tools\youtube_auth.py --profile <profile> --client-secrets <path>`, spending no
+unit. `find` still lands watch-list videos and skips only the reply scan
+(exit 2, `REFUSED the reply scan`); `draft` refuses before any Google or
+OpenAI call when anything is NEW; `engage` refuses before the identity check,
+dedupe and insert, leaving the approval in place. `_Google.call` refuses any
+`commentThreads.*` or `comments.*` op the same way as a backstop. Each dry
+run names the refusal a real run would hit. `status_view` carries
+`comment_scope`. A missing token is left to `token_problem`.
+
 **Policy.** `platform_policy.policy_for("youtube")` is the strategist's
 `content/engagement/youtube-register.md`, copied verbatim (DEC-005); the
 register's bullet lists are laid out as prompt bullet lines, as LinkedIn's and
@@ -1959,6 +1996,17 @@ Pacific date. Each pacing refusal carries the time the next comment is allowed.
 `api_usage.jsonl` before it is made (`_Google.spend`); a call that would go
 over the daily limit is not made. One comment costs 53 units with a one-page
 dedupe (1 identity + 1 dedupe + 50 insert + 1 verify), at most 55.
+
+*Verification anchor (11, Y1-S): 2026-11-26, branch `y1s-comment-scope`;
+`tests/test_youtube_engage.py` covers the refusal text for the old two
+scopes, no scopes, malformed and empty; find landing videos with no comment
+read and no unit; draft refusing with no Google, generator or ledger call;
+engage refusing for a video and a reply with the approval kept; the
+`_Google.call` backstop on all four comment ops; each dry run; and each path
+proceeding with force-ssl. Making the gate always pass turns ten red. Live,
+topfive: `youtube-draft --limit 1` printed the refusal with exit 2, and
+`youtube-find --dry-run` named it; `api_usage.jsonl` and the quota ledger
+were unchanged.*
 
 *Verification anchor (11): 2026-11-22, branch `y1-youtube-comments`;
 `tests/test_youtube_engage.py` (every pin both ways, each promotion kind, the

@@ -21,10 +21,25 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-#: The scopes the token is minted with. ``youtube`` covers the comment reads
-#: and writes of Y1; ``youtube.upload`` is what videos.insert needs.
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload",
-          "https://www.googleapis.com/auth/youtube"]
+SCOPE_UPLOAD = "https://www.googleapis.com/auth/youtube.upload"
+SCOPE_YOUTUBE = "https://www.googleapis.com/auth/youtube"
+#: The only scope Google's comment endpoints accept (commentThreads.insert
+#: lists it alone; D-031 saw commentThreads.list answer 403
+#: insufficientPermissions without it).
+SCOPE_COMMENTS = "https://www.googleapis.com/auth/youtube.force-ssl"
+
+#: The scopes a NEW token is minted with (``tools/youtube_auth.py``). Only
+#: consent uses this list. A stored token is built and refreshed with the
+#: scopes stored in it (:func:`stored_scopes`), never with this constant:
+#: refreshing with a scope the token was never granted fails with
+#: ``invalid_scope``, which would stop the uploads of every token minted
+#: before force-ssl was added (D-032).
+SCOPES = [SCOPE_UPLOAD, SCOPE_YOUTUBE, SCOPE_COMMENTS]
+
+#: The scopes every token minted before D-032 was refreshed with. A stored
+#: token that records no scopes (teratomahouse's does not) keeps being built
+#: with exactly these, so its refresh request is what it was before.
+LEGACY_SCOPES = [SCOPE_UPLOAD, SCOPE_YOUTUBE]
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 #: Resumable chunk size, as video-publisher uses (10 MB).
@@ -54,8 +69,46 @@ class YouTubeApiError(RuntimeError):
         self.status = status
 
 
+def _scope_list(value):
+    """A scope list from a list of strings or one space-separated string;
+    None when ``value`` is neither or names nothing."""
+    if isinstance(value, str):
+        value = value.split()
+    if not isinstance(value, (list, tuple)):
+        return None
+    if not all(isinstance(v, str) for v in value):
+        return None
+    out = [v.strip() for v in value if v.strip()]
+    return out or None
+
+
+def stored_scopes(token):
+    """The scopes stored in a token dict, or None when it records none (or
+    records them in a shape we cannot read)."""
+    return _scope_list((token or {}).get("scopes"))
+
+
+def has_comment_scope(token):
+    """True only when the stored token records :data:`SCOPE_COMMENTS`. A token
+    that records no scopes is not assumed to have it."""
+    return SCOPE_COMMENTS in (stored_scopes(token) or [])
+
+
+def granted_scopes(creds):
+    """What to store for freshly minted credentials: the scopes Google says it
+    granted when it says, else the scopes the flow asked for."""
+    for attr in ("granted_scopes", "scopes"):
+        found = _scope_list(getattr(creds, attr, None))
+        if found:
+            return found
+    return list(SCOPES)
+
+
 def credentials_from_token(token):
-    """Google credentials from a stored token dict. No network call."""
+    """Google credentials from a stored token dict. No network call.
+
+    Built with the token's own stored scopes, never :data:`SCOPES`. A token
+    that records none is built with :data:`LEGACY_SCOPES`, as before D-032."""
     from google.oauth2.credentials import Credentials
     missing = [f for f in TOKEN_FIELDS if not token.get(f)]
     if missing:
@@ -63,7 +116,8 @@ def credentials_from_token(token):
     return Credentials(token=None, refresh_token=token["refresh_token"],
                        token_uri=token.get("token_uri") or TOKEN_URI,
                        client_id=token["client_id"],
-                       client_secret=token["client_secret"], scopes=SCOPES)
+                       client_secret=token["client_secret"],
+                       scopes=stored_scopes(token) or list(LEGACY_SCOPES))
 
 
 def refresh(creds):

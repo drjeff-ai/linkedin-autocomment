@@ -711,6 +711,21 @@ def token_problem(profile):
     return None
 
 
+def comment_scope_problem(profile):
+    """The refusal for a comment call, or None. Reads the token file only.
+
+    None also when the token is missing or unreadable: :func:`token_problem`
+    names that, and every Google call already refuses on it. A token that
+    records no scopes is refused here, since nothing shows it can comment."""
+    if token_problem(profile):
+        return None
+    if youtube_api.has_comment_scope(read_json(token_path(profile), {})):
+        return None
+    return ("the %s YouTube token cannot use comments (missing youtube.force-ssl). "
+            "Re-run: .venv\\Scripts\\python.exe tools\\youtube_auth.py --profile %s "
+            "--client-secrets <path>" % (profile, profile))
+
+
 def save_token(profile, token):
     write_json_atomic(token_path(profile), token)
 
