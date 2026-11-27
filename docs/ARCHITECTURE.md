@@ -1864,8 +1864,33 @@ other creators' videos from a watch list Jeff picks, and as replies under
 viewers' comments on our own Shorts. `youtube_engage.py` holds the path;
 `youtube_api.py` stays the only module that imports Google (the engagement
 reads and the two inserts were added there). V1's config, token, quota ledger,
-production gate and publisher lock are reused (§10.13). Nothing here is on a
-schedule, no scheduler job knows about it, and no automation is enabled.
+production gate and publisher lock are reused (§10.13). No scheduler job
+knows about it. Two Windows tasks per profile can run it (Y2-S, below); nothing
+ever approves a draft but a person.
+
+**The schedule (Y2-S, D-033, DEC-076).** `tools/setup_youtube_engage_tasks.ps1
+-Profile P [-Remove]`, which Jeff runs, registers
+`LinkedInCommentorYouTubeMorning-P` (daily 07:30, 20-minute limit:
+`youtube-morning --profile P --scheduled`) and `LinkedInCommentorYouTubeEngage-P`
+(daily from 08:00, every 15 minutes for 13 hours, 10-minute limit:
+`youtube-engage --profile P --scheduled`), both with `--log-file
+data\logs\youtube-engage.log`, uv by full path, the current user logged on,
+`StartWhenAvailable` and `IgnoreNew`, as the topup task. `--scheduled` refuses
+with exit 2, before the lock and any file or network, unless
+`engagement.auto_run` is `true`: `scheduled runs are off for P
+(engagement.auto_run is not true)`. Without the flag nothing changes.
+`youtube-morning` (`morning`) runs `find`, then `draft` with per-kind limits
+(`morning_limits`): video comments up to today's ramp cap, replies up to
+`MORNING_REPLY_DRAFTS` (5), each minus the drafts of that kind already
+waiting (GENERATED, approved or not), floored at 0. It prints one line with
+those counts. A refusal or error in find is printed and draft still runs; the
+exit is the most serious of the two. An engage run that posts nothing makes no
+Google call and spends no unit: no approved draft returns before a `_Google`
+session exists, then the window and the gap, then the per-record caps, all
+from the clock and local files; only a chosen record reaches `_post_one`.
+With `--log-file`, every printed line also goes to the file (a task has no
+console), so the log shows what was drafted, posted or refused and when the
+next comment is allowed.
 
 **Comment scope (Y1-S, D-032).** Every comment endpoint needs
 `youtube.force-ssl` in the stored token (§10.13). Before any network call,
@@ -1897,8 +1922,9 @@ the golden test parses; nothing reads the strategy repo at runtime.
 
 **Config.** `scheduled_posting.platforms.youtube.engagement`:
 `channel_name`, `channel_handle` (the validator's own-channel check; both
-missing is itself a refusal) and `watch_list`, a list of `{channel_id, title,
-subscribers, added_at}`. Unknown keys refuse, at both levels; a channel id must
+missing is itself a refusal), `watch_list`, a list of `{channel_id, title,
+subscribers, added_at}`, and `auto_run` (true or false, default false; any
+other type refuses), the `--scheduled` switch. Unknown keys refuse, at both levels; a channel id must
 be `UC` plus 22 characters and may appear once. V1's `CONFIG_KEYS` gained
 `engagement`, which publishing never reads. The watch list is edited by
 `youtube-watch --add/--remove` or the dashboard, through
@@ -1996,6 +2022,19 @@ Pacific date. Each pacing refusal carries the time the next comment is allowed.
 `api_usage.jsonl` before it is made (`_Google.spend`); a call that would go
 over the daily limit is not made. One comment costs 53 units with a one-page
 dedupe (1 identity + 1 dedupe + 50 insert + 1 verify), at most 55.
+
+*Verification anchor (11, Y2-S): 2026-11-27, branch `y2s-comment-schedule`;
+`tests/test_youtube_schedule.py` covers `auto_run` absent, false, true and six
+wrong types; `--scheduled` refusing engage and morning with a Google stand-in
+that fails on any use, no quota or paid-call line, and no ledger written, and
+proceeding when true; no approved draft, outside the window, inside the gap
+and over the cap each posting nothing with no Google use, and the stand-in
+failing a run that would post; morning's limits (waiting approved or not, the
+floor at 0, the ramp day), never approving, both refusals printed without
+force-ssl, draft after a find error, the dry run; the CLI routing,
+`--scheduled` refused on other commands, the log file getting each line once;
+and the task script parsed (both commands, triggers, repetition, limits,
+principal, `-Remove`), never run. Turning the gate off turns four red.*
 
 *Verification anchor (11, Y1-S): 2026-11-26, branch `y1s-comment-scope`;
 `tests/test_youtube_engage.py` covers the refusal text for the old two

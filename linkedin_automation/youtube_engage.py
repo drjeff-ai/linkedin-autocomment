@@ -87,6 +87,9 @@ LOOKBACK = timedelta(days=7)
 PLAYLIST_MAX_PAGES = 2
 #: Dedupe: pages of the video's threads (or the thread's replies) to search.
 DEDUPE_MAX_PAGES = 3
+#: Morning: replies on our own videos drafted ahead, minus those waiting (Y2-S).
+MORNING_REPLY_DRAFTS = 5
+
 #: Draft: top comments given to the generator as context.
 TOP_COMMENTS = 20
 TOP_COMMENT_CHARS = 300
@@ -119,7 +122,7 @@ REFUSE_PROMOTION = "promotion"
 REFUSE_ATTEMPT = "unresolved_attempt"
 
 ENGAGEMENT_KEY = "engagement"
-ENGAGEMENT_KEYS = {"channel_name", "channel_handle", "watch_list"}
+ENGAGEMENT_KEYS = {"channel_name", "channel_handle", "watch_list", "auto_run"}
 WATCH_KEYS = {"channel_id", "title", "subscribers", "added_at"}
 CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
 
@@ -141,6 +144,7 @@ class EngageConfig:
     watch_list: tuple        # ({channel_id, title, subscribers, added_at}, ...)
     daily_limit: int
     comment_units: int
+    auto_run: bool = False   # scheduled runs allowed (DEC-076); approval is still per item
 
 
 def _raw_engagement(cfg, profile):
@@ -163,6 +167,9 @@ def parse_engagement(raw, where="scheduled_posting.platforms.youtube.engagement"
     for key in ("channel_name", "channel_handle"):
         if key in raw and not isinstance(raw[key], str):
             raise EngageRefused("%s.%s must be text" % (where, key))
+    if "auto_run" in raw and not isinstance(raw["auto_run"], bool):
+        raise EngageRefused("%s.auto_run must be true or false, not %r"
+                            % (where, raw["auto_run"]))
     watch = raw.get("watch_list", [])
     if not isinstance(watch, list):
         raise EngageRefused("%s.watch_list must be a list" % where)
@@ -195,7 +202,8 @@ def engage_config(profile, profile_cfg=None) -> EngageConfig:
         channel_name=(raw.get("channel_name") or "").strip(),
         channel_handle=(raw.get("channel_handle") or "").strip(),
         watch_list=tuple(dict(e) for e in raw.get("watch_list", [])),
-        daily_limit=base.daily_limit, comment_units=base.comment_units)
+        daily_limit=base.daily_limit, comment_units=base.comment_units,
+        auto_run=raw.get("auto_run", False))
 
 
 def _edit_engagement(profile, mutate):
@@ -487,10 +495,20 @@ def approve_refusal(profile, rec, text):
 
 # ── command runner ──────────────────────────────────────────────────────────
 
-def _run(profile, name, dry_run, out, body):
-    """Config, the production gate, then ``body(ctx)`` under the channel's
-    publisher lock (shared with V1's uploads, which write the same quota
-    ledger). Returns ``(exit_code, summary)``."""
+def scheduled_refusal(profile, cfg):
+    """The ``--scheduled`` gate (DEC-076): a run from a Windows task goes
+    ahead only when the profile's engagement config says ``auto_run: true``.
+    Absent or false denies. None when it may run."""
+    if cfg.auto_run is True:
+        return None
+    return "scheduled runs are off for %s (engagement.auto_run is not true)" % profile
+
+
+def _run(profile, name, dry_run, out, body, scheduled=False):
+    """Config, the production gate, the ``--scheduled`` gate, then
+    ``body(ctx)`` under the channel's publisher lock (shared with V1's
+    uploads, which write the same quota ledger). Returns
+    ``(exit_code, summary)``."""
     tag = "youtube-%s %s%s" % (name, profile, " [dry-run]" if dry_run else "")
     summary = {"profile": profile, "command": name, "dry_run": dry_run, "lines": []}
 
@@ -517,6 +535,11 @@ def _run(profile, name, dry_run, out, body):
         return refuse(EXIT_REFUSED, str(exc))
     except pm.ProductionAccessRefused as exc:
         return refuse(EXIT_PRODUCTION_REFUSED, str(exc))
+    if scheduled:
+        # Before the lock and before any file or network: nothing is spent.
+        why = scheduled_refusal(profile, cfg)
+        if why:
+            return refuse(EXIT_REFUSED, why)
     ctx = _Ctx(profile=profile, cfg=cfg, dry_run=dry_run, tag=tag, emit=emit,
                refuse=refuse, summary=summary)
     try:
@@ -880,19 +903,36 @@ def default_generator(profile, variant):
                                      platform=PLATFORM, variant=variant)
 
 
+def _pick_new(new, limit, limits):
+    """The NEW records to draft, oldest first: at most ``limit`` in all, or
+    with ``limits`` (``{kind: n}``) at most n of each kind and none of a kind
+    it does not name."""
+    new = sorted(new, key=lambda r: r.get("scraped_at") or "")
+    if limits is None:
+        return new[:max(0, int(limit))]
+    left = {k: max(0, int(n)) for k, n in limits.items()}
+    todo = []
+    for r in new:
+        kind = (r.get("youtube") or {}).get("kind")
+        if left.get(kind, 0) > 0:
+            left[kind] -= 1
+            todo.append(r)
+    return todo
+
+
 def draft(profile, limit=5, dry_run=False, now=None, api=None, make_generator=None,
-          out=print):
-    """Draft NEW records into GENERATED, at most ``limit``. A draft that fails
-    the no-promotion validator is still stored, with the reason, and cannot be
-    approved until it is edited."""
+          out=print, limits=None):
+    """Draft NEW records into GENERATED, at most ``limit`` (or per kind, with
+    ``limits``, as the morning run does). A draft that fails the no-promotion
+    validator is still stored, with the reason, and cannot be approved until
+    it is edited."""
     now = now or datetime.now(timezone.utc)
     api = api or youtube_api
     make_generator = make_generator or default_generator
 
     def body(ctx):
         store = load_store(profile)
-        todo = sorted(store.by_status(post_store.NEW),
-                      key=lambda r: r.get("scraped_at") or "")[:max(0, int(limit))]
+        todo = _pick_new(store.by_status(post_store.NEW), limit, limits)
         if dry_run:
             for r in todo:
                 ctx.emit("  WOULD DRAFT: %s  %s" % (r["key"], (r.get("youtube") or {}).get("kind")))
@@ -1196,9 +1236,15 @@ def _resolve_attempt(profile, store, ledger, now, ctx):
              "retried. Check the video on YouTube." % att.get("key"))
 
 
-def engage(profile, dry_run=False, now=None, api=None, rng=None, out=print):
+def engage(profile, dry_run=False, now=None, api=None, rng=None, out=print,
+           scheduled=False):
     """Post at most ONE approved comment, if pacing allows; otherwise say
-    when the next one is allowed. No retry, no second comment in one call."""
+    when the next one is allowed. No retry, no second comment in one call.
+
+    A run that posts nothing makes no Google call and spends no unit (Y2-S):
+    no approved draft returns before ``_Google`` exists; the window and the
+    gap are checked next, from the clock and the ledger; the per-record caps
+    after that. Only a chosen record reaches ``_post_one``."""
     now = now or datetime.now(timezone.utc)
     api = api or youtube_api
     rng = rng or random.Random()
@@ -1282,7 +1328,7 @@ def engage(profile, dry_run=False, now=None, api=None, rng=None, out=print):
             return EXIT_OK, ctx.summary
         return _post_one(profile, ctx, store, ledger, key, now, api, rng)
 
-    return _run(profile, "engage", dry_run, out, body)
+    return _run(profile, "engage", dry_run, out, body, scheduled=scheduled)
 
 
 def _post_one(profile, ctx, store, ledger, key, now, api, rng):
@@ -1418,6 +1464,78 @@ def _entry(rec, now, outcome, comment_id, live):
             "video_id": yd.get("video_id"),
             "creator": yd.get("channel_id") if yd.get("kind") == KIND_VIDEO else None,
             "outcome": outcome, "comment_id": comment_id, "live": live}
+
+
+# ── youtube-morning (Y2-S, DEC-076) ─────────────────────────────────────────
+
+def waiting_drafts(store):
+    """GENERATED records, approved or not, by kind: drafted and not posted."""
+    out = {KIND_VIDEO: 0, KIND_REPLY: 0}
+    for r in store.by_status(post_store.GENERATED):
+        kind = (r.get("youtube") or {}).get("kind")
+        if kind in out:
+            out[kind] += 1
+    return out
+
+
+def morning_limits(ledger, store, now):
+    """``({kind: n}, counts)``: draft up to today's ramp cap of video comments
+    and ``MORNING_REPLY_DRAFTS`` replies, minus the drafts already waiting,
+    floored at 0."""
+    waiting = waiting_drafts(store)
+    cap = daily_cap(ledger, KIND_VIDEO, now)
+    limits = {KIND_VIDEO: max(0, cap - waiting[KIND_VIDEO]),
+              KIND_REPLY: max(0, MORNING_REPLY_DRAFTS - waiting[KIND_REPLY])}
+    counts = {"ramp_day": ramp_day(ledger, now), "cap": cap,
+              "waiting_videos": waiting[KIND_VIDEO], "waiting_replies": waiting[KIND_REPLY],
+              "reply_target": MORNING_REPLY_DRAFTS}
+    return limits, counts
+
+
+#: Which exit wins when find and draft disagree: the most serious.
+_EXIT_RANK = (EXIT_ERROR, EXIT_PRODUCTION_REFUSED, EXIT_REFUSED, EXIT_OK)
+
+
+def morning(profile, dry_run=False, now=None, api=None, make_generator=None,
+            out=print, scheduled=False):
+    """:func:`find`, then :func:`draft` with :func:`morning_limits`. It never
+    approves anything: drafts wait in Review for Jeff. A refusal or error in
+    find is printed and draft still runs, as each does alone; the exit is the
+    most serious of the two."""
+    now = now or datetime.now(timezone.utc)
+    tag = "youtube-morning %s%s" % (profile, " [dry-run]" if dry_run else "")
+    summary = {"profile": profile, "command": "morning", "dry_run": dry_run}
+
+    def refuse(msg):
+        line = "%s: REFUSED: %s" % (tag, msg)
+        logger.warning(line)
+        out(line)
+        summary["refused"] = msg
+        return EXIT_REFUSED, summary
+    try:
+        cfg = engage_config(profile)
+    except yt.YouTubeRefused as exc:
+        return refuse(str(exc))
+    if scheduled:
+        why = scheduled_refusal(profile, cfg)
+        if why:
+            return refuse(why)
+    find_code, summary["find"] = find(profile, dry_run=dry_run, now=now, api=api, out=out)
+    try:
+        limits, counts = morning_limits(load_ledger(profile), load_store(profile), now)
+    except yt.YouTubeRefused as exc:
+        code, _s = refuse(str(exc))
+        return min((find_code, code), key=_EXIT_RANK.index), summary
+    summary.update(limits=limits, counts=counts)
+    out("%s: ramp day %d, cap %d; %d video draft(s) waiting -> draft up to %d; "
+        "%d reply draft(s) waiting of %d -> draft up to %d"
+        % (tag, counts["ramp_day"], counts["cap"], counts["waiting_videos"],
+           limits[KIND_VIDEO], counts["waiting_replies"], counts["reply_target"],
+           limits[KIND_REPLY]))
+    draft_code, summary["draft"] = draft(profile, dry_run=dry_run, now=now, api=api,
+                                         make_generator=make_generator, out=out,
+                                         limits=limits)
+    return min((find_code, draft_code), key=_EXIT_RANK.index), summary
 
 
 # ── read-only status for the dashboard ──────────────────────────────────────

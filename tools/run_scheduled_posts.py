@@ -52,8 +52,8 @@ Instagram through Buffer (I1, linkedin_automation/instagram_channel.py):
                       with --platform instagram.
 
 YouTube commenting (Y1, linkedin_automation/youtube_engage.py, DEC-061). Same
-gate and lock. Nothing here is on a schedule, and engage posts at most one
-approved comment per run:
+gate and lock. engage posts at most one approved comment per run, and nothing
+here ever approves a draft:
 
     youtube-discover  --profile P --query Q [--dry-run]   suggest channels; adds nothing
     youtube-watch     --profile P [--add ID [--title T] | --remove ID]
@@ -61,8 +61,17 @@ approved comment per run:
     youtube-find      --profile P [--dry-run]   recent watch-list videos and
                       viewers' comments on our videos, as NEW
     youtube-draft     --profile P [--limit N] [--dry-run]   NEW -> GENERATED
-    youtube-engage    --profile P [--dry-run]   post one approved comment if
-                      pacing allows, else say when the next is allowed
+    youtube-engage    --profile P [--dry-run] [--scheduled]   post one approved
+                      comment if pacing allows, else say when the next is allowed
+    youtube-morning   --profile P [--dry-run] [--scheduled]   find, then draft up
+                      to today's cap minus the drafts already waiting
+
+On a schedule (Y2-S, DEC-076): the two Windows tasks from
+tools/setup_youtube_engage_tasks.ps1 run youtube-morning at 07:30 and
+youtube-engage every 15 minutes from 08:00, both with --scheduled, which
+refuses unless the profile's engagement config says auto_run: true. Approval
+stays a person's, per draft, in Review.
+
 `comment` is the one to put on a schedule - every 15 minutes is ample, since it
 does nothing for rows whose posts have not published yet.
 
@@ -149,20 +158,27 @@ def _books_command(ap, args):
     return code
 
 
-def _youtube_engage_command(ap, args, name):
+def _youtube_engage_command(ap, args, name, out=print):
     """The Y1 commands. Each returns its exit code."""
+    if args.scheduled and name not in ("engage", "morning"):
+        ap.error("--scheduled is for youtube-engage and youtube-morning only")
+    if name == "morning":
+        return ye.morning(args.profile, dry_run=args.dry_run,
+                          scheduled=args.scheduled, out=out)[0]
     if name == "discover":
         if not args.query:
             ap.error("youtube-discover needs --query")
-        return ye.discover(args.profile, args.query, dry_run=args.dry_run)[0]
+        return ye.discover(args.profile, args.query, dry_run=args.dry_run, out=out)[0]
     if name == "find":
-        return ye.find(args.profile, dry_run=args.dry_run)[0]
+        return ye.find(args.profile, dry_run=args.dry_run, out=out)[0]
     if name == "draft":
         if args.limit < 0:
             ap.error("--limit must be >= 0")
-        return ye.draft(args.profile, limit=args.limit, dry_run=args.dry_run)[0]
+        return ye.draft(args.profile, limit=args.limit, dry_run=args.dry_run,
+                        out=out)[0]
     if name == "engage":
-        return ye.engage(args.profile, dry_run=args.dry_run)[0]
+        return ye.engage(args.profile, dry_run=args.dry_run,
+                         scheduled=args.scheduled, out=out)[0]
     # watch
     if args.add and args.remove:
         ap.error("youtube-watch takes --add or --remove, not both")
@@ -188,6 +204,24 @@ def _youtube_engage_command(ap, args, name):
     return ye.EXIT_OK
 
 
+def _printer_that_also_logs(handler):
+    """``print``, plus the same line into the ``--log-file`` handler only.
+
+    A Windows task has no console, so a command's printed lines (what it
+    posted, what it refused, when the next comment is allowed) must also reach
+    the log file, or a scheduled run says nothing. The logger does not
+    propagate, so the console does not see each line twice."""
+    lines = logging.getLogger("run_scheduled_posts.out")
+    lines.propagate = False
+    lines.setLevel(logging.INFO)
+    lines.handlers = [handler]   # one run, one file
+
+    def out(line):
+        print(line)
+        lines.info(line)
+    return out
+
+
 def main():
     _make_output_unicode_safe()
     ap = argparse.ArgumentParser(
@@ -198,7 +232,7 @@ def main():
         "books", "add-book", "recheck-holds", "release-hold", "hold", "holds",
         "youtube-intake", "youtube-schedule", "youtube-status", "youtube-import",
         "youtube-cutover", "youtube-thumbnails", "youtube-discover", "youtube-watch", "youtube-find",
-        "youtube-draft", "youtube-engage", "instagram-from-youtube"])
+        "youtube-draft", "youtube-engage", "youtube-morning", "instagram-from-youtube"])
     ap.add_argument("--csv", help="the content calendar (schedule pass)")
     ap.add_argument("--channel-id",
                     help="Buffer channel id. Defaults to the resolved "
@@ -248,6 +282,10 @@ def main():
                     help="youtube-watch --add: the channel's title, shown in lists")
     ap.add_argument("--limit", type=int, default=5,
                     help="youtube-draft: draft at most N (default 5)")
+    ap.add_argument("--scheduled", action="store_true",
+                    help="youtube-engage / youtube-morning: a run from a "
+                         "Windows task; refuses unless engagement.auto_run is "
+                         "true for --profile")
     ap.add_argument("--log-file", default=None,
                     help="also append this run's log to this file")
     ap.add_argument("--verbose", action="store_true")
@@ -255,6 +293,7 @@ def main():
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+    out = print
     if args.log_file:
         parent = os.path.dirname(args.log_file)
         if parent:
@@ -263,6 +302,7 @@ def main():
         handler.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)s %(name)s %(message)s"))
         logging.getLogger().addHandler(handler)
+        out = _printer_that_also_logs(handler)
 
     if args.pass_name in ("books", "add-book", "recheck-holds", "release-hold",
                           "hold", "holds"):
@@ -280,8 +320,8 @@ def main():
         if args.max_uploads is not None and args.max_uploads < 0:
             ap.error("--max-uploads must be >= 0")
         name = args.pass_name[len("youtube-"):]
-        if name in ("discover", "watch", "find", "draft", "engage"):
-            return _youtube_engage_command(ap, args, name)
+        if name in ("discover", "watch", "find", "draft", "engage", "morning"):
+            return _youtube_engage_command(ap, args, name, out=out)
         if name == "schedule":
             code, _s = yt.schedule(args.profile, max_uploads=args.max_uploads,
                                    dry_run=args.dry_run)
