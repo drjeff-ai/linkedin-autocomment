@@ -122,7 +122,8 @@ REFUSE_PROMOTION = "promotion"
 REFUSE_ATTEMPT = "unresolved_attempt"
 
 ENGAGEMENT_KEY = "engagement"
-ENGAGEMENT_KEYS = {"channel_name", "channel_handle", "watch_list", "auto_run"}
+ENGAGEMENT_KEYS = {"channel_name", "channel_handle", "watch_list", "auto_run",
+                   "register"}
 WATCH_KEYS = {"channel_id", "title", "subscribers", "added_at"}
 CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
 
@@ -145,6 +146,7 @@ class EngageConfig:
     daily_limit: int
     comment_units: int
     auto_run: bool = False   # scheduled runs allowed (DEC-076); approval is still per item
+    register: str = platform_policy.DEFAULT_REGISTER   # the YouTube voice (DEC-077)
 
 
 def _raw_engagement(cfg, profile):
@@ -170,6 +172,11 @@ def parse_engagement(raw, where="scheduled_posting.platforms.youtube.engagement"
     if "auto_run" in raw and not isinstance(raw["auto_run"], bool):
         raise EngageRefused("%s.auto_run must be true or false, not %r"
                             % (where, raw["auto_run"]))
+    if "register" in raw:
+        known = platform_policy.register_names(PLATFORM)
+        if not isinstance(raw["register"], str) or raw["register"] not in known:
+            raise EngageRefused("%s.register is %r; known registers: %s"
+                                % (where, raw["register"], ", ".join(known)))
     watch = raw.get("watch_list", [])
     if not isinstance(watch, list):
         raise EngageRefused("%s.watch_list must be a list" % where)
@@ -203,7 +210,8 @@ def engage_config(profile, profile_cfg=None) -> EngageConfig:
         channel_handle=(raw.get("channel_handle") or "").strip(),
         watch_list=tuple(dict(e) for e in raw.get("watch_list", [])),
         daily_limit=base.daily_limit, comment_units=base.comment_units,
-        auto_run=raw.get("auto_run", False))
+        auto_run=raw.get("auto_run", False),
+        register=raw.get("register", platform_policy.DEFAULT_REGISTER))
 
 
 def _edit_engagement(profile, mutate):
@@ -469,14 +477,16 @@ def promotion_refusals(text, cfg, register):
     return out
 
 
-def register_for(rec):
+def register_for(rec, cfg):
+    """The register a draft is written and checked in: the profile's named
+    register (``cfg.register``), the reply variant for a reply."""
     variant = platform_policy.REPLY if (rec.get("youtube") or {}).get("kind") == KIND_REPLY else None
-    return platform_policy.policy_for(PLATFORM, variant).register
+    return platform_policy.policy_for(PLATFORM, variant, cfg.register).register
 
 
 def promotion_refusal(rec, cfg):
     """``"promotion: ..."`` for a draft that may not go out, else None."""
-    reasons = promotion_refusals(rec.get("comment"), cfg, register_for(rec))
+    reasons = promotion_refusals(rec.get("comment"), cfg, register_for(rec, cfg))
     return "%s: %s" % (REFUSE_PROMOTION, ", ".join(reasons)) if reasons else None
 
 
@@ -897,10 +907,15 @@ def _local_titles(profile):
             for r in (state.get("items") or {}).values() if r.get("video_id")}
 
 
-def default_generator(profile, variant):
+def default_generator(profile, variant, register_name=None):
+    """The shared generator in the profile's register (``engagement.register``,
+    read from config when not given)."""
     from .comment_generator import AuthenticCommentGenerator
+    if register_name is None:
+        register_name = engage_config(profile).register
     return AuthenticCommentGenerator("youtube-engage", profile_name=profile,
-                                     platform=PLATFORM, variant=variant)
+                                     platform=PLATFORM, variant=variant,
+                                     register_name=register_name)
 
 
 def _pick_new(new, limit, limits):
@@ -993,7 +1008,7 @@ def draft(profile, limit=5, dry_run=False, now=None, api=None, make_generator=No
                 failed.append((rec["key"], "the generator returned no draft"))
                 ctx.emit("  NO DRAFT: %s (left NEW)" % rec["key"])
                 continue
-            reasons = promotion_refusals(text, ctx.cfg, register_for(rec))
+            reasons = promotion_refusals(text, ctx.cfg, register_for(rec, ctx.cfg))
             meta = {"style": result.get("style"), "approach": result.get("approach"),
                     "word_count": result.get("word_count"),
                     "chars": len(text), "issues": result.get("issues") or [],

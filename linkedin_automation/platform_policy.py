@@ -416,6 +416,57 @@ _YOUTUBE_REPLY = replace(_YOUTUBE, register=replace(
 ))
 
 
+# ─── YouTube, Teratoma House's register (D-033 Y2-T, DEC-077) ────────────────
+#
+# Copied verbatim from the strategist's
+# ``content/engagement/youtube-register-teratomahouse.md`` (DEC-005). A profile
+# picks it with ``engagement.register: "teratomahouse"``; no ``register`` means
+# ``DEFAULT_REGISTER``, the policy above, unchanged.
+# ``tests/test_youtube_policy_golden.py`` compares every field with the copy in
+# ``tests/fixtures/engagement/``.
+
+_YOUTUBE_TERATOMAHOUSE = PlatformPolicy(
+    name=YOUTUBE,
+    length=LengthPolicy(
+        unit='chars',
+        preferred=(20, 250),
+        hard_max=400,
+        hard_max_is_postable_limit=False,
+        buckets=('Very short - 20-70 characters (one gut reaction to one moment)', 'Short - 70-150 characters (one clear reaction or theory)', 'Medium - 150-250 characters (a theory plus the detail behind it)', 'Longer - 250-350 characters (a real question or a small personal moment)'),
+        bucket_weights=(0.35, 0.4, 0.2, 0.05),
+        typical_cap_phrase='under 150 characters (most of the time)',
+        aim_below=250,
+    ),
+    register=Register(
+        surface='YouTube',
+        article='a',
+        item='video',
+        item_plural='videos',
+        action='comment',
+        action_plural='comments',
+        system_voice="You're a horror fan leaving a comment under a scary story or short you just watched. Write like a viewer talking to the creator and the other viewers: direct, specific, a little unsettled. Keep it short.",
+        voice_identity='a horror fan reacting to this one video',
+        banned_openers=('Great video', 'Great content', 'Awesome video', 'Thanks for sharing', 'Love this', 'Amazing', 'This gave me chills', "I'm not scared but", 'Who else is watching'),
+        tone_rule='Genuine and a little playful. Curious beats clever. Never mean to the creator, never dismissive of the genre, never a pitch.',
+        sentence_style='- Mix short and medium sentences\n- Plain words, the way people actually talk in a comment section\n- Commas and periods, never dashes as punctuation\n- A fragment is fine when it lands',
+        tone_balance="TONE BALANCE:\n- 45% a reaction to one specific moment, detail or rule\n- 30% a theory or a question about what was really going on\n- 25% a small relatable moment (the thing you'd now check at night)",
+        opening_styles='- Name the moment: "the second voicemail is what got me"\n- A theory: "pretty sure the neighbor was never the neighbor"\n- A question: "was the drawing there before they moved in"\n- A relatable moment: "now i\'m checking my own delivery photos"\n- Spot the detail: "the clock in the background changes, right"',
+        overuse_guidance="Avoid overusing:\n- Opening with how scared you were\n- Ending every comment with a question\n- Restating the video's title\n- The words creepy, chills and goosebumps",
+        craft_rules="1. React to ONE specific thing from the video's title, description or chapters, never to the video in general\n2. Keep {cap}\n3. Only ask a question or float a theory you would actually want answered\n4. A small personal moment only when it fits (about 25% of comments), and never a made-up encounter presented as real\n5. Be specific or say less\n6. Never mention our channel, our videos, or that we make videos\n7. No links, no hashtags, no @-mentions, no calls to subscribe or watch anything\n8. No summarising the story back to the creator, and no spoiling the ending for people reading the comments first",
+        good_question_endings='"was the drawing there before they moved in"\n"did anyone else catch the time stamp"\n"is this the same house as the last one"\n"why does the alert repeat at the end"',
+        short_examples='"the second voicemail is what got me"\n"pretty sure the neighbor was never the neighbor"\n"rule 7 contradicting rule 2 is the scariest part"\n"now i\'m checking my own delivery photos"\n"did anyone else catch the clock changing"',
+        extra_rules="\n\nTHIS IS A YOUTUBE COMMENT UNDER SOMEONE ELSE'S HORROR VIDEO:\n- You are a viewer, not a creator. Nothing in the comment may promote anything.\n- No greeting, no sign-off, no 'great video' opener.\n- Never claim you watched a part the input does not describe. If only the title and description are known, react to those.\n- Never claim a real paranormal experience, and never treat a fictional story as real news.\n- No gore, no slurs, nothing about real tragedies or real people being harmed.\n- One thought. Stop when it lands.\n- At most one emoji, and only if it fits.",
+    ),
+    input_chars=3000,
+)
+
+_YOUTUBE_TERATOMAHOUSE_REPLY = replace(_YOUTUBE_TERATOMAHOUSE, register=replace(
+    _YOUTUBE_TERATOMAHOUSE.register,
+    system_voice="You're the creator of this horror Short, replying to a viewer's comment. Short, warm, a little in character, specific to what they said.",
+    extra_rules="\n\nTHIS IS A REPLY TO A VIEWER ON YOUR OWN VIDEO:\n- Answer what they said, nothing else.\n- If they float a theory, you may hint, but never confirm or explain the ending.\n- No 'thanks for watching', no ask to subscribe, no link to another video.\n- Never argue. If they disagree, acknowledge the point once.",
+))
+
+
 # ─── Instagram (D-027 E2) ─────────────────────────────────────────────────────
 #
 # Copied verbatim from the strategist's register,
@@ -469,8 +520,24 @@ PLATFORMS = {LINKEDIN: _LINKEDIN, X: _X, YOUTUBE: _YOUTUBE, INSTAGRAM: _INSTAGRA
 REPLY = "reply"
 VARIANTS = {(YOUTUBE, REPLY): _YOUTUBE_REPLY}
 
+#: A named register is a whole second voice for one platform, chosen per
+#: profile (DEC-077): ``{(platform, name): {variant or None: policy}}``.
+#: ``DEFAULT_REGISTER`` (or no name) is ``PLATFORMS``/``VARIANTS`` above.
+DEFAULT_REGISTER = "default"
+NAMED_REGISTERS = {
+    (YOUTUBE, "teratomahouse"): {None: _YOUTUBE_TERATOMAHOUSE,
+                                 REPLY: _YOUTUBE_TERATOMAHOUSE_REPLY},
+}
 
-def policy_for(platform: str, variant: str = None) -> PlatformPolicy:
+
+def register_names(platform: str) -> Tuple[str, ...]:
+    """The register names a profile may pick on ``platform``."""
+    return (DEFAULT_REGISTER,) + tuple(sorted(
+        name for (plat, name) in NAMED_REGISTERS if plat == platform))
+
+
+def policy_for(platform: str, variant: str = None,
+               register_name: str = None) -> PlatformPolicy:
     """Return the declared policy for ``platform``. **Required — never defaults.**
 
     Raises :class:`UnknownPlatform` for an unknown or empty value rather than
@@ -481,7 +548,21 @@ def policy_for(platform: str, variant: str = None) -> PlatformPolicy:
     ``variant`` names a second declared voice on the platform (``REPLY`` on
     YouTube). An undeclared variant raises too; it never falls back to the
     platform's main voice.
+
+    ``register_name`` picks a named register (``NAMED_REGISTERS``); None or
+    ``DEFAULT_REGISTER`` is the platform's own. An unknown name raises.
     """
+    if register_name not in (None, DEFAULT_REGISTER):
+        named = NAMED_REGISTERS.get((platform, register_name))
+        if named is None:
+            raise UnknownPlatform(
+                f"no register {register_name!r} declared for platform {platform!r}; "
+                f"known: {', '.join(register_names(platform))}")
+        if variant not in named:
+            raise UnknownPlatform(
+                f"no {variant!r} variant declared for register {register_name!r} "
+                f"on platform {platform!r}")
+        return named[variant]
     if variant:
         try:
             return VARIANTS[(platform, variant)]

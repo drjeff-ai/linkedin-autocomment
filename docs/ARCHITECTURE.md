@@ -1920,11 +1920,25 @@ generator's opener check lowers them (X's were already lower case: no change
 there). `tests/fixtures/engagement/youtube-register.md` is the build-time copy
 the golden test parses; nothing reads the strategy repo at runtime.
 
+**Named registers (Y2-T, D-033, DEC-077).** A profile picks its YouTube voice
+with `engagement.register`. Absent or `"default"` is the policy above,
+unchanged. `"teratomahouse"` is `content/engagement/youtube-register-teratomahouse.md`,
+copied verbatim (DEC-005), with its own-video reply variant.
+`platform_policy.NAMED_REGISTERS` holds them as `{(platform, name): {variant:
+policy}}`. `policy_for(platform, variant, register_name)` returns one, and an
+unknown name or variant raises, never falls back. `register_names(platform)`
+lists the names the config may use; any other value refuses at config load.
+`AuthenticCommentGenerator(..., register_name=)` and `default_generator` build
+in the profile's register. `register_for(rec, cfg)` gives the no-promotion
+validator the same register's banned openers, at draft, approve and engage.
+The fixture copy is `tests/fixtures/engagement/youtube-register-teratomahouse.md`.
+
 **Config.** `scheduled_posting.platforms.youtube.engagement`:
 `channel_name`, `channel_handle` (the validator's own-channel check; both
 missing is itself a refusal), `watch_list`, a list of `{channel_id, title,
-subscribers, added_at}`, and `auto_run` (true or false, default false; any
-other type refuses), the `--scheduled` switch. Unknown keys refuse, at both levels; a channel id must
+subscribers, added_at}`, `auto_run` (true or false, default false; any
+other type refuses), the `--scheduled` switch, and `register` (a name from
+`register_names("youtube")`, default `"default"`). Unknown keys refuse, at both levels; a channel id must
 be `UC` plus 22 characters and may appear once. V1's `CONFIG_KEYS` gained
 `engagement`, which publishing never reads. The watch list is edited by
 `youtube-watch --add/--remove` or the dashboard, through
@@ -2022,6 +2036,17 @@ Pacific date. Each pacing refusal carries the time the next comment is allowed.
 `api_usage.jsonl` before it is made (`_Google.spend`); a call that would go
 over the daily limit is not made. One comment costs 53 units with a one-page
 dedupe (1 identity + 1 dedupe + 50 insert + 1 verify), at most 55.
+
+*Verification anchor (11, Y2-T): 2026-11-27, branch `y2t-teratoma-comments`;
+`tests/test_youtube_register_teratomahouse.py` compares every length and
+register field and the reply variant's two fields with the fixture copy,
+spot-checks raw text, refuses unknown names and variants, refuses six bad
+`register` values at config load, and drives the validator, generator, draft
+and prompt in the named register. `tests/test_youtube_policy_golden.py`,
+unchanged, still pins Top Five's register and LinkedIn and X.
+`tests/test_youtube_api.py` covers `my_channel_snippet`. Live, teratomahouse:
+`channels.list part=snippet mine=true` answered `UCB-uYMWucCp50Uq0dvuOOGA`,
+"Teratoma House", `@teratomahouse`; 6 of 14 candidates resolved and were added.*
 
 *Verification anchor (11, Y2-S): 2026-11-27, branch `y2s-comment-schedule`;
 `tests/test_youtube_schedule.py` covers `auto_run` absent, false, true and six

@@ -176,6 +176,21 @@ def my_channel_id(service):
     return ids[0]
 
 
+def my_channel_snippet(service):
+    """``channels.list part=snippet mine=true`` (1 quota unit): the channel the
+    token answers for, as ``{channel_id, title, handle}``. ``handle`` is the
+    snippet's ``customUrl`` (``@name``), or "" when the channel has none.
+    Raises :class:`YouTubeApiError` when there is not exactly one channel."""
+    resp = _call(service.channels().list(part="snippet", mine=True), "channels.list")
+    items = [i for i in resp.get("items") or [] if i.get("id")]
+    if len(items) != 1:
+        raise YouTubeApiError("the token answers for %d channels, expected one"
+                              % len(items))
+    sn = items[0].get("snippet") or {}
+    return {"channel_id": items[0]["id"], "title": sn.get("title") or "",
+            "handle": sn.get("customUrl") or ""}
+
+
 def upload(service, media_path, body):
     """One resumable ``videos.insert``. Returns the new video id.
 

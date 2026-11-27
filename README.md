@@ -342,7 +342,9 @@ for the counts.** Files on disk are derived output, never state.
 - Comments as the channel on watch-list creators' videos, and replies to
   viewers on our own Shorts, through the API (docs/ARCHITECTURE.md §11). Set
   `scheduled_posting.platforms.youtube.engagement.channel_name` and
-  `channel_handle` first: the no-promotion check needs them.
+  `channel_handle` first: the no-promotion check needs them. Optional
+  `engagement.register` picks the voice: `"default"` (Top Five's) or
+  `"teratomahouse"`.
 - `youtube-discover --profile <p> --query "<q>" [--dry-run]` suggests channels
   (100 quota units) and adds nothing. `youtube-watch --profile <p>
   [--add <channel id> [--title T] | --remove <channel id>]` shows or edits the
