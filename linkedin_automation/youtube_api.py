@@ -248,22 +248,41 @@ def channels_info(service, channel_ids):
     resp = _call(service.channels().list(part="snippet,statistics,contentDetails",
                                          id=",".join(channel_ids), maxResults=50),
                  "channels.list")
-    out = {}
-    for item in resp.get("items") or []:
-        stats = item.get("statistics") or {}
-        subs = None
-        if not stats.get("hiddenSubscriberCount") and stats.get("subscriberCount") is not None:
-            try:
-                subs = int(stats["subscriberCount"])
-            except (TypeError, ValueError):
-                subs = None
-        related = (item.get("contentDetails") or {}).get("relatedPlaylists") or {}
-        out[item.get("id")] = {
-            "title": (item.get("snippet") or {}).get("title") or "",
-            "subscribers": subs,
-            "uploads_playlist": related.get("uploads"),
-        }
-    return out
+    return {item.get("id"): _channel_entry(item) for item in resp.get("items") or []}
+
+
+def _channel_entry(item):
+    stats = item.get("statistics") or {}
+    subs = None
+    if not stats.get("hiddenSubscriberCount") and stats.get("subscriberCount") is not None:
+        try:
+            subs = int(stats["subscriberCount"])
+        except (TypeError, ValueError):
+            subs = None
+    related = (item.get("contentDetails") or {}).get("relatedPlaylists") or {}
+    return {
+        "title": (item.get("snippet") or {}).get("title") or "",
+        "subscribers": subs,
+        "uploads_playlist": related.get("uploads"),
+    }
+
+
+def channel_by_handle(service, handle):
+    """``channels.list forHandle=...`` (1 unit). ``{channel_id, title,
+    subscribers, uploads_playlist}``, or None when no channel has that handle.
+    ``handle`` may carry its leading ``@``; Google accepts both."""
+    handle = (handle or "").strip()
+    if not handle or handle == "@":
+        raise YouTubeApiError("channels.list forHandle needs a handle")
+    resp = _call(service.channels().list(part="snippet,statistics,contentDetails",
+                                         forHandle=handle), "channels.list")
+    items = [i for i in resp.get("items") or [] if i.get("id")]
+    if not items:
+        return None
+    if len(items) > 1:
+        raise YouTubeApiError("channels.list forHandle=%s returned %d channels, "
+                              "expected at most one" % (handle, len(items)))
+    return dict(channel_id=items[0]["id"], **_channel_entry(items[0]))
 
 
 def playlist_page(service, playlist_id, page_token=None):
